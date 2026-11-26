@@ -4,13 +4,18 @@ import {
   getSavedDPJProfile,
   syncFacilityProfileToServer
 } from '../components/PharmacySettingsModal';
+import { demoGetItem, demoSetItem, isDemoMode } from './demoSandbox';
 
 /**
  * Universal print window helper that opens a clean top-level tab
  * to bypass iframe sandbox restrictions (e.g. 'Ignored call to print()')
  */
 export function openPrintWindow(mode: string, params: Record<string, string> = {}) {
+  const demoActive = isDemoMode();
   const searchParams = new URLSearchParams({ print: mode, ...params });
+  if (demoActive && !searchParams.get('mode')) {
+    searchParams.set('mode', 'demo');
+  }
 
   try {
     const pharmProfile = getSavedPharmacyProfile();
@@ -19,26 +24,30 @@ export function openPrintWindow(mode: string, params: Record<string, string> = {
 
     if (pharmProfile.logoUrl) {
       try {
-        localStorage.setItem('latisha_facility_logo', pharmProfile.logoUrl);
+        demoSetItem('latisha_facility_logo', pharmProfile.logoUrl);
       } catch {}
     }
 
-    syncFacilityProfileToServer({
-      pharmacy: pharmProfile,
-      apj: apjProfile,
-      dpj: dpjProfile
-    });
+    if (!demoActive) {
+      syncFacilityProfileToServer({
+        pharmacy: pharmProfile,
+        apj: apjProfile,
+        dpj: dpjProfile
+      });
+    }
 
     const { logoUrl, ...pharmWithoutLogo } = pharmProfile;
     const pharmForUrl = logoUrl
-      ? { ...pharmWithoutLogo, logoUrl: `/api/facility-logo?t=${Date.now()}` }
+      ? demoActive
+        ? pharmProfile
+        : { ...pharmWithoutLogo, logoUrl: `/api/facility-logo?t=${Date.now()}` }
       : pharmWithoutLogo;
 
     searchParams.set('_pharm', JSON.stringify(pharmForUrl));
     searchParams.set('_apj', JSON.stringify(apjProfile));
     searchParams.set('_dpj', JSON.stringify(dpjProfile));
 
-    const savedUserName = localStorage.getItem('latisha_user_name');
+    const savedUserName = demoGetItem('latisha_user_name');
     if (savedUserName && !searchParams.get('petugas')) {
       searchParams.set('petugas', savedUserName);
     }
@@ -55,21 +64,28 @@ export function openPrintWindow(mode: string, params: Record<string, string> = {
       'kartu-pasien': 'latisha_active_print_patient',
       'nota-retur': 'latisha_active_print_retur',
       'retur-pembelian': 'latisha_active_print_retur',
-      'telaah-drp': 'latisha_active_print_drp'
+      'telaah-drp': 'latisha_active_print_drp',
+      'skrining-resep': 'latisha_active_print_skrining',
+      'etiket-obat': 'latisha_active_print_etiket'
     };
     const storageKey = payloadKeyMap[mode];
     if (storageKey) {
-      const rawPayload = localStorage.getItem(storageKey);
+      const rawPayload =
+        (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(storageKey) : null) ||
+        demoGetItem(storageKey);
       if (rawPayload) {
-        try {
-          fetch('/api/print-payload', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key: storageKey, payload: rawPayload })
-          }).catch(() => {});
-        } catch {}
+        if (!demoActive) {
+          try {
+            fetch('/api/print-payload', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              keepalive: true,
+              body: JSON.stringify({ key: storageKey, payload: rawPayload })
+            }).catch(() => {});
+          } catch {}
+        }
 
-        if (rawPayload.length < 200) {
+        if (rawPayload.length < 8000) {
           searchParams.set('_payload', rawPayload);
         }
       }

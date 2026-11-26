@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Globe,
   CheckCircle2,
@@ -10,48 +10,114 @@ import {
   QrCode,
   ShieldAlert,
   Send,
-  Plus
+  Plus,
+  ExternalLink,
+  Copy
 } from 'lucide-react';
-import { OnlineRegistration, Patient, Doctor, PatientQueue } from '../types';
+import { OnlineRegistration, Patient, Doctor, PatientQueue, DutySchedule } from '../types';
+import { PublicPatientRegistration } from './PublicPatientRegistration';
+import {
+  getSupabaseConfig,
+  setSupabaseConfig,
+  SUPABASE_ONLINE_REG_SQL_SCHEMA,
+  SUPABASE_PATIEN_SQL_SCHEMA
+} from '../utils/supabaseClient';
+import { useIsOwnerAdmin } from '../utils/roleAccess';
+import { Database, RefreshCw, Check, AlertTriangle, Code } from 'lucide-react';
+import { getDemoBroadcastChannelName, isDemoMode } from '../utils/demoSandbox';
+import { PortalQRGeneratorModal } from './PortalQRGeneratorModal';
 
 interface OnlineRegistrationViewProps {
   registrations: OnlineRegistration[];
+  schedules?: DutySchedule[];
   onAddRegistration: (reg: OnlineRegistration) => void;
   onUpdateStatus: (id: string, status: OnlineRegistration['status']) => void;
   onAcceptToQueue: (reg: OnlineRegistration) => void;
   doctors: Doctor[];
   patients: Patient[];
+  onReloadFromSupabase?: () => Promise<{ success: boolean; count?: number; error?: string }>;
 }
 
 export const OnlineRegistrationView: React.FC<OnlineRegistrationViewProps> = ({
   registrations,
+  schedules,
   onAddRegistration,
   onUpdateStatus,
   onAcceptToQueue,
   doctors,
-  patients
+  patients,
+  onReloadFromSupabase
 }) => {
-  const [activeSubTab, setActiveSubTab] = useState<'verifikasi' | 'portal-publik'>('verifikasi');
+  const [activeSubTab, setActiveSubTab] = useState<'verifikasi' | 'portal'>('verifikasi');
   const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState<string>('SEMUA');
-  const [submittedBooking, setSubmittedBooking] = useState<OnlineRegistration | null>(null);
+  const [statusFilter, setStatusFilter] = useState('SEMUA');
+  const [copiedLink, setCopiedLink] = useState(false);
 
-  // Form State for Online Registration Form
-  const [form, setForm] = useState({
-    nik: '',
-    name: '',
-    phone: '',
-    birthDate: '1995-06-15',
-    gender: 'Laki-laki' as 'Laki-laki' | 'Perempuan',
-    address: '',
-    appointmentDate: new Date().toISOString().split('T')[0],
-    appointmentTime: '09:00',
-    doctorId: doctors[0]?.id || 'DOC-001',
-    serviceType: 'Poli Umum',
-    paymentType: 'Umum / Mandiri' as OnlineRegistration['paymentType'],
-    complaint: '',
-    allergy: 'Tidak Ada'
-  });
+  const isOwnerAdmin = useIsOwnerAdmin();
+  const [showConfigModal, setShowConfigModal] = useState(false);
+  const [supabaseConfig, setConfigState] = useState(getSupabaseConfig());
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncStatusMsg, setSyncStatusMsg] = useState<{ text: string; isError?: boolean } | null>(null);
+  const [copiedSchema, setCopiedSchema] = useState(false);
+  const [showQrModal, setShowQrModal] = useState(false);
+
+  const isSupabaseConfigured = Boolean(supabaseConfig.url && supabaseConfig.key);
+
+  useEffect(() => {
+    // Listen to real-time events from public registration standalone page (BroadcastChannel)
+    if ('BroadcastChannel' in window) {
+      const bc = new BroadcastChannel(getDemoBroadcastChannelName('latisha_online_registration_channel'));
+      bc.onmessage = (event) => {
+        if (event.data?.type === 'NEW_REGISTRATION' && event.data?.payload) {
+          onAddRegistration(event.data.payload);
+        }
+      };
+      return () => bc.close();
+    }
+  }, [onAddRegistration]);
+
+  const handleManualSync = async () => {
+    if (!onReloadFromSupabase) return;
+    setIsSyncing(true);
+    setSyncStatusMsg(null);
+    try {
+      const res = await onReloadFromSupabase();
+      if (res.success) {
+        setSyncStatusMsg({ text: `Sinkronisasi berhasil! Memuat ${res.count ?? 0} pendaftaran online dari Supabase.` });
+      } else {
+        setSyncStatusMsg({ text: res.error || 'Gagal menarik data pendaftaran online dari Supabase', isError: true });
+      }
+    } catch (err: any) {
+      setSyncStatusMsg({ text: err?.message || 'Koneksi ke Supabase gagal', isError: true });
+    } finally {
+      setIsSyncing(false);
+      setTimeout(() => setSyncStatusMsg(null), 4000);
+    }
+  };
+
+  const handleSaveConfig = (e: React.FormEvent) => {
+    e.preventDefault();
+    setSupabaseConfig(supabaseConfig);
+    setShowConfigModal(false);
+    if (onReloadFromSupabase && supabaseConfig.url && supabaseConfig.key) {
+      handleManualSync();
+    }
+  };
+
+  const handleCopySchema = () => {
+    navigator.clipboard.writeText(SUPABASE_ONLINE_REG_SQL_SCHEMA);
+    setCopiedSchema(true);
+    setTimeout(() => setCopiedSchema(false), 2500);
+  };
+
+  const handleCopyPortalLink = () => {
+    const demoQuery = isDemoMode() ? '&mode=demo' : '';
+    const fullUrl = `${window.location.origin}/?view=portal-pelanggan&tab=pasien${demoQuery}`;
+    navigator.clipboard?.writeText(fullUrl).then(() => {
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 3000);
+    });
+  };
 
   const filteredRegistrations = registrations.filter((reg) => {
     const matchSearch =
@@ -62,30 +128,6 @@ export const OnlineRegistrationView: React.FC<OnlineRegistrationViewProps> = ({
     const matchStatus = statusFilter === 'SEMUA' || reg.status === statusFilter;
     return matchSearch && matchStatus;
   });
-
-  const handlePublicSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!form.name || !form.nik || !form.phone) {
-      alert('Mohon lengkapi data NIK, Nama, dan Nomor WhatsApp!');
-      return;
-    }
-
-    const doc = doctors.find((d) => d.id === form.doctorId);
-    const bookingCode = `LTF-${Math.floor(10000 + Math.random() * 90000)}`;
-
-    const newReg: OnlineRegistration = {
-      id: `REG-${Date.now().toString().slice(-6)}`,
-      bookingCode,
-      ...form,
-      doctorName: doc?.name || 'dr. Anis Prima Dewi',
-      status: 'Menunggu Verifikasi',
-      createdAt: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
-      branchId: 'BR-01'
-    };
-
-    onAddRegistration(newReg);
-    setSubmittedBooking(newReg);
-  };
 
   return (
     <div className="space-y-4">
@@ -108,18 +150,105 @@ export const OnlineRegistrationView: React.FC<OnlineRegistrationViewProps> = ({
           </button>
 
           <button
-            onClick={() => setActiveSubTab('portal-publik')}
+            onClick={() => setActiveSubTab('portal')}
             className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors flex items-center gap-2 ${
-              activeSubTab === 'portal-publik'
+              activeSubTab === 'portal'
                 ? 'bg-sky-600 text-white shadow-xs'
                 : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
             }`}
           >
             <Globe className="w-4 h-4" />
-            <span>Simulasi Portal Pendaftaran Mandiri Pasien</span>
+            <span>Pratinjau Portal Mandiri Pasien</span>
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {/* Supabase Live Status Badge & Actions */}
+          <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl text-xs">
+            <span className="flex h-2.5 w-2.5 relative">
+              {isSupabaseConfigured && (
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              )}
+              <span
+                className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
+                  isSupabaseConfigured ? 'bg-emerald-500' : 'bg-slate-300'
+                }`}
+              ></span>
+            </span>
+            <span className="text-[11px] font-bold text-slate-700">
+              {isSupabaseConfigured ? 'Supabase Live' : 'Supabase Offline'}
+            </span>
+            <button
+              onClick={handleManualSync}
+              disabled={isSyncing || !isSupabaseConfigured}
+              title="Tarik data terbaru pendaftaran online dari Supabase"
+              className={`ml-1 p-1 rounded-md text-slate-600 hover:text-sky-600 hover:bg-white transition ${
+                isSyncing ? 'animate-spin text-sky-600' : ''
+              } ${!isSupabaseConfigured ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
+            {isOwnerAdmin && (
+              <button
+                onClick={() => setShowConfigModal(true)}
+                title="Pengaturan Koneksi & Skema SQL Supabase Pendaftaran Online"
+                className="p-1 rounded-md text-slate-600 hover:text-sky-600 hover:bg-white transition cursor-pointer"
+              >
+                <Database className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setShowQrModal(true)}
+            className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-xs cursor-pointer"
+            title="Buat, Unduh & Cetak QR Code Portal Pasien & Pelanggan"
+          >
+            <QrCode className="w-3.5 h-3.5 text-emerald-400" />
+            <span>QR &amp; Poster Apotek</span>
+          </button>
+
+          <a
+            href={`/?view=portal-pelanggan&tab=pasien${isDemoMode() ? '&mode=demo' : ''}`}
+            target="_blank"
+            rel="noreferrer"
+            className="px-3 py-2 bg-gradient-to-r from-emerald-600 to-teal-700 hover:from-emerald-700 hover:to-teal-800 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-xs"
+            title="Buka Aplikasi Pelanggan & Pasien Terpadu di Tab Baru"
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+            <span>Buka Portal Pasien (PWA)</span>
+          </a>
+
+          <button
+            type="button"
+            onClick={handleCopyPortalLink}
+            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-slate-200 cursor-pointer"
+            title="Salin Tautan Publik untuk Dibagikan ke WhatsApp / Pasien"
+          >
+            <Copy className="w-3.5 h-3.5" />
+            <span>{copiedLink ? 'Tersalin!' : 'Salin Link Pasien'}</span>
           </button>
         </div>
       </div>
+
+      {/* Sync Status Banner if any */}
+      {syncStatusMsg && (
+        <div
+          className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition ${
+            syncStatusMsg.isError
+              ? 'bg-rose-50 text-rose-700 border border-rose-200'
+              : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+          }`}
+        >
+          {syncStatusMsg.isError ? (
+            <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+          )}
+          <span>{syncStatusMsg.text}</span>
+        </div>
+      )}
 
       {activeSubTab === 'verifikasi' ? (
         <div className="space-y-4">
@@ -153,7 +282,8 @@ export const OnlineRegistrationView: React.FC<OnlineRegistrationViewProps> = ({
 
           {/* Registrations List */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
-            <table className="w-full text-left text-xs border-collapse">
+            <div className="overflow-x-auto w-full custom-scrollbar">
+              <table className="w-full min-w-[780px] text-left text-xs border-collapse">
               <thead className="bg-slate-50 border-b border-slate-200 font-bold uppercase text-slate-600 text-[11px]">
                 <tr>
                   <th className="p-3">Kode Booking & Waktu</th>
@@ -254,224 +384,180 @@ export const OnlineRegistrationView: React.FC<OnlineRegistrationViewProps> = ({
                   ))
                 )}
               </tbody>
-            </table>
+              </table>
+            </div>
           </div>
         </div>
       ) : (
-        /* Public Facing Self-Registration Form */
-        <div className="max-w-2xl mx-auto bg-white p-8 rounded-3xl border border-slate-200 shadow-md space-y-6">
-          <div className="border-b border-slate-200 pb-4 text-center">
-            <h2 className="text-xl font-extrabold text-slate-900 tracking-tight">
-              Pendaftaran Pasien Online Latisha Farma
-            </h2>
-            <p className="text-xs text-slate-500 mt-1">
-              Daftar berobat praktis dari rumah tanpa antre lama. Dapatkan kode booking & nomor antrean langsung.
-            </p>
-          </div>
+        /* Public Patient Registration View */
+        <PublicPatientRegistration
+          embedded
+          schedules={schedules}
+          patients={patients}
+          onBackToDashboard={() => setActiveSubTab('verifikasi')}
+          onNewRegistrationSuccess={(reg) => {
+            onAddRegistration(reg);
+          }}
+        />
+      )}
 
-          {submittedBooking ? (
-            <div className="p-6 bg-emerald-50 border border-emerald-200 rounded-3xl text-center space-y-4">
-              <CheckCircle2 className="w-12 h-12 text-emerald-600 mx-auto" />
-              <div>
-                <h3 className="text-lg font-black text-emerald-900">
-                  Pendaftaran Berhasil Dikirim!
-                </h3>
-                <p className="text-xs text-emerald-700 mt-0.5">
-                  Simpan kode booking Anda untuk ditunjukkan kepada petugas resepsionis.
+      {/* Supabase Connection & SQL Schema Modal for Online Registrations */}
+      {isOwnerAdmin && showConfigModal && (
+        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl w-full max-w-2xl shadow-2xl overflow-hidden border border-slate-200 max-h-[90vh] flex flex-col">
+            <div className="p-5 border-b border-slate-200 flex items-center justify-between bg-slate-900 text-white">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-emerald-500/20 text-emerald-400 rounded-xl">
+                  <Database className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm">Integrasi Supabase Pendaftaran Online</h3>
+                  <p className="text-[11px] text-slate-400">Sinkronisasi Real-time Pendaftaran Pasien Mandiri (Smartphone/Public)</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowConfigModal(false)}
+                className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition cursor-pointer"
+              >
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-5 text-xs">
+              <div className="bg-sky-50 border border-sky-200 rounded-2xl p-4 text-sky-900 space-y-1.5">
+                <p className="font-bold flex items-center gap-1.5">
+                  <CheckCircle2 className="w-4 h-4 text-sky-600" />
+                  Real-time Sync Pendaftaran Mandiri Pasien
                 </p>
+                <ul className="list-disc list-inside text-[11px] space-y-1 text-sky-800 pl-1">
+                  <li><strong>Mandiri Pasien:</strong> Pendaftaran dari smartphone pasien (`/pendaftaran-pasien.html`) langsung ter-insert ke Supabase.</li>
+                  <li><strong>Panel Verifikasi:</strong> Aplikasi klinik menerima pendaftaran baru secara live via Supabase Real-time tanpa perlu refresh.</li>
+                </ul>
               </div>
 
-              <div className="p-4 bg-white rounded-2xl border border-emerald-200 inline-block font-mono">
-                <span className="text-[10px] text-slate-400 block font-bold">KODE BOOKING</span>
-                <span className="text-3xl font-black text-sky-800 tracking-wider">
-                  {submittedBooking.bookingCode}
-                </span>
-                <div className="text-xs text-slate-700 mt-1">
-                  Atas Nama: <strong>{submittedBooking.name}</strong>
+              {/* Form Settings */}
+              <form onSubmit={handleSaveConfig} className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wider">Kredensial Project Supabase</h4>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                    Supabase Project URL
+                  </label>
+                  <input
+                    type="url"
+                    required
+                    placeholder="https://xyzcompany.supabase.co"
+                    value={supabaseConfig.url}
+                    onChange={(e) => setConfigState({ ...supabaseConfig, url: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs bg-white focus:ring-2 focus:ring-sky-500 outline-none"
+                  />
                 </div>
-                <div className="text-[11px] text-slate-500">
-                  Jadwal: {submittedBooking.appointmentDate} · Pukul {submittedBooking.appointmentTime} WIB
-                </div>
-              </div>
 
-              <div className="pt-2">
-                <button
-                  onClick={() => {
-                    setSubmittedBooking(null);
-                    setActiveSubTab('verifikasi');
-                  }}
-                  className="px-6 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-xs transition"
-                >
-                  Kembali ke Panel Pendaftaran
-                </button>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                    Supabase Anon / Public API Key
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6..."
+                    value={supabaseConfig.key}
+                    onChange={(e) => setConfigState({ ...supabaseConfig, key: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs bg-white focus:ring-2 focus:ring-sky-500 outline-none font-mono"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      Nama Tabel Pendaftaran Online
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="pendaftaran_online"
+                      value={supabaseConfig.onlineRegTable}
+                      onChange={(e) => setConfigState({ ...supabaseConfig, onlineRegTable: e.target.value })}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs bg-white focus:ring-2 focus:ring-sky-500 outline-none font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      Nama Tabel Master Pasien
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="pasien"
+                      value={supabaseConfig.patientTable}
+                      onChange={(e) => setConfigState({ ...supabaseConfig, patientTable: e.target.value })}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs bg-white focus:ring-2 focus:ring-sky-500 outline-none font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowConfigModal(false)}
+                    className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold rounded-xl text-xs transition"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs transition shadow-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>Simpan & Aktifkan Sync</span>
+                  </button>
+                </div>
+              </form>
+
+              {/* SQL Schema Section */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <Code className="w-4 h-4 text-slate-600" />
+                    <h4 className="font-bold text-slate-800 text-xs">Skema DDL SQL Tabel Pendaftaran Online</h4>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleCopySchema}
+                    className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-lg text-[11px] font-bold transition flex items-center gap-1 cursor-pointer"
+                  >
+                    {copiedSchema ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                        <span className="text-emerald-700">Tersalin!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Salin Skrip SQL</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                <p className="text-[11px] text-slate-500">
+                  Salin skrip SQL berikut dan jalankan di <strong>SQL Editor</strong> Supabase Dashboard Anda untuk membuat tabel <code>pendaftaran_online</code>:
+                </p>
+
+                <div className="bg-slate-900 rounded-2xl p-3 border border-slate-800 text-[11px] font-mono text-emerald-400 overflow-x-auto max-h-48">
+                  <pre>{SUPABASE_ONLINE_REG_SQL_SCHEMA}</pre>
+                </div>
               </div>
             </div>
-          ) : (
-            <form onSubmit={handlePublicSubmit} className="space-y-4 text-xs">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    Nomor Induk Kependudukan (NIK) *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    maxLength={16}
-                    placeholder="16 Digit KTP..."
-                    value={form.nik}
-                    onChange={(e) => setForm({ ...form, nik: e.target.value })}
-                    className="w-full p-2.5 border rounded-xl font-mono font-bold bg-slate-50 focus:bg-white focus:ring-2 focus:ring-sky-500 outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    Nama Lengkap Pasien *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="Sesuai KTP..."
-                    value={form.name}
-                    onChange={(e) => setForm({ ...form, name: e.target.value })}
-                    className="w-full p-2.5 border rounded-xl font-bold bg-slate-50 focus:bg-white focus:ring-2 focus:ring-sky-500 outline-none"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Tanggal Lahir *</label>
-                  <input
-                    type="date"
-                    required
-                    value={form.birthDate}
-                    onChange={(e) => setForm({ ...form, birthDate: e.target.value })}
-                    className="w-full p-2.5 border rounded-xl font-bold bg-slate-50 focus:bg-white"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Jenis Kelamin</label>
-                  <select
-                    value={form.gender}
-                    onChange={(e) => setForm({ ...form, gender: e.target.value as 'Laki-laki' | 'Perempuan' })}
-                    className="w-full p-2.5 border rounded-xl font-bold bg-slate-50 focus:bg-white"
-                  >
-                    <option value="Laki-laki">Laki-laki</option>
-                    <option value="Perempuan">Perempuan</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Nomor WhatsApp Aktif *</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="0812-..."
-                    value={form.phone}
-                    onChange={(e) => setForm({ ...form, phone: e.target.value })}
-                    className="w-full p-2.5 border rounded-xl font-mono font-bold bg-slate-50 focus:bg-white"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Alamat Domisili</label>
-                <input
-                  type="text"
-                  placeholder="Kecamatan, Desa, Alamat lengkap..."
-                  value={form.address}
-                  onChange={(e) => setForm({ ...form, address: e.target.value })}
-                  className="w-full p-2.5 border rounded-xl bg-slate-50 focus:bg-white"
-                />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Tanggal Kunjungan</label>
-                  <input
-                    type="date"
-                    required
-                    value={form.appointmentDate}
-                    onChange={(e) => setForm({ ...form, appointmentDate: e.target.value })}
-                    className="w-full p-2.5 border rounded-xl font-bold bg-slate-50 focus:bg-white"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Pilihan Jam Praktek</label>
-                  <select
-                    value={form.appointmentTime}
-                    onChange={(e) => setForm({ ...form, appointmentTime: e.target.value })}
-                    className="w-full p-2.5 border rounded-xl font-bold bg-slate-50 focus:bg-white"
-                  >
-                    <option value="08:30">Pagi (08:30 - 11:30 WIB)</option>
-                    <option value="14:00">Siang (14:00 - 16:30 WIB)</option>
-                    <option value="18:30">Malam (18:30 - 21:00 WIB)</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Layanan Poli Tujuan</label>
-                  <select
-                    value={form.serviceType}
-                    onChange={(e) => setForm({ ...form, serviceType: e.target.value })}
-                    className="w-full p-2.5 border rounded-xl font-bold bg-slate-50 focus:bg-white"
-                  >
-                    <option value="Poli Umum">Poli Umum</option>
-                    <option value="Konseling Farmasi & Obat">Konseling Farmasi & Obat</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Metode Pembayaran</label>
-                  <select
-                    value={form.paymentType}
-                    onChange={(e) => setForm({ ...form, paymentType: e.target.value as OnlineRegistration['paymentType'] })}
-                    className="w-full p-2.5 border rounded-xl font-bold bg-slate-50 focus:bg-white"
-                  >
-                    <option value="Umum / Mandiri">Umum / Mandiri (Tunai/QRIS)</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">
-                  Keluhan / Gejala Utama yang Dirasakan *
-                </label>
-                <textarea
-                  rows={3}
-                  required
-                  placeholder="Ceritakan keluhan sakit yang dirasakan..."
-                  value={form.complaint}
-                  onChange={(e) => setForm({ ...form, complaint: e.target.value })}
-                  className="w-full p-3 border rounded-xl bg-slate-50 focus:bg-white outline-none"
-                />
-              </div>
-
-              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl">
-                <label className="block font-bold text-rose-900 mb-1 flex items-center gap-1.5">
-                  <ShieldAlert className="w-4 h-4 text-rose-600" />
-                  Riwayat Alergi Obat (Jika Ada)
-                </label>
-                <input
-                  type="text"
-                  placeholder="Contoh: Alergi Amoxicillin, Alergi Penisilin (Tulis 'Tidak Ada' bila tidak ada)"
-                  value={form.allergy}
-                  onChange={(e) => setForm({ ...form, allergy: e.target.value })}
-                  className="w-full p-2 border border-rose-300 rounded-lg text-rose-900 font-bold bg-white"
-                />
-              </div>
-
-              <button
-                type="submit"
-                className="w-full py-3.5 bg-gradient-to-r from-sky-600 to-indigo-600 hover:from-sky-500 hover:to-indigo-500 text-white font-extrabold rounded-xl shadow-lg transition-all text-xs uppercase tracking-wider flex items-center justify-center gap-2"
-              >
-                <Send className="w-4 h-4" />
-                <span>Kirim Pendaftaran Berobat Online</span>
-              </button>
-            </form>
-          )}
+          </div>
         </div>
       )}
+
+      <PortalQRGeneratorModal
+        isOpen={showQrModal}
+        onClose={() => setShowQrModal(false)}
+        defaultTarget="unified"
+      />
     </div>
   );
 };
+

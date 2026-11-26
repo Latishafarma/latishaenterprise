@@ -380,7 +380,7 @@ export const CLINICAL_STANDARDS: ClinicalStandard[] = [
   {
     id: 'gdp',
     name: 'Gula Darah Puasa (GDP)',
-    aliases: ['gula darah puasa', 'gdp', 'gula puasa', 'fasting blood glucose', 'fbg'],
+    aliases: ['gula darah puasa (gdp)', 'gula darah puasa', 'gdp', 'gula puasa', 'glukosa puasa', 'fasting blood glucose', 'fbg'],
     unit: 'mg/dL',
     category: 'Gula Darah & Lainnya',
     rangeFemale: '70 - 126',
@@ -391,13 +391,24 @@ export const CLINICAL_STANDARDS: ClinicalStandard[] = [
   {
     id: 'gds',
     name: 'Gula Darah Sewaktu (GDS)',
-    aliases: ['gula darah sewaktu', 'gds', 'gula sewaktu', 'random blood glucose', 'rbg'],
+    aliases: ['gula darah sewaktu (gds)', 'gula darah sewaktu', 'gds', 'gula sewaktu', 'glukosa sewaktu', 'random blood glucose', 'rbg'],
     unit: 'mg/dL',
     category: 'Gula Darah & Lainnya',
     rangeFemale: '70 - 200',
     rangeMale: '70 - 200',
     evalFemale: { min: 70, max: 200 },
     evalMale: { min: 70, max: 200 }
+  },
+  {
+    id: 'gd2pp',
+    name: 'Gula Darah 2 Jam PP (GD2PP)',
+    aliases: ['gula darah 2 jam pp (gd2pp)', 'gula darah 2 jam pp', 'gd2pp', 'gd2jpp', 'gula 2 jam pp', '2 jam pp'],
+    unit: 'mg/dL',
+    category: 'Gula Darah & Lainnya',
+    rangeFemale: '< 140',
+    rangeMale: '< 140',
+    evalFemale: { isLessThan: 140 },
+    evalMale: { isLessThan: 140 }
   },
   {
     id: 'amilase',
@@ -413,7 +424,7 @@ export const CLINICAL_STANDARDS: ClinicalStandard[] = [
   {
     id: 'asam_urat',
     name: 'Asam Urat',
-    aliases: ['asam urat', 'uric acid', 'uric acid (asam urat)'],
+    aliases: ['asam urat', 'uric acid', 'uric acid (asam urat)', 'au'],
     unit: 'mg/dL',
     category: 'Gula Darah & Lainnya',
     rangeFemale: '2.4 - 5.7',
@@ -423,17 +434,66 @@ export const CLINICAL_STANDARDS: ClinicalStandard[] = [
   }
 ];
 
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function hasWholeToken(haystack: string, token: string): boolean {
+  const re = new RegExp(`(?:^|[^a-z0-9])${escapeRegExp(token)}(?:$|[^a-z0-9])`, 'i');
+  return re.test(haystack);
+}
+
 /**
  * Temukan standar klinis berdasarkan nama parameter uji
+ * Menggunakan pencocokan presisi (exact -> word-boundary terpanjang -> substring >= 4 karakter terpanjang)
+ * agar alias pendek seperti 'k' (Kalium) tidak pernah salah cocok pada parameter lain seperti GDS/Kolesterol.
  */
 export function findClinicalStandard(paramName: string): ClinicalStandard | undefined {
   if (!paramName) return undefined;
-  const clean = paramName.toLowerCase().trim();
-  return CLINICAL_STANDARDS.find(
-    (s) =>
-      s.name.toLowerCase() === clean ||
-      s.aliases.some((alias) => clean === alias || clean.includes(alias))
+  const clean = paramName.toLowerCase().trim().replace(/\s+/g, ' ');
+  if (!clean) return undefined;
+
+  // 1. Exact match pada nama standar
+  const exactName = CLINICAL_STANDARDS.find((s) => s.name.toLowerCase() === clean);
+  if (exactName) return exactName;
+
+  // 2. Exact match pada alias
+  const exactAlias = CLINICAL_STANDARDS.find((s) =>
+    s.aliases.some((alias) => alias.toLowerCase() === clean)
   );
+  if (exactAlias) return exactAlias;
+
+  // 3. Word-boundary match (pilih kecocokan alias terpanjang agar spesifik, mis. "kolesterol hdl" menang atas "kolesterol")
+  let bestBoundaryMatch: { std: ClinicalStandard; score: number } | null = null;
+  for (const s of CLINICAL_STANDARDS) {
+    const candidates = [s.name.toLowerCase(), ...s.aliases.map((a) => a.toLowerCase())];
+    for (const alias of candidates) {
+      if (!alias) continue;
+      if (hasWholeToken(clean, alias)) {
+        const score = alias.length + (alias === s.name.toLowerCase() ? 10 : 0);
+        if (!bestBoundaryMatch || score > bestBoundaryMatch.score) {
+          bestBoundaryMatch = { std: s, score };
+        }
+      }
+    }
+  }
+  if (bestBoundaryMatch) return bestBoundaryMatch.std;
+
+  // 4. Fallback substring match hanya untuk alias panjang (>= 4 karakter)
+  let bestSubstringMatch: { std: ClinicalStandard; score: number } | null = null;
+  for (const s of CLINICAL_STANDARDS) {
+    const candidates = [s.name.toLowerCase(), ...s.aliases.map((a) => a.toLowerCase())];
+    for (const alias of candidates) {
+      if (alias.length < 4) continue;
+      if (clean.includes(alias)) {
+        const score = alias.length;
+        if (!bestSubstringMatch || score > bestSubstringMatch.score) {
+          bestSubstringMatch = { std: s, score };
+        }
+      }
+    }
+  }
+  return bestSubstringMatch?.std;
 }
 
 /**
@@ -442,17 +502,20 @@ export function findClinicalStandard(paramName: string): ClinicalStandard | unde
 export function getStandardReferenceRange(
   paramName: string,
   gender: 'Laki-laki' | 'Perempuan'
-): { range: string; unit?: string } | null {
+): { range: string; unit?: string; canonicalName?: string } | null {
   const std = findClinicalStandard(paramName);
   if (!std) return null;
   return {
     range: gender === 'Perempuan' ? std.rangeFemale : std.rangeMale,
-    unit: std.unit
+    unit: std.unit,
+    canonicalName: std.name
   };
 }
 
 /**
- * Evaluasi status hasil tes (Normal, Tinggi, Rendah, Kritis) berdasarkan standar klinis
+ * Evaluasi status hasil tes (Normal, Tinggi, Rendah, Kritis, Abnormal)
+ * Selalu memprioritaskan rentang Nilai Rujukan aktif pada baris tabel agar
+ * kolom Nilai Hasil, Nilai Rujukan, dan Interpretasi 100% sinkron.
  */
 export function evaluateLabResultStatus(
   paramName: string,
@@ -462,272 +525,241 @@ export function evaluateLabResultStatus(
 ): 'Normal' | 'Tinggi' | 'Rendah' | 'Kritis' | 'Abnormal' {
   if (!resultVal || resultVal.trim() === '') return 'Normal';
 
-  // Normalize string: ganti koma desimal ke titik
-  const normalizedStr = resultVal.replace(',', '.').replace(/[^\d.-]/g, '');
-  const num = parseFloat(normalizedStr);
-  if (isNaN(num)) return 'Normal';
-
+  const rawResult = resultVal.trim();
+  const lowerResult = rawResult.toLowerCase();
   const std = findClinicalStandard(paramName);
+  const activeRange =
+    currentReferenceRange && currentReferenceRange.trim() !== ''
+      ? currentReferenceRange.trim()
+      : std
+      ? gender === 'Perempuan'
+        ? std.rangeFemale
+        : std.rangeMale
+      : '';
+  const lowerRange = activeRange.toLowerCase();
 
-  if (std) {
-    const evalRule = gender === 'Perempuan' ? std.evalFemale : std.evalMale;
+  // 1. Cek hasil kualitatif (Positif / Negatif / Reaktif / Non-Reaktif)
+  const isNonReactiveOrNeg =
+    lowerResult.includes('non-reaktif') ||
+    lowerResult.includes('non reaktif') ||
+    lowerResult.includes('negatif') ||
+    lowerResult.includes('negative') ||
+    lowerResult === 'neg' ||
+    lowerResult === '-';
+  const isPositiveOrReactive =
+    !isNonReactiveOrNeg &&
+    (lowerResult.includes('positif') ||
+      lowerResult.includes('positive') ||
+      lowerResult.includes('reaktif') ||
+      lowerResult.includes('abnormal') ||
+      /^\+\d*$/.test(lowerResult) ||
+      /^\d+\+$/.test(lowerResult));
 
-    // Rule: isLessThan (< 10, < 23, < 100, dll.)
-    if (evalRule.isLessThan !== undefined) {
-      if (num > evalRule.isLessThan * 2.5) return 'Kritis';
-      if (num > evalRule.isLessThan) return 'Tinggi';
+  if (isNonReactiveOrNeg) {
+    if (lowerRange.includes('positif') || lowerRange.includes('positive')) {
+      return 'Abnormal';
+    }
+    return 'Normal';
+  }
+  if (isPositiveOrReactive) {
+    if (lowerRange.includes('positif') || lowerRange.includes('positive')) {
       return 'Normal';
     }
+    return 'Abnormal';
+  }
 
-    // Rule: isGreaterThan (> 40, > 50, dll. seperti HDL)
-    if (evalRule.isGreaterThan !== undefined) {
-      if (num < evalRule.isGreaterThan * 0.6) return 'Kritis';
-      if (num < evalRule.isGreaterThan) return 'Rendah';
-      return 'Normal';
+  // 2. Parse nilai numerik (mendukung koma maupun titik desimal)
+  const numMatch = rawResult.replace(/,/g, '.').match(/-?\d+(?:\.\d+)?/);
+  if (!numMatch) return 'Normal';
+  const rawNum = parseFloat(numMatch[0]);
+  if (isNaN(rawNum)) return 'Normal';
+
+  // Helper penyesuaian satuan ribuan untuk Leukosit/Trombosit jika rujukan dalam x10^3/µl
+  const adjustForUnitScale = (val: number, maxRef?: number): number => {
+    if (std?.id === 'leukosit' && val > 100 && (!maxRef || maxRef <= 50)) {
+      return val / 1000;
     }
+    if (std?.id === 'trombosit' && val > 1000 && (!maxRef || maxRef <= 1000)) {
+      return val / 1000;
+    }
+    return val;
+  };
 
-    // Rule: min & max
-    if (evalRule.min !== undefined && evalRule.max !== undefined) {
-      // Handle unit differences for Leukosit & Trombosit jika pengguna ketik ribuan (misal Leukosit 6500)
-      let adjustedNum = num;
-      if (std.id === 'leukosit' && num > 100) {
-        adjustedNum = num / 1000;
-      } else if (std.id === 'trombosit' && num > 1000) {
-        adjustedNum = num / 1000;
+  // 3. Prioritaskan evaluasi langsung terhadap Nilai Rujukan aktif (activeRange)
+  if (activeRange) {
+    const normalizedRange = activeRange.replace(/,/g, '.').trim();
+
+    // Pola rentang: "min - max", "min – max", "min s/d max"
+    const rangeMatch = normalizedRange.match(
+      /(-?\d+(?:\.\d+)?)\s*(?:-|–|—|s\/d|sd|to)\s*(-?\d+(?:\.\d+)?)/i
+    );
+    if (rangeMatch) {
+      const minVal = parseFloat(rangeMatch[1]);
+      const maxVal = parseFloat(rangeMatch[2]);
+      if (!isNaN(minVal) && !isNaN(maxVal) && minVal <= maxVal) {
+        const num = adjustForUnitScale(rawNum, maxVal);
+        if (num >= minVal && num <= maxVal) return 'Normal';
+        if (num < minVal) {
+          if (minVal > 0 && num < minVal * 0.6) return 'Kritis';
+          return 'Rendah';
+        }
+        if (maxVal > 0 && num > maxVal * 1.8) return 'Kritis';
+        return 'Tinggi';
       }
+    }
 
-      if (adjustedNum < evalRule.min * 0.7) return 'Kritis';
-      if (adjustedNum > evalRule.max * 1.8) return 'Kritis';
-      if (adjustedNum < evalRule.min) return 'Rendah';
-      if (adjustedNum > evalRule.max) return 'Tinggi';
-      return 'Normal';
+    // Pola batas atas: "< 200", "<= 200", "≤ 200"
+    const lessMatch = normalizedRange.match(/^(<=|≤|<)\s*(-?\d+(?:\.\d+)?)/);
+    if (lessMatch) {
+      const op = lessMatch[1];
+      const maxVal = parseFloat(lessMatch[2]);
+      if (!isNaN(maxVal)) {
+        const num = adjustForUnitScale(rawNum, maxVal);
+        const isNormal = op === '<' ? num < maxVal : num <= maxVal;
+        if (isNormal) return 'Normal';
+        if (maxVal > 0 && num > maxVal * 2.5) return 'Kritis';
+        return 'Tinggi';
+      }
+    }
+
+    // Pola batas bawah: "> 40", ">= 40", "≥ 40"
+    const greaterMatch = normalizedRange.match(/^(>=|≥|>)\s*(-?\d+(?:\.\d+)?)/);
+    if (greaterMatch) {
+      const op = greaterMatch[1];
+      const minVal = parseFloat(greaterMatch[2]);
+      if (!isNaN(minVal)) {
+        const num = adjustForUnitScale(rawNum);
+        const isNormal = op === '>' ? num > minVal : num >= minVal;
+        if (isNormal) return 'Normal';
+        if (minVal > 0 && num < minVal * 0.6) return 'Kritis';
+        return 'Rendah';
+      }
     }
   }
 
-  // Fallback evaluator jika bukan parameter di atas tetapi range ditulis "min - max" atau "< max" atau "> min"
-  const ref = currentReferenceRange || '';
-  if (ref.includes('-')) {
-    const parts = ref.split('-').map((s) => parseFloat(s.replace(',', '.').trim()));
-    if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-      if (num < parts[0]) return 'Rendah';
-      if (num > parts[1]) return 'Tinggi';
-      return 'Normal';
+  // 4. Fallback evaluasi menggunakan aturan standar klinis bila Nilai Rujukan tidak berisi angka
+  if (std) {
+    const evalRule = gender === 'Perempuan' ? std.evalFemale : std.evalMale;
+
+    if (evalRule.isLessThan !== undefined) {
+      if (rawNum < evalRule.isLessThan) return 'Normal';
+      if (rawNum > evalRule.isLessThan * 2.5) return 'Kritis';
+      return 'Tinggi';
     }
-  } else if (ref.startsWith('<')) {
-    const maxVal = parseFloat(ref.replace('<', '').replace(',', '.').trim());
-    if (!isNaN(maxVal)) {
-      return num > maxVal ? 'Tinggi' : 'Normal';
+
+    if (evalRule.isGreaterThan !== undefined) {
+      if (rawNum > evalRule.isGreaterThan) return 'Normal';
+      if (rawNum < evalRule.isGreaterThan * 0.6) return 'Kritis';
+      return 'Rendah';
     }
-  } else if (ref.startsWith('>')) {
-    const minVal = parseFloat(ref.replace('>', '').replace(',', '.').trim());
-    if (!isNaN(minVal)) {
-      return num < minVal ? 'Rendah' : 'Normal';
+
+    if (evalRule.min !== undefined && evalRule.max !== undefined) {
+      const adjustedNum = adjustForUnitScale(rawNum, evalRule.max);
+      if (adjustedNum >= evalRule.min && adjustedNum <= evalRule.max) return 'Normal';
+      if (adjustedNum < evalRule.min) {
+        if (evalRule.min > 0 && adjustedNum < evalRule.min * 0.6) return 'Kritis';
+        return 'Rendah';
+      }
+      if (evalRule.max > 0 && adjustedNum > evalRule.max * 1.8) return 'Kritis';
+      return 'Tinggi';
     }
   }
 
   return 'Normal';
 }
 
+function templateItemFromStandard(
+  standardId: string,
+  gender: 'Laki-laki' | 'Perempuan'
+): { parameter: string; unit: string; referenceRange: string } {
+  const std = CLINICAL_STANDARDS.find((s) => s.id === standardId);
+  if (!std) {
+    return { parameter: standardId, unit: 'mg/dL', referenceRange: '' };
+  }
+  return {
+    parameter: std.name,
+    unit: std.unit,
+    referenceRange: gender === 'Perempuan' ? std.rangeFemale : std.rangeMale
+  };
+}
+
 /**
  * Daftar template paket lab yang otomatis disesuaikan dengan jenis kelamin
+ * Dibangun langsung dari CLINICAL_STANDARDS agar 100% sinkron dengan input parameter manual.
  */
 export function getGenderAdjustedTemplates(gender: 'Laki-laki' | 'Perempuan') {
   return [
     {
       name: 'Gula Darah & Lainnya',
-      description: 'GDP, GDS, Asam Urat, Amilase',
+      description: 'GDS, GDP, Asam Urat, Amilase',
       items: [
-        {
-          parameter: 'Gula Darah Sewaktu (GDS)',
-          unit: 'mg/dL',
-          referenceRange: '70 - 200'
-        },
-        {
-          parameter: 'Gula Darah Puasa (GDP)',
-          unit: 'mg/dL',
-          referenceRange: '70 - 126'
-        },
-        {
-          parameter: 'Asam Urat',
-          unit: 'mg/dL',
-          referenceRange: gender === 'Perempuan' ? '2.4 - 5.7' : '3.4 - 7.0'
-        },
-        {
-          parameter: 'Amilase',
-          unit: 'U/L',
-          referenceRange: '30 - 130'
-        }
+        templateItemFromStandard('gds', gender),
+        templateItemFromStandard('gdp', gender),
+        templateItemFromStandard('asam_urat', gender),
+        templateItemFromStandard('amilase', gender)
       ]
     },
     {
       name: 'Profil Lipid',
       description: 'Kolesterol Total, HDL, LDL, Trigliserid',
       items: [
-        {
-          parameter: 'Kolesterol Total',
-          unit: 'mg/dL',
-          referenceRange: '150 - 200'
-        },
-        {
-          parameter: 'HDL (Kolesterol HDL)',
-          unit: 'mg/dL',
-          referenceRange: gender === 'Perempuan' ? '> 50' : '> 40'
-        },
-        {
-          parameter: 'LDL (Kolesterol LDL)',
-          unit: 'mg/dL',
-          referenceRange: '< 100'
-        },
-        {
-          parameter: 'Trigliserid',
-          unit: 'mg/dL',
-          referenceRange: '120 - 190'
-        }
+        templateItemFromStandard('kolesterol_total', gender),
+        templateItemFromStandard('hdl', gender),
+        templateItemFromStandard('ldl', gender),
+        templateItemFromStandard('trigliserid', gender)
       ]
     },
     {
       name: 'Fungsi Ginjal & Elektrolit',
       description: 'Kreatinin, Urea, Asam Urat, Na, K, Cl',
       items: [
-        {
-          parameter: 'Kreatinin',
-          unit: 'U/L',
-          referenceRange: gender === 'Perempuan' ? '60 - 150' : '70 - 160'
-        },
-        {
-          parameter: 'Urea',
-          unit: 'mg/dL',
-          referenceRange: '8 - 25'
-        },
-        {
-          parameter: 'Asam Urat',
-          unit: 'mg/dL',
-          referenceRange: gender === 'Perempuan' ? '2.4 - 5.7' : '3.4 - 7.0'
-        },
-        {
-          parameter: 'Natrium',
-          unit: 'mmol/L',
-          referenceRange: '135 - 145'
-        },
-        {
-          parameter: 'Kalium',
-          unit: 'mmol/L',
-          referenceRange: '3.5 - 5.0'
-        },
-        {
-          parameter: 'Klorid',
-          unit: 'mmol/L',
-          referenceRange: '94 - 111'
-        }
+        templateItemFromStandard('kreatinin', gender),
+        templateItemFromStandard('urea', gender),
+        templateItemFromStandard('asam_urat', gender),
+        templateItemFromStandard('natrium', gender),
+        templateItemFromStandard('kalium', gender),
+        templateItemFromStandard('klorid', gender)
       ]
     },
     {
       name: 'Fungsi Hati (LFT)',
       description: 'ALT/SGPT, AST/SGOT, Bilirubin, Protein, Albumin',
       items: [
-        {
-          parameter: 'ALT (SGPT)',
-          unit: 'U/L',
-          referenceRange: gender === 'Perempuan' ? '< 23' : '< 30'
-        },
-        {
-          parameter: 'AST (SGOT)',
-          unit: 'U/L',
-          referenceRange: gender === 'Perempuan' ? '< 21' : '< 25'
-        },
-        {
-          parameter: 'Alkalin Fosfatase',
-          unit: 'U/L',
-          referenceRange: '15 - 69'
-        },
-        {
-          parameter: 'GGT',
-          unit: 'U/L',
-          referenceRange: '5 - 38'
-        },
-        {
-          parameter: 'Bilirubin Total',
-          unit: 'mg/dL',
-          referenceRange: '0.25 - 1.0'
-        },
-        {
-          parameter: 'Bilirubin Langsung',
-          unit: 'mg/dL',
-          referenceRange: '0.0 - 0.25'
-        },
-        {
-          parameter: 'Protein Total',
-          unit: 'g/L',
-          referenceRange: '61 - 82'
-        },
-        {
-          parameter: 'Albumin',
-          unit: 'g/L',
-          referenceRange: '37 - 52'
-        }
+        templateItemFromStandard('alt_sgpt', gender),
+        templateItemFromStandard('ast_sgot', gender),
+        templateItemFromStandard('alp', gender),
+        templateItemFromStandard('ggt', gender),
+        templateItemFromStandard('bilirubin_total', gender),
+        templateItemFromStandard('bilirubin_direct', gender),
+        templateItemFromStandard('protein_total', gender),
+        templateItemFromStandard('albumin', gender)
       ]
     },
     {
       name: 'Hematologi / Darah Rutin',
       description: 'Eritrosit, Hb, Ht, Leukosit, Trombosit, LED, MCV, MCH, MCHC',
       items: [
-        {
-          parameter: 'Eritrosit',
-          unit: 'juta/µl',
-          referenceRange: gender === 'Perempuan' ? '4.0 - 5.0' : '4.5 - 5.5'
-        },
-        {
-          parameter: 'Hemoglobin (Hb)',
-          unit: 'g/dL',
-          referenceRange: gender === 'Perempuan' ? '12.0 - 14.0' : '13.0 - 16.0'
-        },
-        {
-          parameter: 'Hematokrit',
-          unit: '%',
-          referenceRange: gender === 'Perempuan' ? '40 - 50' : '45 - 55'
-        },
-        {
-          parameter: 'Leukosit',
-          unit: 'x10^3/µl',
-          referenceRange: '5.0 - 10.0'
-        },
-        {
-          parameter: 'Trombosit',
-          unit: 'x10^3/µl',
-          referenceRange: '150 - 400'
-        },
-        {
-          parameter: 'Laju Endap Darah (LED)',
-          unit: 'mm/jam',
-          referenceRange: gender === 'Perempuan' ? '< 15' : '< 10'
-        },
-        {
-          parameter: 'MCV/VER',
-          unit: 'fl',
-          referenceRange: '80 - 96'
-        },
-        {
-          parameter: 'MCH/HER',
-          unit: 'pg',
-          referenceRange: '27 - 31'
-        },
-        {
-          parameter: 'MCHC/KHER',
-          unit: 'g/dL',
-          referenceRange: '32 - 36'
-        }
+        templateItemFromStandard('eritrosit', gender),
+        templateItemFromStandard('hb', gender),
+        templateItemFromStandard('ht', gender),
+        templateItemFromStandard('leukosit', gender),
+        templateItemFromStandard('trombosit', gender),
+        templateItemFromStandard('led', gender),
+        templateItemFromStandard('mcv', gender),
+        templateItemFromStandard('mch', gender),
+        templateItemFromStandard('mchc', gender)
       ]
     },
     {
       name: 'Hitung Jenis Leukosit (Diff Count)',
       description: 'Basofil, Eosinofil, Batang, Segmen, Limfosit, Monosit',
       items: [
-        { parameter: 'Basofil', unit: '%', referenceRange: '0.0 - 1.0' },
-        { parameter: 'Eosinofil', unit: '%', referenceRange: '1.0 - 3.0' },
-        { parameter: 'Batang', unit: '%', referenceRange: '2.0 - 6.0' },
-        { parameter: 'Segmen', unit: '%', referenceRange: '50.0 - 70.0' },
-        { parameter: 'Limfosit', unit: '%', referenceRange: '20.0 - 40.0' },
-        { parameter: 'Monosit', unit: '%', referenceRange: '2.0 - 8.0' }
+        templateItemFromStandard('basofil', gender),
+        templateItemFromStandard('eosinofil', gender),
+        templateItemFromStandard('batang', gender),
+        templateItemFromStandard('segmen', gender),
+        templateItemFromStandard('limfosit', gender),
+        templateItemFromStandard('monosit', gender)
       ]
     }
   ];

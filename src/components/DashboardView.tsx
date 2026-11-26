@@ -22,19 +22,24 @@ import {
   BookOpen,
   CheckCircle2,
   Calendar,
-  Layers
+  BarChart3
 } from 'lucide-react';
 import {
   BarChart,
   Bar,
+  AreaChart,
+  Area,
   XAxis,
   YAxis,
   Tooltip,
   ResponsiveContainer,
   CartesianGrid,
-  Cell
+  Cell,
+  Legend
 } from 'recharts';
 import { Transaction, Medicine, PatientQueue, EPrescription, Branch } from '../types';
+import { useFacilityProfiles } from './PharmacySettingsModal';
+import { MedicineCategorySymbol } from './MedicineCategorySymbol';
 
 interface DashboardViewProps {
   transactions: Transaction[];
@@ -53,13 +58,177 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   currentBranch,
   onNavigateTab
 }) => {
+  const { pharmacyProfile } = useFacilityProfiles();
   const [edFilter, setEdFilter] = useState<'all' | 'critical' | 'expired'>('all');
+  const [revenueRangeDays, setRevenueRangeDays] = useState<7 | 14 | 30>(14);
+  const [revenueChartMode, setRevenueChartMode] = useState<'bar' | 'area'>('bar');
 
   const totalRevenue = transactions.reduce((acc, t) => acc + t.total, 0);
   const totalProfit = transactions.reduce((acc, t) => acc + (t.profit || 0), 0);
   const lowStockCount = medicines.filter((m) => m.stock <= m.minStock).length;
   const pendingRx = prescriptions.filter((p) => p.status === 'Pending Skrining').length;
   const totalAssetHpp = medicines.reduce((acc, m) => acc + m.stock * m.hpp, 0);
+
+  // =========================================================================
+  // MODUL 0: PERBANDINGAN PENDAPATAN HARIAN (REGULER vs KLINIK vs MITRA)
+  // =========================================================================
+  const toLocalYMD = (d: Date): string => {
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  const normalizeDateToYMD = (rawDate?: string): string => {
+    if (!rawDate) return '';
+    const trimmed = rawDate.trim();
+    const isoMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
+    const dmyMatch = trimmed.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+    if (dmyMatch) {
+      return `${dmyMatch[3]}-${dmyMatch[2].padStart(2, '0')}-${dmyMatch[1].padStart(2, '0')}`;
+    }
+    const parsed = new Date(trimmed);
+    if (!isNaN(parsed.getTime())) {
+      return toLocalYMD(parsed);
+    }
+    return trimmed.split(' ')[0].split('T')[0];
+  };
+
+  const dailyRevenueComparison = React.useMemo(() => {
+    const todayDate = new Date();
+    const buckets: Array<{
+      dateKey: string;
+      label: string;
+      fullDateLabel: string;
+      reguler: number;
+      klinik: number;
+      mitra: number;
+      total: number;
+      trxCount: number;
+    }> = [];
+    const bucketMap = new Map<string, (typeof buckets)[number]>();
+
+    for (let i = revenueRangeDays - 1; i >= 0; i--) {
+      const d = new Date(todayDate);
+      d.setDate(d.getDate() - i);
+      const dateKey = toLocalYMD(d);
+      const bucket = {
+        dateKey,
+        label: d.toLocaleDateString('id-ID', { day: '2-digit', month: 'short' }),
+        fullDateLabel: d.toLocaleDateString('id-ID', {
+          weekday: 'short',
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric'
+        }),
+        reguler: 0,
+        klinik: 0,
+        mitra: 0,
+        total: 0,
+        trxCount: 0
+      };
+      buckets.push(bucket);
+      bucketMap.set(dateKey, bucket);
+    }
+
+    let sumReguler = 0;
+    let sumKlinik = 0;
+    let sumMitra = 0;
+    let countReguler = 0;
+    let countKlinik = 0;
+    let countMitra = 0;
+
+    transactions.forEach((t) => {
+      if (t.status === 'Dibatalkan' || t.status === 'Diretur') return;
+      const dateKey = normalizeDateToYMD(t.date);
+      const target = bucketMap.get(dateKey);
+      if (!target) return;
+
+      const amount = Number(t.total) || 0;
+      const trxType = (t.type || 'REGULER').toUpperCase();
+
+      if (trxType === 'KLINIK') {
+        target.klinik += amount;
+        sumKlinik += amount;
+        countKlinik += 1;
+      } else if (trxType === 'FAKTUR_PENJUALAN' || trxType === 'MITRA') {
+        target.mitra += amount;
+        sumMitra += amount;
+        countMitra += 1;
+      } else {
+        target.reguler += amount;
+        sumReguler += amount;
+        countReguler += 1;
+      }
+      target.total += amount;
+      target.trxCount += 1;
+    });
+
+    const periodTotal = sumReguler + sumKlinik + sumMitra;
+    return {
+      series: buckets,
+      sumReguler,
+      sumKlinik,
+      sumMitra,
+      countReguler,
+      countKlinik,
+      countMitra,
+      periodTotal
+    };
+  }, [transactions, revenueRangeDays]);
+
+  const formatCompactRupiah = (val: number): string => {
+    const abs = Math.abs(val);
+    if (abs >= 1_000_000_000) return `Rp ${(val / 1_000_000_000).toFixed(1).replace('.', ',')}M`;
+    if (abs >= 1_000_000) return `Rp ${(val / 1_000_000).toFixed(1).replace('.', ',')}jt`;
+    if (abs >= 1_000) return `Rp ${Math.round(val / 1_000)}rb`;
+    return `Rp ${val}`;
+  };
+
+  const CustomRevenueTooltip = ({ active, payload }: any) => {
+    if (!active || !payload || payload.length === 0) return null;
+    const row = payload[0]?.payload;
+    if (!row) return null;
+
+    return (
+      <div className="bg-slate-900 text-white p-3.5 rounded-xl shadow-xl border border-slate-700 text-xs min-w-[230px] space-y-2">
+        <div className="flex items-center justify-between gap-3 border-b border-slate-700/80 pb-1.5">
+          <span className="font-bold text-slate-100">{row.fullDateLabel}</span>
+          <span className="font-mono tabular-nums text-[10px] text-slate-400">
+            {row.trxCount} transaksi
+          </span>
+        </div>
+        <div className="space-y-1.5 font-mono tabular-nums text-[11px]">
+          <div className="flex items-center justify-between gap-4">
+            <span className="flex items-center gap-1.5 font-sans text-slate-300">
+              <span className="w-2.5 h-2.5 rounded-xs bg-green-500 shrink-0" />
+              Penjualan Reguler
+            </span>
+            <strong className="text-green-400">Rp {row.reguler.toLocaleString('id-ID')}</strong>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <span className="flex items-center gap-1.5 font-sans text-slate-300">
+              <span className="w-2.5 h-2.5 rounded-xs bg-red-500 shrink-0" />
+              Penjualan Klinik
+            </span>
+            <strong className="text-red-400">Rp {row.klinik.toLocaleString('id-ID')}</strong>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <span className="flex items-center gap-1.5 font-sans text-slate-300">
+              <span className="w-2.5 h-2.5 rounded-xs bg-blue-500 shrink-0" />
+              Faktur Penjualan Mitra
+            </span>
+            <strong className="text-blue-400">Rp {row.mitra.toLocaleString('id-ID')}</strong>
+          </div>
+        </div>
+        <div className="pt-1.5 border-t border-slate-700/80 flex items-center justify-between font-mono tabular-nums">
+          <span className="font-sans font-bold text-slate-200">Total Pendapatan</span>
+          <strong className="text-white text-xs">Rp {row.total.toLocaleString('id-ID')}</strong>
+        </div>
+      </div>
+    );
+  };
 
   // =========================================================================
   // MODUL 1: NOTIFIKASI OTOMATIS OBAT KEDALUWARSA (< 3 BULAN / 90 HARI)
@@ -95,74 +264,133 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   });
 
   // =========================================================================
-  // MODUL 2: TREN INTERAKSI OBAT (DRP) BULAN INI DENGAN RECHARTS
+  // MODUL 2: TREN INTERAKSI OBAT & DRP BERDASARKAN DATA REAL PRESCRIPTIONS
   // =========================================================================
+  let adminErrorCount = 0;
+  let farmasetikErrorCount = 0;
+  let ddiCount = 0;
+  let kontraindikasiCount = 0;
+  let duplikasiCount = 0;
+  let gantiRxCount = 0;
+  let ditolakCount = 0;
+  let lolosCount = 0;
+
+  prescriptions.forEach((p) => {
+    const checks = p.screeningChecks;
+    const notes = (p.screeningNotes || '').toLowerCase();
+    const status = (p.status || '').toLowerCase();
+
+    // Administrative check errors (when any admin check is false)
+    if (checks?.admin) {
+      if (!checks.admin.namaDokter || !checks.admin.sip || !checks.admin.tglResep || !checks.admin.paraf) {
+        adminErrorCount++;
+      }
+    }
+
+    // Pharmaceutical check errors (when any pharmaceutical check is false)
+    if (checks?.farmasetik) {
+      if (!checks.farmasetik.bentukSediaan || !checks.farmasetik.dosis || !checks.farmasetik.stabilitas || !checks.farmasetik.kompatibilitas) {
+        farmasetikErrorCount++;
+      }
+    }
+
+    if (notes.includes('interaksi') || notes.includes('ddi') || notes.includes('severity') || notes.includes('major') || notes.includes('moderate')) {
+      ddiCount++;
+    }
+    if (notes.includes('kontraindikasi') || notes.includes('contraindicated')) {
+      kontraindikasiCount++;
+    }
+    if (notes.includes('duplikasi') || notes.includes('duplication')) {
+      duplikasiCount++;
+    }
+    if (status.includes('ganti rx') || status.includes('konfirmasi')) {
+      gantiRxCount++;
+    }
+    if (status.includes('ditolak') || status.includes('ada drps')) {
+      ditolakCount++;
+    }
+    if (status.includes('lolos') || status.includes('diterima') || status.includes('selesai')) {
+      lolosCount++;
+    }
+  });
+
   const drpTrendData = [
     {
-      name: 'Kortikosteroid + NSAID',
-      shortName: 'Steroid+NSAID',
-      count: 18,
+      name: 'Penilaian Administrasi (Tidak Lengkap)',
+      shortName: 'Admin Kurang',
+      count: adminErrorCount,
       severity: 'Sedang',
       color: '#f59e0b',
-      mechanism: 'Peningkatan risiko ulkus peptikum, perdarahan saluran cerna atas & erosi lambung ganda.',
-      recommendation: 'Berikan gastroprotektor PPI (Omeprazole) atau ganti analgetik parasetamol.',
-      reference: 'BNF 86 hal. 620 & Lexicomp Drug Interactions',
-      referenceUrl: 'https://www.drugs.com/drug-interactions.html'
+      mechanism: 'Ketidaklengkapan komponen administratif resep (Nama dokter, SIP, tanggal, atau paraf).',
+      recommendation: 'Konfirmasi kepada dokter peresep untuk melengkapi informasi administratif resep.',
+      reference: 'Permenkes No. 73 Tahun 2016',
+      referenceUrl: 'https://pionas.pom.go.id/'
     },
     {
-      name: 'NSAID + Antihipertensi',
-      shortName: 'NSAID+Tensi',
-      count: 14,
+      name: 'Penilaian Farmasetik (Tidak Sesuai)',
+      shortName: 'Farmasetik Kurang',
+      count: farmasetikErrorCount,
       severity: 'Sedang',
-      color: '#f59e0b',
-      mechanism: 'NSAID menahan ekskresi natrium-air & menumpulkan efektivitas obat antihipertensi 3-6 mmHg.',
-      recommendation: 'Batasi penggunaan NSAID max 3-5 hari atau ganti analgetik lini pertama.',
-      reference: 'BNF 86 hal. 1105 & Pedoman PERKI Hipertensi',
-      referenceUrl: 'https://inaheart.org/panduan-klinis/'
+      color: '#f97316',
+      mechanism: 'Ketidaksesuaian bentuk sediaan, kekuatan, stabilitas, atau kompatibilitas obat.',
+      recommendation: 'Lakukan penyesuaian sediaan atau konsultasi farmasetik.',
+      reference: 'Standar Pelayanan Kefarmasian di Apotek',
+      referenceUrl: 'https://pionas.pom.go.id/'
     },
     {
-      name: 'ISPA Virus + Antibiotik',
-      shortName: 'ISPA+Antibiotik',
-      count: 12,
-      severity: 'Sedang',
-      color: '#f59e0b',
-      mechanism: 'Common cold >90% disebabkan virus; peresepan antibiotik tergolong Obat Tanpa Indikasi.',
-      recommendation: 'Edukasi terapi simptomatik rasional untuk menekan resistensi antimikroba (AMR).',
-      reference: 'Pedoman Praktik Klinis Kemenkes RI No. 514/2015',
-      referenceUrl: 'https://yankes.kemkes.go.id/unduhan/fileunduhan_1610411306_913506.pdf'
+      name: 'Interaksi Obat (DDI)',
+      shortName: 'Interaksi DDI',
+      count: ddiCount,
+      severity: 'Major',
+      color: '#eab308',
+      mechanism: 'Potensi interaksi farmakokinetik atau farmakodinamik antar obat dalam resep.',
+      recommendation: 'Lakukan penyesuaian dosis, pemantauan klinis, atau penggantian obat.',
+      reference: 'BNF 86 & Database interaksi_obat Supabase',
+      referenceUrl: 'https://pionas.pom.go.id/'
     },
     {
-      name: 'Antihistamin Overdose',
-      shortName: 'Dosis Setirizin',
-      count: 9,
+      name: 'Kontraindikasi',
+      shortName: 'Kontraindikasi',
+      count: kontraindikasiCount,
+      severity: 'Kritis',
+      color: '#dc2626',
+      mechanism: 'Kombinasi atau indikasi obat yang dikontraindikasikan dengan kondisi pasien.',
+      recommendation: 'Hentikan segera dan ganti dengan terapi alternatif yang aman.',
+      reference: 'Lexicomp & Pedoman Klinis Kemenkes',
+      referenceUrl: 'https://pionas.pom.go.id/'
+    },
+    {
+      name: 'Duplikasi Terapi',
+      shortName: 'Duplikasi Terapi',
+      count: duplikasiCount,
       severity: 'Sedang',
       color: '#38bdf8',
-      mechanism: 'Cetirizine half-life 24 jam; peresepan 2-3x sehari memicu sedasi berlebih & polifarmasi.',
-      recommendation: 'Koreksi frekuensi menjadi 1x1 tablet per hari malam hari.',
-      reference: 'BPOM PIONAS Setirizin & BNF 86 hal. 312',
-      referenceUrl: 'https://pionas.pom.go.id/monografi/setirizin-hidroklorida'
+      mechanism: 'Pemberian dua atau lebih obat dengan kelas farmakologis yang sama.',
+      recommendation: 'Hentikan duplikasi dan berikan monoterapi.',
+      reference: 'BPOM PIONAS',
+      referenceUrl: 'https://pionas.pom.go.id/'
     },
     {
-      name: 'Alergi Penisilin / Betalaktam',
-      shortName: 'Alergi Betalaktam',
-      count: 5,
-      severity: 'Kritis',
-      color: '#dc2626',
-      mechanism: 'Riwayat hipersensitivitas tipe I diperantarai IgE berisiko memicu anafilaksis fatal.',
-      recommendation: 'Hentikan segera; ganti antibiotik golongan makrolida (Azitromisin).',
-      reference: 'BNF 86 Bab 5.1.1 & Lexicomp Drug Allergy Reference',
-      referenceUrl: 'https://pionas.pom.go.id/monografi/amoksisilin'
+      name: 'Ganti Rx (Konfirmasi Dokter)',
+      shortName: 'Ganti Rx',
+      count: gantiRxCount,
+      severity: 'Sedang',
+      color: '#6366f1',
+      mechanism: 'Perlu konfirmasi ulang ke dokter peresep terkait dosis, aturan pakai, atau DRP.',
+      recommendation: 'Hubungi dokter peresep untuk klarifikasi dan revisi resep.',
+      reference: 'Standar Pelayanan Kefarmasian',
+      referenceUrl: 'https://pionas.pom.go.id/'
     },
     {
-      name: 'CCB + Makrolida',
-      shortName: 'CCB+Makrolida',
-      count: 4,
+      name: 'Ditolak (Ada DRPs)',
+      shortName: 'Ditolak DRPs',
+      count: ditolakCount,
       severity: 'Kritis',
-      color: '#dc2626',
-      mechanism: 'Penghambatan CYP3A4 meningkatkan kadar Amlodipine hingga memicu hipotensi berat & syok.',
-      recommendation: 'Ganti antibiotik alternatif atau pantau ketat tekanan darah & EKG.',
-      reference: 'Stockley\'s Drug Interactions & Lexicomp',
-      referenceUrl: 'https://www.drugs.com/drug-interactions.html'
+      color: '#e11d48',
+      mechanism: 'Resep ditolak karena DRPs berat atau ketidakpatuhan standar keselamatan pasien.',
+      recommendation: 'Tolak resep dan berikan lembar konseling farmasis.',
+      reference: 'Permenkes No. 73 Tahun 2016',
+      referenceUrl: 'https://pionas.pom.go.id/'
     }
   ];
 
@@ -212,7 +440,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </span>
           </div>
           <h2 className="text-xl sm:text-2xl font-black tracking-tight text-white mt-1">
-            Dashboard Manajemen Apotek & Praktek Dokter Latisha Farma
+            Dashboard Manajemen {pharmacyProfile.name?.trim() || 'Apotek & Klinik Latisha Farma'}
           </h2>
           <p className="text-xs text-slate-300 mt-0.5">
             Lokasi Aktif: <strong className="text-white">{currentBranch.name}</strong> · Sinkronisasi Real-Time Multi-Cabang Berjalan Normal
@@ -285,6 +513,300 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <span className="text-[11px] text-slate-500 font-medium mt-1 block">
             {medicines.length} Produk Master Obat
           </span>
+        </div>
+      </div>
+
+      {/* ========================================================================= */}
+      {/* GRAFIK PERBANDINGAN PENDAPATAN HARIAN (REGULER, KLINIK, FAKTUR MITRA)    */}
+      {/* ========================================================================= */}
+      <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-xs space-y-5">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-200 pb-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <BarChart3 className="w-4 h-4 text-slate-700 shrink-0" />
+              <h3 className="font-bold text-base text-slate-900 tracking-tight">
+                Perbandingan Pendapatan Harian per Kanal Penjualan
+              </h3>
+            </div>
+            <p className="text-xs text-slate-500">
+              Pemantauan omzet harian transaksi selesai antara Penjualan Reguler, Penjualan Klinik, dan Faktur Penjualan Mitra ({revenueRangeDays} hari terakhir).
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <div className="inline-flex items-center gap-1 p-1 bg-slate-100 rounded-xl border border-slate-200">
+              {([7, 14, 30] as const).map((days) => (
+                <button
+                  key={days}
+                  type="button"
+                  onClick={() => setRevenueRangeDays(days)}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition whitespace-nowrap shrink-0 cursor-pointer ${
+                    revenueRangeDays === days
+                      ? 'bg-white text-slate-900 shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  {days} Hari
+                </button>
+              ))}
+            </div>
+
+            <div className="inline-flex items-center gap-1 p-1 bg-slate-100 rounded-xl border border-slate-200">
+              <button
+                type="button"
+                onClick={() => setRevenueChartMode('bar')}
+                className={`px-3 py-1.5 text-xs font-bold rounded-lg transition whitespace-nowrap shrink-0 cursor-pointer ${
+                  revenueChartMode === 'bar'
+                    ? 'bg-slate-900 text-white shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Grafik Batang
+              </button>
+              <button
+                type="button"
+                onClick={() => setRevenueChartMode('area')}
+                className={`px-3 py-1.5 text-xs font-bold rounded-lg transition whitespace-nowrap shrink-0 cursor-pointer ${
+                  revenueChartMode === 'area'
+                    ? 'bg-slate-900 text-white shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Tren Area
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Ringkasan Akumulasi Periode */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 pb-4 border-b border-slate-100 text-xs">
+          <div className="space-y-1">
+            <span className="text-slate-500 font-semibold block">
+              Total Pendapatan ({revenueRangeDays} Hari)
+            </span>
+            <div className="font-mono tabular-nums font-black text-lg text-slate-900">
+              Rp {dailyRevenueComparison.periodTotal.toLocaleString('id-ID')}
+            </div>
+            <div className="text-[11px] text-slate-500 font-mono tabular-nums">
+              {dailyRevenueComparison.countReguler +
+                dailyRevenueComparison.countKlinik +
+                dailyRevenueComparison.countMitra}{' '}
+              transaksi aktif
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <span className="text-slate-600 font-semibold flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-xs bg-green-600 shrink-0" />
+              Penjualan Reguler
+            </span>
+            <div className="font-mono tabular-nums font-black text-lg text-green-700">
+              Rp {dailyRevenueComparison.sumReguler.toLocaleString('id-ID')}
+            </div>
+            <div className="text-[11px] text-slate-500 font-mono tabular-nums">
+              {dailyRevenueComparison.countReguler} trx ·{' '}
+              {dailyRevenueComparison.periodTotal > 0
+                ? `${Math.round((dailyRevenueComparison.sumReguler / dailyRevenueComparison.periodTotal) * 100)}%`
+                : '0%'}{' '}
+              porsi omzet
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <span className="text-slate-600 font-semibold flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-xs bg-red-600 shrink-0" />
+              Penjualan Klinik
+            </span>
+            <div className="font-mono tabular-nums font-black text-lg text-red-700">
+              Rp {dailyRevenueComparison.sumKlinik.toLocaleString('id-ID')}
+            </div>
+            <div className="text-[11px] text-slate-500 font-mono tabular-nums">
+              {dailyRevenueComparison.countKlinik} trx ·{' '}
+              {dailyRevenueComparison.periodTotal > 0
+                ? `${Math.round((dailyRevenueComparison.sumKlinik / dailyRevenueComparison.periodTotal) * 100)}%`
+                : '0%'}{' '}
+              porsi omzet
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <span className="text-slate-600 font-semibold flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-xs bg-blue-600 shrink-0" />
+              Faktur Penjualan Mitra
+            </span>
+            <div className="font-mono tabular-nums font-black text-lg text-blue-700">
+              Rp {dailyRevenueComparison.sumMitra.toLocaleString('id-ID')}
+            </div>
+            <div className="text-[11px] text-slate-500 font-mono tabular-nums">
+              {dailyRevenueComparison.countMitra} trx ·{' '}
+              {dailyRevenueComparison.periodTotal > 0
+                ? `${Math.round((dailyRevenueComparison.sumMitra / dailyRevenueComparison.periodTotal) * 100)}%`
+                : '0%'}{' '}
+              porsi omzet
+            </div>
+          </div>
+        </div>
+
+        {/* Chart Area */}
+        {dailyRevenueComparison.periodTotal === 0 ? (
+          <div className="py-12 px-6 text-center bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
+            <p className="font-bold text-slate-800 text-sm">
+              Belum ada transaksi pendapatan dalam {revenueRangeDays} hari terakhir
+            </p>
+            <p className="text-xs text-slate-500 max-w-md mx-auto">
+              Grafik perbandingan harian otomatis terisi saat ada transaksi kasir Reguler, Klinik, maupun Faktur Penjualan Mitra yang berstatus selesai.
+            </p>
+            <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => onNavigateTab('pos-kasir')}
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition cursor-pointer"
+              >
+                Buka Kasir POS
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigateTab('pos-riwayat')}
+                className="px-4 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-xl text-xs font-bold transition cursor-pointer"
+              >
+                Buat Faktur Penjualan Mitra
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="h-[320px] w-full pt-1">
+            <ResponsiveContainer width="100%" height="100%">
+              {revenueChartMode === 'bar' ? (
+                <BarChart
+                  data={dailyRevenueComparison.series}
+                  margin={{ top: 10, right: 16, left: 8, bottom: 8 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis
+                    dataKey="label"
+                    tick={{ fill: '#475569', fontSize: 11, fontWeight: 600 }}
+                    tickLine={false}
+                    axisLine={{ stroke: '#cbd5e1' }}
+                    minTickGap={revenueRangeDays === 30 ? 14 : 4}
+                  />
+                  <YAxis
+                    tick={{ fill: '#64748b', fontSize: 11 }}
+                    tickLine={false}
+                    axisLine={false}
+                    width={68}
+                    tickFormatter={formatCompactRupiah}
+                  />
+                  <Tooltip content={<CustomRevenueTooltip />} />
+                  <Legend
+                    wrapperStyle={{ fontSize: '12px', paddingTop: '10px', fontWeight: 600 }}
+                    iconType="square"
+                  />
+                  <Bar
+                    dataKey="reguler"
+                    name="Penjualan Reguler"
+                    fill="#16a34a"
+                    radius={[5, 5, 0, 0]}
+                    maxBarSize={24}
+                  />
+                  <Bar
+                    dataKey="klinik"
+                    name="Penjualan Klinik"
+                    fill="#dc2626"
+                    radius={[5, 5, 0, 0]}
+                    maxBarSize={24}
+                  />
+                  <Bar
+                    dataKey="mitra"
+                    name="Faktur Penjualan Mitra"
+                    fill="#2563eb"
+                    radius={[5, 5, 0, 0]}
+                    maxBarSize={24}
+                  />
+                </BarChart>
+              ) : (
+                <AreaChart
+                  data={dailyRevenueComparison.series}
+                  margin={{ top: 10, right: 16, left: 8, bottom: 8 }}
+                >
+                  <defs>
+                    <linearGradient id="revRegulerGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#16a34a" stopOpacity={0.28} />
+                      <stop offset="95%" stopColor="#16a34a" stopOpacity={0.02} />
+                    </linearGradient>
+                    <linearGradient id="revKlinikGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#dc2626" stopOpacity={0.26} />
+                      <stop offset="95%" stopColor="#dc2626" stopOpacity={0.02} />
+                    </linearGradient>
+                    <linearGradient id="revMitraGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#2563eb" stopOpacity={0.28} />
+                      <stop offset="95%" stopColor="#2563eb" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <XAxis
+                    dataKey="label"
+                    tick={{ fill: '#475569', fontSize: 11, fontWeight: 600 }}
+                    tickLine={false}
+                    axisLine={{ stroke: '#cbd5e1' }}
+                    minTickGap={revenueRangeDays === 30 ? 14 : 4}
+                  />
+                  <YAxis
+                    tick={{ fill: '#64748b', fontSize: 11 }}
+                    tickLine={false}
+                    axisLine={false}
+                    width={68}
+                    tickFormatter={formatCompactRupiah}
+                  />
+                  <Tooltip content={<CustomRevenueTooltip />} />
+                  <Legend
+                    wrapperStyle={{ fontSize: '12px', paddingTop: '10px', fontWeight: 600 }}
+                    iconType="square"
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="reguler"
+                    name="Penjualan Reguler"
+                    stroke="#16a34a"
+                    strokeWidth={2.2}
+                    fill="url(#revRegulerGrad)"
+                    activeDot={{ r: 5 }}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="klinik"
+                    name="Penjualan Klinik"
+                    stroke="#dc2626"
+                    strokeWidth={2.2}
+                    fill="url(#revKlinikGrad)"
+                    activeDot={{ r: 5 }}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="mitra"
+                    name="Faktur Penjualan Mitra"
+                    stroke="#2563eb"
+                    strokeWidth={2.2}
+                    fill="url(#revMitraGrad)"
+                    activeDot={{ r: 5 }}
+                  />
+                </AreaChart>
+              )}
+            </ResponsiveContainer>
+          </div>
+        )}
+
+        <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+          <span>
+            Tidak termasuk transaksi berstatus dibatalkan atau diretur.
+          </span>
+          <button
+            type="button"
+            onClick={() => onNavigateTab('keuangan-labarugi')}
+            className="text-slate-800 hover:text-sky-700 font-bold inline-flex items-center gap-1 cursor-pointer transition"
+          >
+            <span>Lihat Analisis Laba Rugi Lengkap</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
         </div>
       </div>
 
@@ -432,8 +954,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           <span className="text-[10px] font-mono text-slate-400">Barcode: {m.barcode}</span>
                         </td>
                         <td className="p-3 text-slate-600">
-                          <div>{m.category}</div>
-                          <span className="text-[10px] text-slate-400">{m.form}</span>
+                          <div className="flex items-center gap-2">
+                            <MedicineCategorySymbol category={m.category} size="sm" />
+                            <span className="text-[10px] text-slate-400">{m.form}</span>
+                          </div>
                         </td>
                         <td className="p-3 font-mono text-[11px] text-slate-700">
                           <div>No: {m.batchNo}</div>
@@ -566,35 +1090,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <span>Efektivitas Skrining Farmasi</span>
             </h4>
 
-            <div className="space-y-2">
-              <div className="p-3 bg-white rounded-xl border border-slate-200">
-                <span className="text-[10px] text-slate-400 font-bold block uppercase">
-                  Interaksi Tertinggi (Peringkat 1)
-                </span>
-                <span className="font-extrabold text-slate-900 text-xs block mt-0.5">
-                  Kortikosteroid + NSAID (18 Kasus)
-                </span>
-                <p className="text-[11px] text-slate-500 mt-0.5">
-                  Berhasil dicegah dengan pemberian gastroprotektor PPI atau penyesuaian aturan minum sesudah makan.
-                </p>
+            {lolosCount === 0 ? (
+              <div className="p-4 bg-white rounded-xl border border-slate-200 text-center text-slate-400 space-y-1">
+                <p className="font-bold text-slate-700 text-xs">Belum ada resep yang diloloskan</p>
+                <p className="text-[10px] text-slate-500">Data efektivitas skrining resep hanya akan ditampilkan jika terdapat resep yang disetujui/diloloskan.</p>
               </div>
-
-              <div className="p-3 bg-white rounded-xl border border-slate-200">
-                <span className="text-[10px] text-slate-400 font-bold block uppercase">
-                  Pencegahan Alergi Kritis
-                </span>
-                <span className="font-extrabold text-rose-700 text-xs block mt-0.5">
-                  5 Kasus Alergi Penisilin / Betalaktam
-                </span>
-                <p className="text-[11px] text-slate-500 mt-0.5">
-                  Dicegah 100% sebelum peracikan, dialihkan ke antibiotik makrolida aman.
-                </p>
+            ) : (
+              <div className="space-y-2">
+                <div className="p-3 bg-white rounded-xl border border-slate-200">
+                  <span className="text-[10px] text-slate-400 font-bold block uppercase">
+                    Resep Diloloskan (Aman)
+                  </span>
+                  <span className="font-extrabold text-emerald-700 text-xs block mt-0.5">
+                    {lolosCount} Resep Telah Disetujui
+                  </span>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Memenuhi standar administratif, farmasetik, dan klinis tanpa DRP bermakna.
+                  </p>
+                </div>
               </div>
-            </div>
+            )}
 
             <div className="pt-2 border-t border-slate-200 flex justify-between items-center text-[11px]">
-              <span className="text-slate-500">Rasio Intervensi Sukses:</span>
-              <span className="font-black text-emerald-700 font-mono">98.2% Lolos Monitoring</span>
+              <span className="text-slate-500">Total Resep Terproses:</span>
+              <span className="font-black text-slate-900 font-mono">{prescriptions.length} Kasus</span>
             </div>
           </div>
         </div>

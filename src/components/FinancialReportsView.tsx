@@ -17,7 +17,10 @@ import {
   Filter,
   Stethoscope,
   RotateCcw,
-  ClipboardCheck
+  ClipboardCheck,
+  Wallet,
+  Flame,
+  Download
 } from 'lucide-react';
 import {
   Transaction,
@@ -29,10 +32,38 @@ import {
   StaffFeeItem,
   StockOpnameRecord,
   StockOpnameItemRecord,
-  StockMutation
+  StockMutation,
+  FeeConfig,
+  DutySchedule,
+  StaffAttendanceRecord,
+  StaffFeeLedgerEntry,
+  isOwnerAdminRole
 } from '../types';
 import { openPrintWindow } from '../utils/printHelper';
-import { getSavedPharmacyProfile, getSavedAPJProfile, getSavedDPJProfile } from './PharmacySettingsModal';
+import { PaginationControls } from './PaginationControls';
+import { MedicineCategorySymbol } from './MedicineCategorySymbol';
+import { useFacilityProfiles, formatPharmacyAddress } from './PharmacySettingsModal';
+import {
+  ATTENDANCE_UPDATED_EVENT,
+  formatIsoToIdDate,
+  formatMinutesDuration,
+  loadLocalAttendanceRecords,
+  syncAllAttendanceWithSupabase
+} from '../utils/attendanceService';
+import {
+  PAYROLL_CONFIG_UPDATED_EVENT,
+  PAYROLL_ROLE_LIST,
+  buildStaffPayrollSummary,
+  loadLocalPayrollConfig
+} from '../utils/payrollService';
+import { isDemoMode } from '../utils/demoSandbox';
+import { isJasaCartItem } from '../utils/transactionPrintHelper';
+import {
+  loadLocalFeeLedger,
+  resolveTransactionStaffFees,
+  summarizeLedgerRevenueSplit
+} from '../utils/serviceFeeHelper';
+import { getDeletedIdsSet } from '../utils/deletionRegistry';
 
 interface FinancialReportsViewProps {
   transactions: Transaction[];
@@ -43,6 +74,9 @@ interface FinancialReportsViewProps {
   staffList?: Staff[];
   opnameRecords?: StockOpnameRecord[];
   stockMutations?: StockMutation[];
+  feeConfig?: FeeConfig;
+  schedules?: DutySchedule[];
+  feeLedger?: StaffFeeLedgerEntry[];
   initialTab?: 'laba-rugi' | 'valuasi-aset' | 'fee-medis' | 'hutang-pbf' | 'hasil-stokopname';
 }
 
@@ -69,8 +103,17 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
   staffList = [],
   opnameRecords = [],
   stockMutations = [],
+  feeConfig,
+  schedules = [],
+  feeLedger: propFeeLedger,
   initialTab
 }) => {
+  const effectiveFeeLedger = useMemo(
+    () => (propFeeLedger !== undefined ? propFeeLedger : loadLocalFeeLedger()),
+    [propFeeLedger]
+  );
+  const { pharmacyProfile, apjProfile, dpjProfile } = useFacilityProfiles();
+  const pharmacyFullAddress = formatPharmacyAddress(pharmacyProfile);
   const toLocalYMD = (d: Date): string => {
     const year = d.getFullYear();
     const month = String(d.getMonth() + 1).padStart(2, '0');
@@ -106,6 +149,49 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
 
   const [startDate, setStartDate] = useState('2026-10-01');
   const [endDate, setEndDate] = useState(() => toLocalYMD(new Date()));
+  const [valuationPage, setValuationPage] = useState(1);
+  const [valuationPageSize, setValuationPageSize] = useState<number>(25);
+
+  // Lazy-loaded Attendance & Payroll Config state (only syncs Supabase when tab 'fee-medis' is opened)
+  const [attendanceRecords, setAttendanceRecords] = useState<StaffAttendanceRecord[]>(() =>
+    loadLocalAttendanceRecords()
+  );
+  const [attendanceSyncedOnce, setAttendanceSyncedOnce] = useState(false);
+  const [payrollRefreshTick, setPayrollRefreshTick] = useState(0);
+  const [payrollRoleFilter, setPayrollRoleFilter] = useState<string>('SEMUA');
+  const [salaryModeOverride, setSalaryModeOverride] = useState<'config' | 'full-month' | 'prorata-days'>('config');
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onAttendanceUpdate = () => setAttendanceRecords(loadLocalAttendanceRecords());
+    const onPayrollUpdate = () => setPayrollRefreshTick((t) => t + 1);
+    window.addEventListener(ATTENDANCE_UPDATED_EVENT, onAttendanceUpdate);
+    window.addEventListener(PAYROLL_CONFIG_UPDATED_EVENT, onPayrollUpdate);
+    return () => {
+      window.removeEventListener(ATTENDANCE_UPDATED_EVENT, onAttendanceUpdate);
+      window.removeEventListener(PAYROLL_CONFIG_UPDATED_EVENT, onPayrollUpdate);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'fee-medis' || attendanceSyncedOnce) return;
+    setAttendanceSyncedOnce(true);
+    setAttendanceRecords(loadLocalAttendanceRecords());
+    if (!isDemoMode()) {
+      syncAllAttendanceWithSupabase()
+        .then((res) => {
+          if (res.records) setAttendanceRecords(res.records);
+        })
+        .catch(() => {});
+    }
+  }, [activeTab, attendanceSyncedOnce]);
+
+  const valuationTotalPages = Math.max(1, Math.ceil(medicines.length / valuationPageSize));
+  const safeValuationPage = Math.min(valuationPage, valuationTotalPages);
+  const paginatedValuationMedicines = useMemo(() => {
+    const start = (safeValuationPage - 1) * valuationPageSize;
+    return medicines.slice(start, start + valuationPageSize);
+  }, [medicines, safeValuationPage, valuationPageSize]);
 
   const handleSetDatePreset = (preset: 'today' | '7days' | 'month' | 'all') => {
     const now = new Date();
@@ -128,9 +214,10 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
     }
   };
 
-  // 1. Financial Calculations from Transactions
+  // 1. Financial Calculations from Active Transactions (exclude cancelled/returned)
   const filteredTransactions = useMemo(() => {
     return transactions.filter((t) => {
+      if (t.status === 'Dibatalkan' || t.status === 'Diretur') return false;
       const d = normalizeDateToYMD(t.date);
       return (!startDate || d >= startDate) && (!endDate || d <= endDate);
     });
@@ -148,20 +235,77 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
     });
   }, [rmeRecords, startDate, endDate]);
 
-  // 3. Filtered Clinic Transactions from POS Kasir
-  const completedClinicTransactions = useMemo(() => {
-    return filteredTransactions.filter((t) => t.type === 'KLINIK');
-  }, [filteredTransactions]);
+  // 3. Active POS Fee Ledger rows in date range & Service Transactions across all POS tiers (REGULER / KLINIK / MITRA)
+  const activeLedgerEntries = useMemo(() => {
+    const deletedTrxIds = getDeletedIdsSet('transactions');
+    const deletedLedgerIds = getDeletedIdsSet('fee_ledger');
+    const activeTrxIds = new Set(
+      transactions
+        .filter(
+          (t) =>
+            t?.id &&
+            t.status !== 'Dibatalkan' &&
+            t.status !== 'Diretur' &&
+            !deletedTrxIds.has(String(t.id).trim())
+        )
+        .map((t) => String(t.id).trim())
+    );
+    return effectiveFeeLedger.filter((e) => {
+      if (!e?.id) return false;
+      const cleanId = String(e.id).trim();
+      const cleanTrxId = String(e.transaction_id || '').trim();
+      if (deletedLedgerIds.has(cleanId) || (cleanTrxId && deletedTrxIds.has(cleanTrxId))) {
+        return false;
+      }
+      if (!cleanTrxId || !activeTrxIds.has(cleanTrxId)) return false;
+      if (e.status_pembayaran === 'dibatalkan') return false;
+      if ((Number(e.total_fee_item) || 0) <= 0) return false;
+      const d = normalizeDateToYMD(e.transaction_date || e.transaction_datetime);
+      return (!startDate || d >= startDate) && (!endDate || d <= endDate);
+    });
+  }, [effectiveFeeLedger, transactions, startDate, endDate]);
 
-  // 4. Unified Clinical Service Events: Integrate Ruang Periksa Dokter (RME) + POS Kasir
+  const ledgerStatusTotals = useMemo(() => {
+    return activeLedgerEntries.reduce(
+      (acc, e) => {
+        const amt = Number(e.total_fee_item) || 0;
+        if (e.status_pembayaran === 'dibayar') acc.paid += amt;
+        else acc.unpaid += amt;
+        return acc;
+      },
+      { unpaid: 0, paid: 0 }
+    );
+  }, [activeLedgerEntries]);
+
+  const ledgerRevenueSplit = useMemo(
+    () => summarizeLedgerRevenueSplit(activeLedgerEntries),
+    [activeLedgerEntries]
+  );
+
+  const completedServiceTransactions = useMemo(() => {
+    const activeLedgerTrxIds = new Set(activeLedgerEntries.map((e) => e.transaction_id));
+    return filteredTransactions.filter(
+      (t) =>
+        t.type === 'KLINIK' ||
+        (t.assignedStaff && t.assignedStaff.length > 0) ||
+        (t.items || []).some(
+          (it) =>
+            isJasaCartItem(it) &&
+            Boolean(it.petugas_id) &&
+            (Number(it.total_fee_item) || 0) > 0
+        ) ||
+        activeLedgerTrxIds.has(t.id)
+    );
+  }, [filteredTransactions, activeLedgerEntries]);
+
+  // 4. Unified Clinical & Service Events: Integrate Ruang Periksa Dokter (RME) + Multi-Tier POS Kasir + Fee Ledger
   const clinicalServiceEvents = useMemo(() => {
     const events: ClinicalServiceEvent[] = [];
     const matchedTrxIds = new Set<string>();
 
     // Step A: Process each examination from Ruang Periksa Dokter (RME)
     filteredRmeRecords.forEach((rme) => {
-      // Find matching transaction completed in POS Kasir
-      const matchedTrx = completedClinicTransactions.find(
+      const matchedTrx = completedServiceTransactions.find(
         (t) =>
           !matchedTrxIds.has(t.id) &&
           ((t.rmId && t.rmId === rme.rmId) ||
@@ -173,12 +317,15 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
         matchedTrxIds.add(matchedTrx.id);
       }
 
-      // Determine assigned staff from RME record or POS transaction
+      const posResolved = matchedTrx
+        ? resolveTransactionStaffFees(matchedTrx, effectiveFeeLedger, staffList)
+        : [];
+
       let staffAssigned: StaffFeeItem[] = [];
-      if (rme.assignedStaff && rme.assignedStaff.length > 0) {
+      if (posResolved.length > 0) {
+        staffAssigned = posResolved;
+      } else if (rme.assignedStaff && rme.assignedStaff.length > 0) {
         staffAssigned = rme.assignedStaff;
-      } else if (matchedTrx?.assignedStaff && matchedTrx.assignedStaff.length > 0) {
-        staffAssigned = matchedTrx.assignedStaff;
       } else {
         const docName = rme.doctorName || matchedTrx?.doctorName || 'dr. Anis Prima Dewi';
         staffAssigned = [
@@ -224,24 +371,13 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
       });
     });
 
-    // Step B: Add any clinic transaction in POS that was not linked to an RME record
-    completedClinicTransactions.forEach((trx) => {
+    // Step B: Add any POS transaction (KLINIK / REGULER / MITRA) with service fees not linked to an RME record
+    completedServiceTransactions.forEach((trx) => {
       if (matchedTrxIds.has(trx.id)) return;
+      matchedTrxIds.add(trx.id);
 
-      let staffAssigned: StaffFeeItem[] = [];
-      if (trx.assignedStaff && trx.assignedStaff.length > 0) {
-        staffAssigned = trx.assignedStaff;
-      } else {
-        const docName = trx.doctorName || 'dr. Anis Prima Dewi';
-        staffAssigned = [
-          {
-            staffId: staffList.find((s) => s.role === 'Dokter' || s.name === docName)?.id || 'STF-02',
-            staffName: docName,
-            role: 'Dokter',
-            fee: 20000
-          }
-        ];
-      }
+      const staffAssigned = resolveTransactionStaffFees(trx, effectiveFeeLedger, staffList);
+      if (staffAssigned.length === 0) return;
 
       const totalFee = staffAssigned.reduce((acc, s) => acc + s.fee, 0);
 
@@ -259,9 +395,54 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
       });
     });
 
+    // Step C: Any active ledger entries whose transaction_id isn't in completedServiceTransactions
+    const orphanLedgerByTrx = new Map<string, StaffFeeLedgerEntry[]>();
+    activeLedgerEntries.forEach((entry) => {
+      if (matchedTrxIds.has(entry.transaction_id)) return;
+      const list = orphanLedgerByTrx.get(entry.transaction_id) || [];
+      list.push(entry);
+      orphanLedgerByTrx.set(entry.transaction_id, list);
+    });
+
+    orphanLedgerByTrx.forEach((rows, trxId) => {
+      const staffMap = new Map<string, StaffFeeItem>();
+      rows.forEach((r) => {
+        const prev = staffMap.get(r.petugas_id);
+        if (prev) {
+          prev.fee += Number(r.total_fee_item) || 0;
+        } else {
+          staffMap.set(r.petugas_id, {
+            staffId: r.petugas_id,
+            staffName: r.nama_petugas,
+            role: r.role_petugas,
+            fee: Number(r.total_fee_item) || 0
+          });
+        }
+      });
+      const assignedStaff = Array.from(staffMap.values());
+      const first = rows[0];
+      events.push({
+        id: trxId,
+        date: first.transaction_datetime || first.transaction_date,
+        dateOnly: first.transaction_date,
+        patientName: first.customer_name || 'Reguler',
+        source: 'POS Kasir Langsung',
+        status: 'Selesai di POS Kasir',
+        assignedStaff,
+        totalFee: assignedStaff.reduce((acc, s) => acc + s.fee, 0),
+        trxId
+      });
+    });
+
     // Sort newest date first
     return events.sort((a, b) => b.date.localeCompare(a.date));
-  }, [filteredRmeRecords, completedClinicTransactions, staffList]);
+  }, [
+    filteredRmeRecords,
+    completedServiceTransactions,
+    activeLedgerEntries,
+    effectiveFeeLedger,
+    staffList
+  ]);
 
   // 5. Aggregated Fee per Staff Member (Data Pegawai) from Unified Clinical Events
   const staffFeeSummaries = useMemo(() => {
@@ -269,7 +450,7 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
       staffList.length > 0
         ? staffList
         : [
-            { id: 'STF-01', name: 'apt. Mardin, S.Farm', role: 'Super Admin / APJ', phone: '0812-3456-7890', status: 'Aktif', branchId: 'BR-01' },
+            { id: 'STF-01', name: 'apt. Mardin, S.Farm', role: 'APJ / Owner', phone: '0812-3456-7890', status: 'Aktif', branchId: 'BR-01' },
             { id: 'STF-02', name: 'dr. Anis Prima Dewi', role: 'Dokter', phone: '0813-4567-8901', status: 'Aktif', branchId: 'BR-01' },
             { id: 'STF-03', name: 'Ns. Siti Nurhaliza, S.Kep', role: 'Perawat / Bidan', phone: '0814-5678-9012', status: 'Aktif', branchId: 'BR-01' },
             { id: 'STF-04', name: 'Rina Kartika, A.Md.Farm', role: 'Apoteker', phone: '0815-6789-0123', status: 'Aktif', branchId: 'BR-01' }
@@ -340,27 +521,235 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
     return staffFeeSummaries.reduce((acc, s) => acc + s.totalFee, 0);
   }, [staffFeeSummaries]);
 
+  // 5b. Unified Rekap Gaji, Fee, dan Lembur Hari Minggu per Pegawai
+  const activePayrollConfig = useMemo(
+    () => loadLocalPayrollConfig(feeConfig),
+    [feeConfig, payrollRefreshTick]
+  );
+
+  const payrollSummary = useMemo(() => {
+    const baseStaff: Staff[] =
+      staffList.length > 0
+        ? staffList
+        : [
+            { id: 'STF-01', name: 'apt. Mardin, S.Farm', role: 'APJ / Owner', phone: '0812-3456-7890', status: 'Aktif', branchId: 'BR-01' },
+            { id: 'STF-02', name: 'dr. Anis Prima Dewi', role: 'Dokter', phone: '0813-4567-8901', status: 'Aktif', branchId: 'BR-01' },
+            { id: 'STF-03', name: 'Ns. Siti Nurhaliza, S.Kep', role: 'Perawat / Bidan', phone: '0814-5678-9012', status: 'Aktif', branchId: 'BR-01' },
+            { id: 'STF-04', name: 'Rina Kartika, A.Md.Farm', role: 'Apoteker', phone: '0815-6789-0123', status: 'Aktif', branchId: 'BR-01' }
+          ];
+
+    return buildStaffPayrollSummary({
+      staffList: baseStaff,
+      payrollConfig: activePayrollConfig,
+      attendanceRecords,
+      schedules,
+      staffFeeInputs: staffFeeSummaries.map((s) => ({
+        staffId: s.staffId,
+        staffName: s.staffName,
+        role: s.role,
+        patientCount: s.patientCount,
+        totalFee: s.totalFee
+      })),
+      startDate,
+      endDate,
+      salaryModeOverride
+    });
+  }, [
+    staffList,
+    activePayrollConfig,
+    attendanceRecords,
+    schedules,
+    staffFeeSummaries,
+    startDate,
+    endDate,
+    salaryModeOverride
+  ]);
+
+  const filteredPayrollRows = useMemo(() => {
+    if (payrollRoleFilter === 'SEMUA') return payrollSummary.rows;
+    return payrollSummary.rows.filter((r) => r.role === payrollRoleFilter);
+  }, [payrollSummary.rows, payrollRoleFilter]);
+
+  const filteredPayrollTotals = useMemo(() => {
+    return filteredPayrollRows.reduce(
+      (acc, r) => {
+        acc.baseSalaryPay += r.baseSalaryPay;
+        acc.fixedAllowancePay += r.fixedAllowancePay;
+        acc.totalSalaryPay += r.totalSalaryPay;
+        acc.totalFeePay += r.totalFeePay;
+        acc.totalPatients += r.patientCount;
+        acc.plannedOvertimePay += r.plannedOvertimePay;
+        acc.unscheduledOvertimePay += r.unscheduledOvertimePay;
+        acc.totalOvertimePay += r.totalOvertimePay;
+        acc.totalOvertimeMinutes += r.totalOvertimeMinutes;
+        acc.sundayOvertimeSessions += r.sundayOvertimeSessions;
+        acc.pendingOvertimeSessions += r.pendingOvertimeSessions;
+        acc.grandTotal += r.grandTotal;
+        return acc;
+      },
+      {
+        baseSalaryPay: 0,
+        fixedAllowancePay: 0,
+        totalSalaryPay: 0,
+        totalFeePay: 0,
+        totalPatients: 0,
+        plannedOvertimePay: 0,
+        unscheduledOvertimePay: 0,
+        totalOvertimePay: 0,
+        totalOvertimeMinutes: 0,
+        sundayOvertimeSessions: 0,
+        pendingOvertimeSessions: 0,
+        grandTotal: 0
+      }
+    );
+  }, [filteredPayrollRows]);
+
+  const handleExportPayrollCsv = () => {
+    const header = [
+      'No',
+      'ID Pegawai',
+      'Nama Pegawai',
+      'Peran',
+      'Hadir (Hari)',
+      'Cuti (Hari)',
+      'Shift Aktif',
+      'Gaji Pokok (Rp)',
+      'Tunjangan Tetap (Rp)',
+      'Total Gaji (Rp)',
+      'Jumlah Pasien Fee',
+      'Total Fee Layanan (Rp)',
+      'Sesi Lembur Minggu',
+      'Durasi Lembur (Menit)',
+      'Lembur Terencana (Rp)',
+      'Lembur di Luar Jadwal (Rp)',
+      'Total Lembur Minggu (Rp)',
+      'Total Keseluruhan Gaji + Fee + Lembur (Rp)'
+    ];
+    const escapeCell = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`;
+    const bodyLines = filteredPayrollRows.map((r, i) =>
+      [
+        i + 1,
+        r.staffId,
+        r.staffName,
+        r.role,
+        r.presentDays,
+        r.leaveDays,
+        r.scheduledShiftCount,
+        r.baseSalaryPay,
+        r.fixedAllowancePay,
+        r.totalSalaryPay,
+        r.patientCount,
+        r.totalFeePay,
+        r.sundayOvertimeSessions,
+        r.totalOvertimeMinutes,
+        r.plannedOvertimePay,
+        r.unscheduledOvertimePay,
+        r.totalOvertimePay,
+        r.grandTotal
+      ]
+        .map(escapeCell)
+        .join(',')
+    );
+    const totalLine = [
+      '',
+      '',
+      'TOTAL KESELURUHAN',
+      '',
+      '',
+      '',
+      '',
+      filteredPayrollTotals.baseSalaryPay,
+      filteredPayrollTotals.fixedAllowancePay,
+      filteredPayrollTotals.totalSalaryPay,
+      filteredPayrollTotals.totalPatients,
+      filteredPayrollTotals.totalFeePay,
+      filteredPayrollTotals.sundayOvertimeSessions,
+      filteredPayrollTotals.totalOvertimeMinutes,
+      filteredPayrollTotals.plannedOvertimePay,
+      filteredPayrollTotals.unscheduledOvertimePay,
+      filteredPayrollTotals.totalOvertimePay,
+      filteredPayrollTotals.grandTotal
+    ]
+      .map(escapeCell)
+      .join(',');
+
+    const csv = '\uFEFF' + [header.map(escapeCell).join(','), ...bodyLines, totalLine].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Rekap_Gaji_Fee_Lembur_${startDate}_sd_${endDate}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   // Categorical Breakdown for Laba Rugi Report
+  const isDocFeeRole = (role?: string) => {
+    const low = String(role || '').toLowerCase();
+    return role === 'Dokter' || low.includes('dokter');
+  };
+  const isSupportFeeRole = (role?: string) => {
+    const low = String(role || '').toLowerCase();
+    return (
+      role === 'Perawat / Bidan' ||
+      role === 'Perawat / Nakes Lapangan' ||
+      low.includes('perawat') ||
+      low.includes('bidan') ||
+      low.includes('nakes')
+    );
+  };
+  const isPharmacistFeeRole = (role?: string) => {
+    const low = String(role || '').toLowerCase();
+    return (
+      role === 'Apoteker' ||
+      isOwnerAdminRole(role) ||
+      low.includes('apoteker') ||
+      low.includes('apj')
+    );
+  };
+
   const totalDoctorFee = useMemo(() => {
-    const feeFromStaff = staffFeeSummaries
-      .filter((s) => s.role === 'Dokter')
-      .reduce((acc, s) => acc + s.totalFee, 0);
-    return feeFromStaff > 0 ? feeFromStaff : filteredRmeRecords.reduce((acc, r) => acc + (r.doctorFee || 20000), 0);
-  }, [staffFeeSummaries, filteredRmeRecords]);
+    if (totalStaffFeesAccumulated > 0) {
+      return staffFeeSummaries
+        .filter((s) => isDocFeeRole(s.role))
+        .reduce((acc, s) => acc + s.totalFee, 0);
+    }
+    return filteredRmeRecords.reduce((acc, r) => acc + (r.doctorFee || 20000), 0);
+  }, [staffFeeSummaries, totalStaffFeesAccumulated, filteredRmeRecords]);
 
   const totalSupportFee = useMemo(() => {
-    const feeFromStaff = staffFeeSummaries
-      .filter((s) => s.role === 'Perawat / Bidan' || s.role === 'Perawat / Nakes Lapangan')
-      .reduce((acc, s) => acc + s.totalFee, 0);
-    return feeFromStaff > 0 ? feeFromStaff : filteredRmeRecords.reduce((acc, r) => acc + (r.medicalSupportFee || 5000), 0);
-  }, [staffFeeSummaries, filteredRmeRecords]);
+    if (totalStaffFeesAccumulated > 0) {
+      return staffFeeSummaries
+        .filter((s) => !isDocFeeRole(s.role) && isSupportFeeRole(s.role))
+        .reduce((acc, s) => acc + s.totalFee, 0);
+    }
+    return filteredRmeRecords.reduce((acc, r) => acc + (r.medicalSupportFee || 5000), 0);
+  }, [staffFeeSummaries, totalStaffFeesAccumulated, filteredRmeRecords]);
+
+  const totalPharmacistFee = useMemo(() => {
+    if (totalStaffFeesAccumulated > 0) {
+      return staffFeeSummaries
+        .filter((s) => !isDocFeeRole(s.role) && !isSupportFeeRole(s.role) && isPharmacistFeeRole(s.role))
+        .reduce((acc, s) => acc + s.totalFee, 0);
+    }
+    return 0;
+  }, [staffFeeSummaries, totalStaffFeesAccumulated]);
 
   const totalAdminFee = useMemo(() => {
-    const feeFromStaff = staffFeeSummaries
-      .filter((s) => s.role === 'Kasir & Front Office')
-      .reduce((acc, s) => acc + s.totalFee, 0);
-    return feeFromStaff > 0 ? feeFromStaff : filteredRmeRecords.reduce((acc, r) => acc + (r.adminFee || 1000), 0);
-  }, [staffFeeSummaries, filteredRmeRecords]);
+    if (totalStaffFeesAccumulated > 0) {
+      return staffFeeSummaries
+        .filter(
+          (s) =>
+            !isDocFeeRole(s.role) &&
+            !isSupportFeeRole(s.role) &&
+            !isPharmacistFeeRole(s.role)
+        )
+        .reduce((acc, s) => acc + s.totalFee, 0);
+    }
+    return filteredRmeRecords.reduce((acc, r) => acc + (r.adminFee || 1000), 0);
+  }, [staffFeeSummaries, totalStaffFeesAccumulated, filteredRmeRecords]);
 
   // Total medical fee expenses
   const totalMedicalExpenses = totalStaffFeesAccumulated > 0
@@ -471,7 +860,7 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
             Laporan Keuangan Otomatis Terintegrasi Inventaris Pusat
           </h3>
           <p className="text-xs text-slate-500 mt-0.5">
-            Laba rugi real-time, laporan hasil stokopname (nominal selisih), valuasi aset, fee medis & hutang PBF.
+            Laba rugi real-time, laporan hasil stokopname, valuasi aset, rekap gaji, fee & lembur Minggu, serta hutang PBF.
           </p>
         </div>
 
@@ -509,13 +898,14 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
           </button>
           <button
             onClick={() => setActiveTab('fee-medis')}
-            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
               activeTab === 'fee-medis'
                 ? 'bg-amber-500 text-slate-950 shadow-xs'
                 : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
             }`}
           >
-            Rekap Fee Shift Medis
+            <Wallet className="w-3.5 h-3.5" />
+            <span>Rekap Gaji, Fee, dan Lembur</span>
           </button>
           <button
             onClick={() => setActiveTab('hutang-pbf')}
@@ -529,7 +919,14 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
           </button>
 
           <button
-            onClick={() => openPrintWindow('laporan-keuangan', { tab: activeTab, startDate, endDate })}
+            onClick={() =>
+              openPrintWindow('laporan-keuangan', {
+                tab: activeTab,
+                startDate,
+                endDate,
+                salaryMode: salaryModeOverride
+              })
+            }
             className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 active:scale-95 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs"
           >
             <Printer className="w-3.5 h-3.5" />
@@ -614,42 +1011,42 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
         id="printable-section"
         className="bg-white p-8 rounded-3xl border border-slate-200 shadow-xs space-y-6 text-xs text-slate-800"
       >
-        {(() => {
-          const pharmacyProfile = getSavedPharmacyProfile();
-          const apjProfile = getSavedAPJProfile();
-          return (
-            <div className="border-b-2 border-slate-900 pb-4">
-              <div className="flex items-center justify-between gap-4">
-                {pharmacyProfile.logoUrl ? (
-                  <div className="w-16 h-16 shrink-0 flex items-center justify-center">
-                    <img
-                      src={pharmacyProfile.logoUrl}
-                      alt="Logo Faskes"
-                      className="w-16 h-16 object-contain"
-                    />
-                  </div>
-                ) : (
-                  <div className="w-16 shrink-0" />
-                )}
-                <div className="flex-1 text-center">
-                  <h2 className="font-black text-base text-slate-900 uppercase">
-                    {pharmacyProfile.name}
-                  </h2>
-                  <p className="text-[11px] text-slate-600">
-                    {pharmacyProfile.address}, {pharmacyProfile.city} · Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
-                  </p>
-                  <p className="text-[10px] text-slate-500 font-mono mt-0.5">
-                    SIA: {pharmacyProfile.sia} · NPWP: {pharmacyProfile.npwp} · APJ: {apjProfile.name} (SIPA: {apjProfile.sipa})
-                  </p>
-                </div>
-                <div className="w-16 shrink-0" />
+        <div className="border-b-2 border-slate-900 pb-4">
+          <div className="flex items-center justify-between gap-4">
+            {pharmacyProfile.logoUrl ? (
+              <div className="w-16 h-16 shrink-0 flex items-center justify-center">
+                <img
+                  src={pharmacyProfile.logoUrl}
+                  alt="Logo Faskes"
+                  className="w-16 h-16 object-contain"
+                />
               </div>
+            ) : (
+              <div className="w-16 shrink-0" />
+            )}
+            <div className="flex-1 text-center">
+              <h2 className="font-black text-base text-slate-900 uppercase">
+                {pharmacyProfile.name}
+              </h2>
+              <p className="text-[11px] text-slate-600">
+                {pharmacyFullAddress} · Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
+              </p>
+              <p className="text-[10px] text-slate-600 font-mono mt-0.5">
+                {[
+                  pharmacyProfile.sia ? `SIA: ${pharmacyProfile.sia}` : '',
+                  pharmacyProfile.nib ? `NIB: ${pharmacyProfile.nib}` : '',
+                  pharmacyProfile.npwp ? `NPWP: ${pharmacyProfile.npwp}` : ''
+                ].filter(Boolean).join(' · ')}
+              </p>
+            </div>
+            <div className="w-16 shrink-0" />
+          </div>
               <div className="text-center">
                 <div className="mt-2 inline-block px-4 py-1 bg-emerald-50 text-emerald-900 rounded-full font-black text-xs uppercase border border-emerald-300">
                   {activeTab === 'laba-rugi' && 'LAPORAN LABA RUGI OPERASIONAL & HASIL STOKOPNAME'}
                   {activeTab === 'hasil-stokopname' && 'LAPORAN HASIL STOKOPNAME & NOMINAL SELISIH INVENTARIS'}
                   {activeTab === 'valuasi-aset' && 'LAPORAN VALUASI ASET INVENTARIS SENTRAL'}
-                  {activeTab === 'fee-medis' && 'REKAPITULASI JASA DOKTER & PETUGAS MEDIS'}
+                  {activeTab === 'fee-medis' && 'REKAPITULASI GAJI, FEE LAYANAN MEDIS, DAN LEMBUR HARI MINGGU'}
                   {activeTab === 'hutang-pbf' && 'DAFTAR HUTANG FAKTUR PEMBELIAN SUPPLIER (PBF)'}
                 </div>
               </div>
@@ -707,8 +1104,6 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
             </span>
           </p>
         </div>
-          );
-        })()}
 
         {/* Tab 1: Laba Rugi Otomatis & Laporan Hasil Stokopname */}
         {activeTab === 'laba-rugi' && (
@@ -753,9 +1148,26 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
                 <span>Rp {totalSupportFee.toLocaleString('id-ID')}</span>
               </div>
               <div className="flex justify-between text-slate-600 pl-4">
-                <span>- Biaya Administrasi Front Office</span>
+                <span>- Jasa Pelayanan Kefarmasian (Apoteker / APJ)</span>
+                <span>Rp {totalPharmacistFee.toLocaleString('id-ID')}</span>
+              </div>
+              <div className="flex justify-between text-slate-600 pl-4">
+                <span>- Jasa Kasir / Front Office &amp; Petugas Lainnya</span>
                 <span>Rp {totalAdminFee.toLocaleString('id-ID')}</span>
               </div>
+              {ledgerRevenueSplit.serviceLineCount > 0 && (
+                <div className="mt-2 pt-2 border-t border-slate-200/80 pl-4 text-[11px] flex flex-wrap justify-between gap-2 text-slate-500">
+                  <span>
+                    Info Bagi Hasil Jasa POS ({ledgerRevenueSplit.serviceLineCount} item layanan): Biaya Pasien{' '}
+                    <strong className="text-slate-700">Rp {ledgerRevenueSplit.totalBiayaLayanan.toLocaleString('id-ID')}</strong>
+                    {' − '}Fee Petugas{' '}
+                    <strong className="text-indigo-700">Rp {ledgerRevenueSplit.totalFeePetugas.toLocaleString('id-ID')}</strong>
+                  </span>
+                  <span className="font-bold text-emerald-700">
+                    Bagian Fasilitas: Rp {ledgerRevenueSplit.totalFeeFasilitas.toLocaleString('id-ID')}
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* 4. Laporan Hasil Stokopname (Mencatat & Menyimpan Nominal Selisih Stokopname) */}
@@ -956,7 +1368,7 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
               <thead className="bg-slate-100 font-bold uppercase text-[10px] text-slate-700">
                 <tr>
                   <th className="p-2.5 border">Nama Obat / Barang</th>
-                  <th className="p-2.5 border">Kategori</th>
+                  <th className="p-2.5 border text-center">Kategori</th>
                   <th className="p-2.5 border text-center w-20">Stok</th>
                   <th className="p-2.5 border text-right w-28">HPP Beli (+11%)</th>
                   <th className="p-2.5 border text-right w-28">Harga Jual</th>
@@ -964,12 +1376,16 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y font-medium text-slate-700">
-                {medicines.map((m) => {
+                {paginatedValuationMedicines.map((m) => {
                   const subTotalHpp = m.stock * m.hpp;
                   return (
                     <tr key={m.id} className="border-b hover:bg-slate-50">
                       <td className="p-2.5 border font-bold text-slate-900">{m.name}</td>
-                      <td className="p-2.5 border text-slate-600">{m.category}</td>
+                      <td className="p-2.5 border text-center">
+                        <div className="inline-flex items-center justify-center">
+                          <MedicineCategorySymbol category={m.category} size="sm" />
+                        </div>
+                      </td>
                       <td className="p-2.5 border text-center font-mono font-bold">{m.stock} {m.unit}</td>
                       <td className="p-2.5 border text-right font-mono">Rp {m.hpp.toLocaleString('id-ID')}</td>
                       <td className="p-2.5 border text-right font-mono">Rp {m.sellPrice.toLocaleString('id-ID')}</td>
@@ -981,51 +1397,57 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
                 })}
               </tbody>
             </table>
+            <div className="border border-slate-200 rounded-xl overflow-hidden no-print">
+              <PaginationControls
+                currentPage={safeValuationPage}
+                totalPages={valuationTotalPages}
+                totalCount={medicines.length}
+                pageSize={valuationPageSize}
+                onPageChange={setValuationPage}
+                onPageSizeChange={(sz) => {
+                  setValuationPageSize(sz);
+                  setValuationPage(1);
+                }}
+                itemLabel="obat valuasi"
+              />
+            </div>
             <div className="text-right text-sm font-black font-mono text-slate-900 pt-2">
               Total Valuasi Nilai Aset Obat Sentral: <span className="text-sky-800">Rp {totalAssetValue.toLocaleString('id-ID')}</span>
             </div>
           </div>
         )}
 
-        {/* Tab 3: Rekap Biaya & Fee Shift Medis Per Petugas */}
+        {/* Tab 3: Rekap Gaji, Fee, dan Lembur Per Pegawai */}
         {activeTab === 'fee-medis' && (
           <div className="space-y-6">
-            {/* 1. Informational Banner & Date Range Filter Bar */}
+            {/* 1. Informational Banner & Filter Bar */}
             <div className="space-y-3">
-              <div className="bg-gradient-to-r from-amber-50 via-amber-50/60 to-indigo-50/60 p-4 rounded-2xl border border-amber-200 text-xs text-slate-700 flex items-start gap-3">
+              <div className="bg-gradient-to-r from-amber-50 via-emerald-50/50 to-indigo-50/60 p-4 rounded-2xl border border-amber-200 text-xs text-slate-700 flex items-start gap-3">
                 <div className="p-2 bg-amber-500 text-slate-950 rounded-xl shrink-0 shadow-xs">
-                  <Users className="w-5 h-5" />
+                  <Wallet className="w-5 h-5" />
                 </div>
-                <div className="space-y-1">
+                <div className="space-y-1 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-extrabold text-slate-900 text-sm">
-                      Rekapitulasi Biaya / Fee Per Petugas (Terintegrasi Ruang Periksa Dokter & Kasir)
+                      Rekap Gaji, Fee, dan Lembur Hari Minggu (Terintegrasi Otomatis)
                     </span>
                     <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
                       <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                      Tercatat Langsung dari Ruang Dokter & POS Kasir
+                      Gaji Tetap + Fee RME/POS + Lembur Minggu
                     </span>
                   </div>
                   <p className="text-slate-600 leading-relaxed text-[11px]">
-                    Setiap pemeriksaan pasien di Ruang Periksa Dokter (SOAP/RME) secara langsung mencatat alokasi jasa/fee bagi dokter dan nakes bertugas sesuai pilihan multi-petugas. Data tersinkronisasi otomatis dengan transaksi kasir POS tanpa duplikasi.
+                    Menggabungkan secara otomatis <strong>Gaji Pokok & Tunjangan</strong> dari menu{' '}
+                    <em>Gaji, Jasa, Fee & Lembur</em>, <strong>Fee Layanan Medis</strong> dari Ruang Dokter (SOAP/RME) & Kasir POS, serta{' '}
+                    <strong>Lembur Khusus Hari Minggu</strong> (<em>Lembur Terencana</em> vs <em>Lembur di Luar Jadwal</em>) dari modul Kehadiran & Jadwal.
                   </p>
                 </div>
               </div>
 
-              {/* Filter Range Tanggal Rekapitulasi */}
+              {/* Filter Range Tanggal, Peran, Mode Gaji & Ekspor */}
               <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200 flex flex-wrap items-center justify-between gap-3 no-print">
-                <div className="flex items-center gap-2">
-                  <div className="p-1.5 bg-indigo-100 text-indigo-700 rounded-lg">
-                    <Filter className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <span className="font-bold text-xs text-slate-800 block">Filter Range Tanggal Rekapitulasi</span>
-                    <span className="text-[10px] text-slate-500">Sesuaikan periode untuk menghitung fee petugas & riwayat layanan</span>
-                  </div>
-                </div>
-
                 <div className="flex flex-wrap items-center gap-2">
-                  <div className="flex items-center gap-1.5 bg-white border border-slate-300 rounded-xl px-2.5 py-1 text-xs shadow-2xs">
+                  <div className="flex items-center gap-1.5 bg-white border border-slate-300 rounded-xl px-2.5 py-1.5 text-xs shadow-2xs">
                     <Calendar className="w-3.5 h-3.5 text-slate-400" />
                     <span className="text-[10px] font-bold text-slate-500">Mulai:</span>
                     <input
@@ -1036,7 +1458,7 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
                     />
                   </div>
 
-                  <div className="flex items-center gap-1.5 bg-white border border-slate-300 rounded-xl px-2.5 py-1 text-xs shadow-2xs">
+                  <div className="flex items-center gap-1.5 bg-white border border-slate-300 rounded-xl px-2.5 py-1.5 text-xs shadow-2xs">
                     <Calendar className="w-3.5 h-3.5 text-slate-400" />
                     <span className="text-[10px] font-bold text-slate-500">Sampai:</span>
                     <input
@@ -1047,165 +1469,404 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
                     />
                   </div>
 
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => handleSetDatePreset('today')}
-                      className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 transition shadow-2xs"
-                    >
-                      Hari Ini
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleSetDatePreset('7days')}
-                      className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 transition shadow-2xs"
-                    >
-                      7 Hari
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleSetDatePreset('month')}
-                      className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 transition shadow-2xs"
-                    >
-                      Bulan Ini
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleSetDatePreset('all')}
-                      className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 transition shadow-2xs"
-                    >
-                      Semua Data
-                    </button>
-                  </div>
+                  <select
+                    value={payrollRoleFilter}
+                    onChange={(e) => setPayrollRoleFilter(e.target.value)}
+                    className="px-2.5 py-1.5 rounded-xl bg-white border border-slate-300 text-xs font-bold text-slate-700 outline-none"
+                    title="Filter Peran Pegawai"
+                  >
+                    <option value="SEMUA">Semua Peran</option>
+                    {PAYROLL_ROLE_LIST.map((role) => (
+                      <option key={role} value={role}>
+                        {role}
+                      </option>
+                    ))}
+                  </select>
+
+                  <select
+                    value={salaryModeOverride}
+                    onChange={(e) =>
+                      setSalaryModeOverride(e.target.value as 'config' | 'full-month' | 'prorata-days')
+                    }
+                    className="px-2.5 py-1.5 rounded-xl bg-white border border-slate-300 text-xs font-bold text-slate-700 outline-none"
+                    title="Mode Perhitungan Gaji Periode"
+                  >
+                    <option value="config">
+                      Gaji: Sesuai Pengaturan ({activePayrollConfig.salaryPeriodMode === 'prorata-days' ? 'Prorata' : 'Bulanan Penuh'})
+                    </option>
+                    <option value="full-month">Gaji: Penuh 1 Bulan</option>
+                    <option value="prorata-days">Gaji: Prorata ({payrollSummary.periodDays} Hari)</option>
+                  </select>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleSetDatePreset('today')}
+                    className="px-2.5 py-1.5 rounded-lg text-[10px] font-bold bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+                  >
+                    Hari Ini
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSetDatePreset('7days')}
+                    className="px-2.5 py-1.5 rounded-lg text-[10px] font-bold bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+                  >
+                    7 Hari
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSetDatePreset('month')}
+                    className="px-2.5 py-1.5 rounded-lg text-[10px] font-bold bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+                  >
+                    Bulan Ini
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSetDatePreset('all')}
+                    className="px-2.5 py-1.5 rounded-lg text-[10px] font-bold bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 transition cursor-pointer"
+                  >
+                    Semua
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleExportPayrollCsv}
+                    className="px-3 py-1.5 rounded-xl text-[11px] font-extrabold bg-emerald-600 hover:bg-emerald-700 text-white transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Export CSV</span>
+                  </button>
                 </div>
               </div>
             </div>
 
-            {/* 2. Quick Metrics */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
-                <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">
-                  Total Rekap Biaya Semua Petugas
+            {/* 2. KPI Summary Cards (4 Cards: Gaji, Fee, Lembur Minggu, Grand Total) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl">
+                <span className="text-[10px] uppercase font-bold text-slate-500 block tracking-wider">
+                  Total Gaji & Tunjangan
                 </span>
-                <span className="text-xl font-black font-mono text-emerald-700 mt-0.5 block">
-                  Rp {totalStaffFeesAccumulated.toLocaleString('id-ID')}
+                <span className="text-lg font-black font-mono text-slate-900 mt-0.5 block">
+                  Rp {filteredPayrollTotals.totalSalaryPay.toLocaleString('id-ID')}
                 </span>
                 <span className="text-[10px] text-slate-500 font-medium mt-0.5 block">
-                  Periode {startDate} s.d. {endDate}
+                  Pokok: Rp {filteredPayrollTotals.baseSalaryPay.toLocaleString('id-ID')} · Tunj: Rp{' '}
+                  {filteredPayrollTotals.fixedAllowancePay.toLocaleString('id-ID')}
                 </span>
               </div>
-              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
-                <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">
-                  Total Layanan Pasien Terdaftar
+
+              <div className="p-3.5 bg-indigo-50/70 border border-indigo-200 rounded-2xl">
+                <span className="text-[10px] uppercase font-bold text-indigo-700 block tracking-wider">
+                  Total Fee Layanan Medis
                 </span>
-                <span className="text-xl font-black font-mono text-indigo-700 mt-0.5 block">
-                  {clinicalServiceEvents.length} Pasien
+                <span className="text-lg font-black font-mono text-indigo-800 mt-0.5 block">
+                  Rp {filteredPayrollTotals.totalFeePay.toLocaleString('id-ID')}
                 </span>
-                <span className="text-[10px] text-slate-500 font-medium mt-0.5 block">
-                  {filteredRmeRecords.length} RME Dokter · {completedClinicTransactions.length} Selesai Kasir
+                <span className="text-[10px] text-indigo-700/80 font-medium mt-0.5 block">
+                  {filteredPayrollTotals.totalPatients} Alokasi Pasien · {clinicalServiceEvents.length} Layanan
+                </span>
+                {activeLedgerEntries.length > 0 && (
+                  <span className="text-[9px] text-indigo-800 font-semibold mt-0.5 block">
+                    Ledger POS — Belum: Rp {ledgerStatusTotals.unpaid.toLocaleString('id-ID')} · Lunas: Rp{' '}
+                    {ledgerStatusTotals.paid.toLocaleString('id-ID')}
+                  </span>
+                )}
+              </div>
+
+              <div className="p-3.5 bg-amber-50/80 border border-amber-200 rounded-2xl">
+                <span className="text-[10px] uppercase font-bold text-amber-800 block tracking-wider">
+                  Total Lembur Hari Minggu
+                </span>
+                <span className="text-lg font-black font-mono text-amber-800 mt-0.5 block">
+                  Rp {filteredPayrollTotals.totalOvertimePay.toLocaleString('id-ID')}
+                </span>
+                <span className="text-[10px] text-amber-900/80 font-medium mt-0.5 block">
+                  {filteredPayrollTotals.sundayOvertimeSessions} Sesi ({formatMinutesDuration(filteredPayrollTotals.totalOvertimeMinutes)}) ·
+                  Terencana Rp {filteredPayrollTotals.plannedOvertimePay.toLocaleString('id-ID')}
                 </span>
               </div>
-              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
-                <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">
-                  Jumlah Petugas Terdaftar Bertugas
+
+              <div className="p-3.5 bg-emerald-50 border-2 border-emerald-300 rounded-2xl">
+                <span className="text-[10px] uppercase font-extrabold text-emerald-800 block tracking-wider">
+                  Grand Total Gaji + Fee + Lembur
                 </span>
-                <span className="text-xl font-black font-mono text-slate-900 mt-0.5 block">
-                  {staffFeeSummaries.filter((s) => s.patientCount > 0).length} / {staffFeeSummaries.length} Pegawai
+                <span className="text-lg font-black font-mono text-emerald-800 mt-0.5 block">
+                  Rp {filteredPayrollTotals.grandTotal.toLocaleString('id-ID')}
                 </span>
-                <span className="text-[10px] text-slate-500 font-medium mt-0.5 block">
-                  Memperoleh alokasi fee dalam periode ini
+                <span className="text-[10px] text-emerald-700 font-semibold mt-0.5 block">
+                  {filteredPayrollRows.length} Pegawai · Mode{' '}
+                  {payrollSummary.effectiveSalaryMode === 'prorata-days'
+                    ? `Prorata (${payrollSummary.periodDays} hr)`
+                    : 'Bulanan Penuh'}
                 </span>
               </div>
             </div>
 
-            {/* 3. Tabel 1: Rekapitulasi Akumulasi Biaya Per Petugas */}
+            {ledgerRevenueSplit.serviceLineCount > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="p-3 bg-white border border-slate-200 rounded-xl">
+                  <span className="text-[10px] uppercase font-bold text-slate-500 block">
+                    Total Biaya Layanan POS (Pasien)
+                  </span>
+                  <span className="text-sm font-black font-mono text-slate-900 mt-0.5 block">
+                    Rp {ledgerRevenueSplit.totalBiayaLayanan.toLocaleString('id-ID')}
+                  </span>
+                  <span className="text-[10px] text-slate-500">
+                    Dari {ledgerRevenueSplit.serviceLineCount} item jasa berpetugas
+                  </span>
+                </div>
+                <div className="p-3 bg-indigo-50/50 border border-indigo-200 rounded-xl">
+                  <span className="text-[10px] uppercase font-bold text-indigo-700 block">
+                    Total Hak Fee Petugas (Semua Role)
+                  </span>
+                  <span className="text-sm font-black font-mono text-indigo-800 mt-0.5 block">
+                    Rp {ledgerRevenueSplit.totalFeePetugas.toLocaleString('id-ID')}
+                  </span>
+                  <span className="text-[10px] text-indigo-700/80">
+                    Otomatis dibagi sesuai peran penerima di POS
+                  </span>
+                </div>
+                <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-xl">
+                  <span className="text-[10px] uppercase font-bold text-emerald-800 block">
+                    Bagian / Fee Fasilitas (Bagi Hasil)
+                  </span>
+                  <span className="text-sm font-black font-mono text-emerald-800 mt-0.5 block">
+                    Rp {ledgerRevenueSplit.totalFeeFasilitas.toLocaleString('id-ID')}
+                  </span>
+                  <span className="text-[10px] text-emerald-700">
+                    Biaya Layanan − Total Fee Semua Petugas
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* 3. Tabel 1: Rekapitulasi Gaji, Fee, dan Lembur Per Pegawai */}
             <div>
-              <div className="flex items-center justify-between mb-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                 <h4 className="font-extrabold text-slate-900 text-xs uppercase tracking-wide flex items-center gap-1.5">
-                  <UserCheck className="w-4 h-4 text-indigo-600" />
-                  1. Rekapitulasi Akumulasi Biaya Per Petugas (Data Pegawai)
+                  <UserCheck className="w-4 h-4 text-emerald-600" />
+                  1. Rekapitulasi Gaji, Fee, dan Lembur Per Pegawai
                 </h4>
                 <span className="text-[10px] text-slate-500 font-medium">
-                  Urutan berdasarkan penerimaan fee tertinggi · Periode {startDate} s.d. {endDate}
+                  Periode {startDate} s.d. {endDate} · Aturan Lembur:{' '}
+                  {activePayrollConfig.sundayOvertime.calculationMode === 'per-sesi'
+                    ? 'Tarif Per Sesi Minggu'
+                    : 'Tarif Per Jam Minggu'}
+                  {activePayrollConfig.sundayOvertime.requireApprovalForPayout
+                    ? ' (Wajib Disetujui APJ / Owner)'
+                    : ''}
                 </span>
               </div>
 
-              <table className="w-full text-left text-xs border border-collapse">
-                <thead className="bg-slate-100 font-bold uppercase text-[10px] text-slate-700">
-                  <tr>
-                    <th className="p-2.5 border w-10 text-center">No</th>
-                    <th className="p-2.5 border">Nama Pegawai / Petugas</th>
-                    <th className="p-2.5 border w-28">ID Pegawai</th>
-                    <th className="p-2.5 border">Jabatan / Role</th>
-                    <th className="p-2.5 border text-center w-36">Pasien / Trx Selesai</th>
-                    <th className="p-2.5 border text-right w-40">Total Rekap Biaya / Fee</th>
-                    <th className="p-2.5 border text-center w-32">Status Rekapan</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y font-medium text-slate-700">
-                  {staffFeeSummaries.map((staff, idx) => (
-                    <tr
-                      key={staff.staffId}
-                      className={`border-b hover:bg-slate-50 transition-colors ${
-                        staff.totalFee > 0 ? 'bg-white' : 'bg-slate-50/50 text-slate-400'
-                      }`}
-                    >
-                      <td className="p-2.5 border text-center font-mono text-slate-500">{idx + 1}</td>
-                      <td className="p-2.5 border">
-                        <span className="font-bold text-slate-900 block">{staff.staffName}</span>
-                      </td>
-                      <td className="p-2.5 border font-mono text-[11px] text-slate-600">
-                        {staff.staffId}
-                      </td>
-                      <td className="p-2.5 border">
-                        <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 text-[10px] font-semibold">
-                          {staff.role}
-                        </span>
-                      </td>
-                      <td className="p-2.5 border text-center font-mono font-bold text-indigo-900">
-                        {staff.patientCount} Pasien
-                      </td>
-                      <td className="p-2.5 border text-right font-mono font-black text-emerald-700 text-sm">
-                        Rp {staff.totalFee.toLocaleString('id-ID')}
-                      </td>
-                      <td className="p-2.5 border text-center">
-                        {staff.totalFee > 0 ? (
-                          <span className="px-2 py-0.5 rounded-full font-bold text-[9px] bg-emerald-100 text-emerald-800 border border-emerald-200 inline-flex items-center gap-1">
-                            <CheckCircle2 className="w-2.5 h-2.5" />
-                            Siap Dicairkan
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border border-collapse">
+                  <thead className="bg-slate-100 font-bold uppercase text-[10px] text-slate-700">
+                    <tr>
+                      <th className="p-2.5 border w-8 text-center">No</th>
+                      <th className="p-2.5 border">Pegawai & Peran</th>
+                      <th className="p-2.5 border text-center w-28">Absensi & Shift</th>
+                      <th className="p-2.5 border text-right w-36">Gaji & Tunjangan</th>
+                      <th className="p-2.5 border text-right w-32">Fee Layanan</th>
+                      <th className="p-2.5 border text-right w-40">Lembur Minggu</th>
+                      <th className="p-2.5 border text-right w-40 bg-emerald-50/70 text-emerald-950">
+                        Total Diterima
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y font-medium text-slate-700">
+                    {filteredPayrollRows.map((row, idx) => (
+                      <tr
+                        key={row.staffId}
+                        className="border-b hover:bg-slate-50 transition-colors bg-white"
+                      >
+                        <td className="p-2.5 border text-center font-mono text-slate-500">{idx + 1}</td>
+                        <td className="p-2.5 border">
+                          <span className="font-bold text-slate-900 block">{row.staffName}</span>
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 text-[9px] font-bold">
+                              {row.role}
+                            </span>
+                            <span className="font-mono text-[9px] text-slate-400">{row.staffId}</span>
+                          </div>
+                        </td>
+                        <td className="p-2.5 border text-center text-[10px]">
+                          <div className="font-bold text-slate-800">
+                            Hadir: {row.presentDays} · Cuti: {row.leaveDays}
+                          </div>
+                          <span className="text-[9px] text-slate-500 block">
+                            {row.scheduledShiftCount} Shift Aktif
                           </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded-full text-[9px] bg-slate-100 text-slate-500 font-medium">
-                            Belum Ada Pasien
-                          </span>
-                        )}
+                        </td>
+                        <td className="p-2.5 border text-right font-mono">
+                          {row.salaryActive ? (
+                            <>
+                              <div className="font-bold text-slate-900">
+                                Rp {row.totalSalaryPay.toLocaleString('id-ID')}
+                              </div>
+                              <div className="text-[9px] text-slate-500">
+                                Pokok {row.baseSalaryPay.toLocaleString('id-ID')} + Tunj{' '}
+                                {row.fixedAllowancePay.toLocaleString('id-ID')}
+                              </div>
+                            </>
+                          ) : (
+                            <span className="text-[10px] font-sans text-slate-400 italic">
+                              Rp 0 (Mode Fee Saja)
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-2.5 border text-right font-mono">
+                          <div className="font-bold text-indigo-700">
+                            Rp {row.totalFeePay.toLocaleString('id-ID')}
+                          </div>
+                          <div className="text-[9px] text-slate-500">
+                            {row.patientCount} Pasien / Trx
+                          </div>
+                        </td>
+                        <td className="p-2.5 border text-right font-mono">
+                          <div className="font-bold text-amber-800">
+                            Rp {row.totalOvertimePay.toLocaleString('id-ID')}
+                          </div>
+                          {row.sundayOvertimeSessions > 0 ? (
+                            <div className="text-[9px] text-slate-500">
+                              {row.sundayOvertimeSessions} Sesi ({formatMinutesDuration(row.totalOvertimeMinutes)})
+                              {row.plannedOvertimeSessions > 0 && ` · Terencana ${row.plannedOvertimeSessions}`}
+                              {row.unscheduledOvertimeSessions > 0 && ` · Luar Jadwal ${row.unscheduledOvertimeSessions}`}
+                            </div>
+                          ) : (
+                            <div className="text-[9px] text-slate-400">
+                              {row.pendingOvertimeSessions > 0
+                                ? `${row.pendingOvertimeSessions} sesi menunggu APJ`
+                                : '0 Sesi Minggu'}
+                            </div>
+                          )}
+                        </td>
+                        <td className="p-2.5 border text-right font-mono font-black text-emerald-800 text-sm bg-emerald-50/40">
+                          Rp {row.grandTotal.toLocaleString('id-ID')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-slate-100/90 font-black border-t-2 border-slate-300">
+                      <td colSpan={3} className="p-2.5 text-right uppercase text-[11px] text-slate-800">
+                        Total Keseluruhan Periode ({startDate} s.d. {endDate}):
+                      </td>
+                      <td className="p-2.5 border text-right font-mono text-slate-900">
+                        Rp {filteredPayrollTotals.totalSalaryPay.toLocaleString('id-ID')}
+                      </td>
+                      <td className="p-2.5 border text-right font-mono text-indigo-800">
+                        Rp {filteredPayrollTotals.totalFeePay.toLocaleString('id-ID')}
+                      </td>
+                      <td className="p-2.5 border text-right font-mono text-amber-800">
+                        Rp {filteredPayrollTotals.totalOvertimePay.toLocaleString('id-ID')}
+                      </td>
+                      <td className="p-2.5 border text-right font-mono text-emerald-900 text-sm bg-emerald-100/60">
+                        Rp {filteredPayrollTotals.grandTotal.toLocaleString('id-ID')}
                       </td>
                     </tr>
-                  ))}
-                </tbody>
-                <tfoot>
-                  <tr className="bg-slate-100/80 font-black border-t-2 border-slate-300">
-                    <td colSpan={4} className="p-2.5 text-right uppercase text-[11px] text-slate-800">
-                      Total Seluruh Biaya / Fee Petugas:
-                    </td>
-                    <td className="p-2.5 border text-center font-mono text-indigo-900">
-                      {staffFeeSummaries.reduce((a, s) => a + s.patientCount, 0)} Pasien
-                    </td>
-                    <td className="p-2.5 border text-right font-mono text-emerald-800 text-sm">
-                      Rp {totalStaffFeesAccumulated.toLocaleString('id-ID')}
-                    </td>
-                    <td className="p-2.5 border" />
-                  </tr>
-                </tfoot>
-              </table>
+                  </tfoot>
+                </table>
+              </div>
             </div>
 
-            {/* 4. Tabel 2: Log Detail Transaksi Pasien Klinik & Alokasi Petugas yang Bertugas */}
+            {/* 4. Tabel 2: Rincian Sesi Lembur Khusus Hari Minggu */}
+            <div>
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                <h4 className="font-extrabold text-slate-900 text-xs uppercase tracking-wide flex items-center gap-1.5">
+                  <Flame className="w-4 h-4 text-amber-600" />
+                  2. Rincian Sesi Lembur Khusus Hari Minggu (Terencana vs Di Luar Jadwal)
+                </h4>
+                <span className="text-[10px] text-slate-500 font-medium">
+                  {payrollSummary.overtimeDetails.length} catatan lembur hari Minggu pada periode ini
+                </span>
+              </div>
+
+              {payrollSummary.overtimeDetails.length === 0 ? (
+                <div className="p-4 text-center bg-amber-50/40 border border-dashed border-amber-200 rounded-xl text-slate-500 text-[11px]">
+                  Belum ada catatan sesi lembur hari Minggu pada periode {startDate} s.d. {endDate}. Lembur dicatat dari submenu{' '}
+                  <strong>Jadwal Dokter & Petugas Apotek &rarr; Kehadiran, Cuti & Lembur Minggu</strong> atau Mode Mobile Lapangan.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs border border-collapse">
+                    <thead className="bg-amber-50 font-bold uppercase text-[10px] text-amber-950">
+                      <tr>
+                        <th className="p-2 border">Tanggal (Minggu)</th>
+                        <th className="p-2 border">Nama Pegawai</th>
+                        <th className="p-2 border">Kategori Lembur</th>
+                        <th className="p-2 border text-center">Jam Aktual</th>
+                        <th className="p-2 border text-center">Durasi Dihitung</th>
+                        <th className="p-2 border text-right">Tarif</th>
+                        <th className="p-2 border text-center">Status APJ</th>
+                        <th className="p-2 border text-right">Nominal Lembur</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y text-slate-700">
+                      {payrollSummary.overtimeDetails.map((item) => (
+                        <tr key={item.record.id} className="hover:bg-slate-50 bg-white">
+                          <td className="p-2 border font-mono font-bold text-slate-800">
+                            {formatIsoToIdDate(item.record.date)}
+                          </td>
+                          <td className="p-2 border">
+                            <span className="font-bold text-slate-900">{item.record.staffName}</span>
+                            <span className="text-[10px] text-slate-500 block">{item.record.staffRole}</span>
+                          </td>
+                          <td className="p-2 border">
+                            <span
+                              className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
+                                item.category === 'Lembur Terencana'
+                                  ? 'bg-sky-100 text-sky-800'
+                                  : 'bg-amber-100 text-amber-900'
+                              }`}
+                            >
+                              {item.category}
+                            </span>
+                          </td>
+                          <td className="p-2 border text-center font-mono text-[11px]">
+                            {item.record.checkInTime || '--:--'} – {item.record.checkOutTime || '--:--'}
+                          </td>
+                          <td className="p-2 border text-center font-mono font-bold">
+                            {formatMinutesDuration(item.billedMinutes || item.record.overtimeMinutes)}
+                          </td>
+                          <td className="p-2 border text-right font-mono text-[11px] text-slate-600">
+                            {item.rateLabel}
+                          </td>
+                          <td className="p-2 border text-center">
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[9px] font-bold ${
+                                item.record.approvalStatus === 'Disetujui'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : item.record.approvalStatus === 'Ditolak'
+                                  ? 'bg-rose-100 text-rose-700'
+                                  : 'bg-amber-100 text-amber-800'
+                              }`}
+                            >
+                              {item.record.approvalStatus}
+                            </span>
+                          </td>
+                          <td className="p-2 border text-right font-mono font-black text-amber-800">
+                            {item.eligible ? (
+                              `Rp ${item.amount.toLocaleString('id-ID')}`
+                            ) : (
+                              <span className="text-[10px] font-sans font-semibold text-slate-400">
+                                Rp 0 ({item.reason})
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* 5. Tabel 3: Log Detail Transaksi Pasien Klinik & Alokasi Petugas yang Bertugas */}
             <div>
               <div className="flex items-center justify-between mb-2">
                 <h4 className="font-extrabold text-slate-900 text-xs uppercase tracking-wide flex items-center gap-1.5">
                   <Award className="w-4 h-4 text-amber-600" />
-                  2. Log Detail Transaksi Pasien Klinik & Alokasi Petugas yang Bertugas
+                  3. Log Detail Transaksi Pasien Klinik & Alokasi Fee Petugas
                 </h4>
                 <span className="text-[10px] text-slate-500 font-medium">
                   {clinicalServiceEvents.length} pelayanan pasien (Ruang Periksa Dokter & Kasir POS)
@@ -1386,11 +2047,28 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
           </div>
         )}
 
-        {/* Signature Terintegrasi Profil Apotek, APJ, dan DPJ */}
+        {/* Signature Terintegrasi Profil Apotek */}
         {(() => {
-          const pharmacyProfile = getSavedPharmacyProfile();
-          const apjProfile = getSavedAPJProfile();
-          const dpjProfile = getSavedDPJProfile();
+
+          if (activeTab === 'laba-rugi') {
+            return (
+              <div className="grid grid-cols-2 pt-8 text-xs">
+                <div />
+                <div className="text-center space-y-14">
+                  <p className="font-semibold text-slate-700">
+                    {pharmacyProfile.city}, {new Date().toLocaleDateString('id-ID')}<br />
+                    Pimpinan,
+                  </p>
+                  <div>
+                    <p className="font-extrabold underline text-slate-900">
+                      {apjProfile.name || 'apt. Mardin, S.Farm'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            );
+          }
+
           return (
             <div className="grid grid-cols-2 pt-8 text-xs">
               <div className="text-center space-y-12">

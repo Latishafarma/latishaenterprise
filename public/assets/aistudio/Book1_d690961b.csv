@@ -1,0 +1,7 @@
+id;barcode;name;category;kelas;nappza;kekuatan;unit;satuan_kecil;satuan_besar;rasio_konversi;hna_besar;hpp;sell_price;sell_price_klinik;sell_price_mitra;markup_reguler;markup_klinik;markup_mitra;stock;min_stock;max_stock;batch_no;exp_date;supplier;rack
+;106841;ACETYLCYSTEINE YARINDO 200MG BOX 10 STR @ 10 CAP;Obat Keras (Merah/K);;;;KAPS;KAPS;BOX;100;64102;;1300;;;0;0;;0;100;300;;;;
+;10011483;ACIFAR 400 MG BOX 3 STR @ 10 KAPL;Obat Keras (Merah/K);;;;KAPLET;KAPLET;BOX;30;29600;;2085;;;141.15;141.15;25;0;30;500;;;;-
+;10011484;ACIFAR 5% CREAM 5GR TUB;Obat Keras (Merah/K);;;;TUB;TUB;TUB;1;6441;;12184;;;141.07;141.07;25;0;5;50;;;;H5
+;106841;ACETYLCYSTEINE YARINDO 200MG BOX 10 STR @ 10 CAP;Obat Keras (Merah/K);;;;KAPS;KAPS;BOX;100;64102;;1300;;;0;0;;0;100;300;;;;
+;10011483;ACIFAR 400 MG BOX 3 STR @ 10 KAPL;Obat Keras (Merah/K);;;;KAPLET;KAPLET;BOX;30;29600;;2085;;;141.15;141.15;25;0;30;500;;;;-
+;10011484;ACIFAR 5% CREAM 5GR TUB;Obat Keras (Merah/K);;;;TUB;TUB;TUB;1;6441;;12184;;;141.07;141.07;25;0;5;50;;;;H5

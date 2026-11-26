@@ -21,8 +21,12 @@ import {
   Sparkles,
   Save,
   X,
-  AlertCircle
+  AlertCircle,
+  Database,
+  RefreshCw,
+  Code
 } from 'lucide-react';
+import { formatDateDDMMYYYY } from '../utils/racikanBudHelper';
 import {
   PatientQueue,
   Medicine,
@@ -36,8 +40,17 @@ import {
   FeeConfig,
   DEFAULT_FEE_CONFIG,
   LabTestRecord,
-  VitalSign
+  VitalSign,
+  isOwnerAdminRole
 } from '../types';
+import {
+  getSupabaseConfig,
+  searchICD10InSupabase,
+  SUPABASE_ICD10_SQL_SCHEMA
+} from '../utils/supabaseClient';
+import { useIsOwnerAdmin } from '../utils/roleAccess';
+import { MedicineCategorySymbol } from './MedicineCategorySymbol';
+import { RacikanBuilderModal } from './RacikanBuilderModal';
 
 interface DoctorSOAPViewProps {
   queue: PatientQueue[];
@@ -51,6 +64,8 @@ interface DoctorSOAPViewProps {
   feeConfig?: FeeConfig;
   labRecords?: LabTestRecord[];
   onUpdateQueuePatient?: (nomor: string, updatedData: Partial<PatientQueue>) => void;
+  onAddIcd10?: (item: ICD10Item) => void;
+  onReloadIcd10FromSupabase?: () => Promise<{ success: boolean; count?: number; error?: string }>;
 }
 
 export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
@@ -63,7 +78,9 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
   staffList = [],
   feeConfig,
   labRecords = [],
-  onUpdateQueuePatient
+  onUpdateQueuePatient,
+  onAddIcd10,
+  onReloadIcd10FromSupabase
 }) => {
   const [selectedQueueNomor, setSelectedQueueNomor] = useState<string>(
     queue.find((q) => q.status === 'Diperiksa')?.nomor || queue[0]?.nomor || ''
@@ -99,7 +116,7 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
     if (staff.role === 'Dokter') {
       return activeDoctor?.feePerPatient || config.doctorFee || 20000;
     }
-    if (staff.role === 'Apoteker' || staff.role === 'Super Admin / APJ') {
+    if (staff.role === 'Apoteker' || isOwnerAdminRole(staff.role)) {
       return config.pharmacistFee || 10000;
     }
     if (staff.role === 'Perawat / Bidan' || staff.role === 'Perawat / Nakes Lapangan') {
@@ -151,6 +168,37 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
   });
   const [editedComplaint, setEditedComplaint] = useState(currentPatient?.complaint || '');
   const [saveVitalToast, setSaveVitalToast] = useState<string | null>(null);
+
+  const isOwnerAdmin = useIsOwnerAdmin();
+  const [showIcdSqlModal, setShowIcdSqlModal] = useState(false);
+  const [isIcdSyncing, setIsIcdSyncing] = useState(false);
+  const [icdSyncMsg, setIcdSyncMsg] = useState<{ text: string; isError?: boolean } | null>(null);
+  const [copiedIcdSchema, setCopiedIcdSchema] = useState(false);
+
+  const handleManualIcdSync = async () => {
+    if (!onReloadIcd10FromSupabase) return;
+    setIsIcdSyncing(true);
+    setIcdSyncMsg(null);
+    try {
+      const res = await onReloadIcd10FromSupabase();
+      if (res.success) {
+        setIcdSyncMsg({ text: `Sinkronisasi ICD-10 berhasil! Memuat ${res.count ?? icd10List.length} kode diagnosa dari Supabase.` });
+      } else {
+        setIcdSyncMsg({ text: res.error || 'Gagal memuat data ICD-10 dari Supabase', isError: true });
+      }
+    } catch (err: any) {
+      setIcdSyncMsg({ text: err?.message || 'Gagal koneksi ke Supabase ICD-10', isError: true });
+    } finally {
+      setIsIcdSyncing(false);
+      setTimeout(() => setIcdSyncMsg(null), 4000);
+    }
+  };
+
+  const handleCopyIcdSchema = () => {
+    navigator.clipboard.writeText(SUPABASE_ICD10_SQL_SCHEMA);
+    setCopiedIcdSchema(true);
+    setTimeout(() => setCopiedIcdSchema(false), 2500);
+  };
 
   // Sync editedVital when selected patient changes
   useEffect(() => {
@@ -269,6 +317,8 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
   const [presItems, setPresItems] = useState<PrescriptionItem[]>([]);
   const [medSearch, setMedSearch] = useState('');
   const [showMedDropdown, setShowMedDropdown] = useState(false);
+  const [showRacikanModal, setShowRacikanModal] = useState(false);
+  const [editingRacikanIdx, setEditingRacikanIdx] = useState<number | null>(null);
 
   // Active Allergy Warning
   const patientAllergy = currentPatient?.rmId
@@ -277,14 +327,46 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
       : 'Amoxicillin' // Fallback / mock
     : '';
 
-  // Lab Records integration for current patient
+  // Lab Records integration for current patient (Strict Matching on RM, NIK, or Name)
   const patientLabRecords = useMemo(() => {
     if (!currentPatient) return [];
-    return labRecords.filter(
-      (r) =>
-        r.rmId === currentPatient.rmId ||
-        r.patientName.toLowerCase() === currentPatient.name.toLowerCase()
-    );
+
+    const patRm = (currentPatient.rmId || '').trim().toLowerCase();
+    const patName = (currentPatient.name || '').trim().toLowerCase();
+    const patNik = ((currentPatient as any).nik || '').trim();
+
+    const stripTitle = (nameStr: string) =>
+      nameStr
+        .toLowerCase()
+        .replace(/\b(tn|ny|an|sdr|sdri|apt|dr|drg|ns|h|hj)\b\.?\s*/gi, '')
+        .replace(/[^a-z0-9]/g, '')
+        .trim();
+
+    const patCleanName = stripTitle(patName);
+
+    return labRecords.filter((lab) => {
+      const labRm = (lab.rmId || '').trim().toLowerCase();
+      const labName = (lab.patientName || '').trim().toLowerCase();
+      const labCleanName = stripTitle(labName);
+      const labNik = (lab.nik || '').trim();
+
+      // 1. Match by No. RM
+      const isRmMatch = Boolean(patRm && labRm && patRm === labRm);
+
+      // 2. Match by NIK if available
+      const isNikMatch = Boolean(patNik && labNik && patNik === labNik);
+
+      // 3. Match by Normalized Patient Name
+      const isNameMatch = Boolean(
+        patCleanName &&
+          labCleanName &&
+          (patCleanName === labCleanName ||
+            patCleanName.includes(labCleanName) ||
+            labCleanName.includes(patCleanName))
+      );
+
+      return isRmMatch || isNikMatch || isNameMatch;
+    });
   }, [labRecords, currentPatient]);
 
   const [labToastMessage, setLabToastMessage] = useState<string | null>(null);
@@ -295,18 +377,18 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
       .map((it) => `${it.parameter}: ${it.result} ${it.unit} (${it.status}${it.referenceRange ? `, Ruj: ${it.referenceRange}` : ''})`)
       .join('; ');
 
-    const labText = `[HASIL LAB ${lab.date}]: ${paramsFormatted}.${lab.conclusion ? ` Kesimpulan: ${lab.conclusion}.` : ''}`;
+    const labText = `[HASIL LAB ${lab.date} ${lab.time || ''}]: ${paramsFormatted}.${lab.conclusion ? ` Kesimpulan: ${lab.conclusion}.` : ''}`;
 
     setSoapO((prev) => {
       if (!prev || prev.trim() === '') return labText;
-      if (prev.includes(lab.id) || prev.includes(`[HASIL LAB ${lab.date}]`)) {
+      if (prev.includes(lab.id) || prev.includes(`[HASIL LAB ${lab.date}`)) {
         return prev;
       }
       return `${prev.trim()}\n${labText}`;
     });
 
     setShowLabSelectorModal(false);
-    setLabToastMessage(`Hasil Lab (${lab.items.length} parameter) otomatis dicatat ke kolom Objektif!`);
+    setLabToastMessage(`Hasil Lab (${lab.items.length} parameter) untuk ${lab.patientName} berhasil dicatat ke Objektif!`);
     setTimeout(() => setLabToastMessage(null), 3500);
   };
 
@@ -329,20 +411,69 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
     }
   };
 
-  // Filter ICD
-  const filteredIcd = useMemo(() => {
-    if (!icdSearch.trim()) return icd10List.slice(0, 12);
-    const q = icdSearch.toLowerCase();
-    return icd10List.filter(
-      (item) => item.code.toLowerCase().includes(q) || item.name.toLowerCase().includes(q)
-    );
-  }, [icd10List, icdSearch]);
+  // Dynamic Supabase ICD-10 Search & Autocomplete
+  const [supabaseIcdResults, setSupabaseIcdResults] = useState<ICD10Item[]>([]);
+  const [isSearchingSupabaseIcd, setIsSearchingSupabaseIcd] = useState(false);
 
-  // Filter Medicines for Prescription
+  useEffect(() => {
+    let isSubscribed = true;
+    const term = icdSearch.trim();
+    if (!term) {
+      setSupabaseIcdResults([]);
+      setIsSearchingSupabaseIcd(false);
+      return;
+    }
+
+    setIsSearchingSupabaseIcd(true);
+    const timer = setTimeout(() => {
+      searchICD10InSupabase(term)
+        .then((results) => {
+          if (isSubscribed) {
+            setSupabaseIcdResults(results);
+            setIsSearchingSupabaseIcd(false);
+          }
+        })
+        .catch(() => {
+          if (isSubscribed) setIsSearchingSupabaseIcd(false);
+        });
+    }, 180);
+
+    return () => {
+      isSubscribed = false;
+      clearTimeout(timer);
+    };
+  }, [icdSearch]);
+
+  // Combined Filtered ICD List (Supabase dynamic search + cached list)
+  const filteredIcd = useMemo(() => {
+    const q = icdSearch.trim().toLowerCase();
+    if (!q) return icd10List.slice(0, 15);
+
+    const map = new Map<string, ICD10Item>();
+    supabaseIcdResults.forEach((item) => map.set(item.code.toUpperCase(), item));
+    icd10List.forEach((item) => {
+      if (item.code.toLowerCase().includes(q) || item.name.toLowerCase().includes(q)) {
+        if (!map.has(item.code.toUpperCase())) {
+          map.set(item.code.toUpperCase(), item);
+        }
+      }
+    });
+
+    return Array.from(map.values()).slice(0, 50);
+  }, [icd10List, icdSearch, supabaseIcdResults]);
+
+  // Filter Medicines for Prescription (capped at 50 for instant dropdown render)
   const filteredMeds = useMemo(() => {
     if (!medSearch.trim()) return medicines.slice(0, 6);
     const q = medSearch.toLowerCase();
-    return medicines.filter((m) => m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q));
+    return medicines
+      .filter(
+        (m) =>
+          m.name.toLowerCase().includes(q) ||
+          (m.kekuatan || '').toLowerCase().includes(q) ||
+          m.id.toLowerCase().includes(q)
+      )
+      .slice(0, 50);
   }, [medicines, medSearch]);
 
   const handleToggleIcd = (icd: ICD10Item) => {
@@ -372,6 +503,9 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
       const nextList = [...selectedIcds, customItem];
       setSelectedIcds(nextList);
       setSoapA(formatIcdsToAssessment(nextList));
+    }
+    if (onAddIcd10) {
+      onAddIcd10(customItem);
     }
     setIcdSearch('');
     setShowIcdDropdown(false);
@@ -409,6 +543,16 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
     setPresItems(presItems.filter((_, i) => i !== idx));
   };
 
+  const handleSaveRacikanItem = (racikanItem: PrescriptionItem) => {
+    setPresItems((prev) => {
+      if (editingRacikanIdx !== null && editingRacikanIdx >= 0 && editingRacikanIdx < prev.length) {
+        return prev.map((it, idx) => (idx === editingRacikanIdx ? racikanItem : it));
+      }
+      return [...prev, racikanItem];
+    });
+    setEditingRacikanIdx(null);
+  };
+
   const handleSaveAndSend = () => {
     if (!currentPatient) {
       alert('Pilih pasien dari antrean terlebih dahulu!');
@@ -423,7 +567,7 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
     const effectiveIcds: ICD10Item[] =
       selectedIcds.length > 0
         ? selectedIcds
-        : [{ code: 'J00', name: 'Acute nasopharyngitis [common cold]' }];
+        : [{ code: 'J00', name: 'Nasofaringitis Akut / Common Cold (Batuk Pilek)', category: 'Respirasi' }];
     const joinedCodes = effectiveIcds.map((i) => i.code).join(', ');
     const joinedNames = effectiveIcds.map((i) => i.name).join('; ');
     const defaultAssessment = formatIcdsToAssessment(effectiveIcds);
@@ -434,7 +578,7 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
       time: timeNow,
       rmId: currentPatient.rmId,
       patientName: currentPatient.name,
-      nik: '1601000000000000',
+      nik: (currentPatient as any).nik || '1601000000000000',
       age: currentPatient.age,
       gender: currentPatient.gender,
       doctorName: activeDoctor.name,
@@ -468,6 +612,7 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
     if (presItems.length > 0) {
       newPrescription = {
         id: rxId,
+        rmeRecordId: recordId,
         rmId: currentPatient.rmId,
         patientName: currentPatient.name,
         doctorName: activeDoctor.name,
@@ -761,7 +906,7 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
                   {(staffList.length > 0
                     ? staffList
                     : [
-                        { id: 'STF-01', name: 'apt. Mardin, S.Farm', role: 'Super Admin / APJ' },
+                        { id: 'STF-01', name: 'apt. Mardin, S.Farm', role: 'APJ / Owner' },
                         { id: 'STF-02', name: 'dr. Anis Prima Dewi', role: 'Dokter' },
                         { id: 'STF-03', name: 'Ns. Siti Nurhaliza, S.Kep', role: 'Perawat / Bidan' },
                         { id: 'STF-04', name: 'Rina Kartika, A.Md.Farm', role: 'Apoteker' }
@@ -887,20 +1032,21 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
                     <span>Template Fisik</span>
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={handleFetchLabResults}
-                    className="px-2.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition shadow-xs cursor-pointer"
-                    title="Ambil hasil lab dan catat otomatis ke kolom Objektif"
-                  >
-                    <FlaskConical className="w-3.5 h-3.5 text-purple-600" />
-                    <span>Ambil Hasil Lab</span>
-                    {patientLabRecords.length > 0 && (
-                      <span className="bg-purple-600 text-white text-[9px] px-1.5 py-0.2 rounded-full font-mono font-bold">
+                  {/* Tombol Ambil Hasil Lab: Hanya muncul jika ada data hasil lab yang cocok dengan nama dan No. RM / NIK pasien */}
+                  {patientLabRecords.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleFetchLabResults}
+                      className="px-2.5 py-1 bg-purple-100 hover:bg-purple-200 text-purple-800 border border-purple-300 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition shadow-xs cursor-pointer"
+                      title="Ambil hasil lab dan catat otomatis ke kolom Objektif"
+                    >
+                      <FlaskConical className="w-3.5 h-3.5 text-purple-700" />
+                      <span>Ambil Hasil Lab</span>
+                      <span className="bg-purple-700 text-white text-[9px] px-1.5 py-0.2 rounded-full font-mono font-bold">
                         {patientLabRecords.length}
                       </span>
-                    )}
-                  </button>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -995,11 +1141,41 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
             <div className="relative space-y-2">
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <label className="block text-xs font-bold text-slate-700">
-                  A - Assessment (Diagnosis &amp; Kode ICD-10 — Bisa Pilih Lebih dari Satu) *
+                  A - Assessment (Diagnosis &amp; Kode ICD-10 — Sourced from Supabase) *
                 </label>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {/* Supabase ICD-10 Live Badge */}
+                  <div className="flex items-center gap-1 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full text-[10px] font-bold text-emerald-800">
+                    <span className="flex h-2 w-2 relative">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                    </span>
+                    <span>Supabase Live ({icd10List.length} ICD-10)</span>
+                    {onReloadIcd10FromSupabase && (
+                      <button
+                        type="button"
+                        onClick={handleManualIcdSync}
+                        disabled={isIcdSyncing}
+                        title="Tarik data ICD-10 terbaru dari Supabase"
+                        className={`p-0.5 hover:bg-emerald-100 rounded text-emerald-700 transition ${isIcdSyncing ? 'animate-spin' : ''}`}
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                      </button>
+                    )}
+                    {isOwnerAdmin && (
+                      <button
+                        type="button"
+                        onClick={() => setShowIcdSqlModal(true)}
+                        title="Lihat Skema SQL Tabel ICD-10 Supabase"
+                        className="p-0.5 hover:bg-emerald-100 rounded text-emerald-700 transition"
+                      >
+                        <Database className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+
                   <span className="px-2 py-0.5 rounded-full bg-sky-100 text-sky-800 font-extrabold text-[10px] border border-sky-200">
-                    {selectedIcds.length} Diagnosa ICD-10 Dipilih
+                    {selectedIcds.length} Diagnosa Dipilih
                   </span>
                   {selectedIcds.length > 0 && (
                     <button
@@ -1015,6 +1191,20 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
                   )}
                 </div>
               </div>
+
+              {/* Toast for ICD-10 Sync */}
+              {icdSyncMsg && (
+                <div
+                  className={`p-2 rounded-xl text-[11px] font-bold flex items-center justify-between transition ${
+                    icdSyncMsg.isError
+                      ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                      : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                  }`}
+                >
+                  <span>{icdSyncMsg.text}</span>
+                  <button onClick={() => setIcdSyncMsg(null)} className="text-slate-400 hover:text-slate-700">✕</button>
+                </div>
+              )}
 
               {/* Selected ICD-10 Badges (Multi-Diagnosis List) */}
               {selectedIcds.length > 0 && (
@@ -1089,8 +1279,17 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
               {showIcdDropdown && (
                 <div className="absolute z-30 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-xl overflow-hidden">
                   <div className="px-3 py-2 bg-slate-900 text-white flex items-center justify-between text-[11px]">
-                    <span className="font-bold">
-                      Centang / Klik untuk memilih lebih dari satu Diagnosa ICD-10 ({selectedIcds.length} dipilih)
+                    <span className="font-bold flex items-center gap-1.5">
+                      {isSearchingSupabaseIcd ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 text-sky-400 animate-spin" />
+                          <span>Mencari ICD-10 di Supabase...</span>
+                        </>
+                      ) : (
+                        <span>
+                          Centang / Klik untuk memilih Diagnosa ICD-10 ({selectedIcds.length} dipilih)
+                        </span>
+                      )}
                     </span>
                     <button
                       type="button"
@@ -1189,6 +1388,17 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
                     Resep Obat Elektronik (E-Prescription Terpadu)
                   </h4>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingRacikanIdx(null);
+                    setShowRacikanModal(true);
+                  }}
+                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-[11px] font-bold flex items-center gap-1.5 shadow-2xs transition cursor-pointer active:scale-95"
+                >
+                  <FlaskConical className="w-3.5 h-3.5" />
+                  <span>+ Puyer / Racikan</span>
+                </button>
               </div>
 
               {/* Medicine Autocomplete Search */}
@@ -1215,8 +1425,11 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
                       >
                         <div>
                           <strong className="text-slate-800 block">{med.name}</strong>
-                          <span className="text-[10px] text-slate-500">
-                            Stok: <strong className="text-emerald-700">{med.stock} {med.satuanKecil || med.unit}</strong> · {med.category}
+                          <span className="text-[10px] text-slate-500 inline-flex items-center gap-1.5 mt-0.5">
+                            <MedicineCategorySymbol category={med.category} size="xs" />
+                            <span>
+                              Stok: <strong className="text-emerald-700">{med.stock} {med.satuanKecil || med.unit}</strong>
+                            </span>
                           </span>
                         </div>
                         <span className="font-mono font-bold text-sky-700">
@@ -1250,8 +1463,42 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
                       presItems.map((item, idx) => (
                         <tr key={idx} className="hover:bg-slate-50">
                           <td className="p-2.5">
-                            <strong className="text-slate-900 block">{item.name}</strong>
-                            <span className="text-[10px] text-slate-500 font-mono">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {item.isRacikan && (
+                                <span className="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800 border border-indigo-200 font-black text-[9px] uppercase">
+                                  {item.racikanType || 'Racikan'}
+                                </span>
+                              )}
+                              {item.isRacikan && item.budDate && (
+                                <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 font-mono font-bold text-[9px]">
+                                  BUD: {formatDateDDMMYYYY(item.budDate)}
+                                </span>
+                              )}
+                              <strong className="text-slate-900">
+                                {item.isRacikan ? item.racikanName || item.name : item.name}
+                              </strong>
+                            </div>
+                            {item.isRacikan && item.racikanIngredients && item.racikanIngredients.length > 0 && (
+                              <ul className="mt-1 space-y-0.5 pl-2 border-l-2 border-indigo-200 text-[10px] text-slate-600">
+                                {item.racikanIngredients.map((ing, i) => (
+                                  <li key={`${ing.medicineId}-${i}`}>
+                                    {ing.name}:{' '}
+                                    <strong className="font-mono text-slate-800">
+                                      {ing.totalQty} {ing.unit}
+                                    </strong>
+                                    {item.racikanMethod === 'dtd' && ing.qtyPerDose
+                                      ? ` (${ing.qtyPerDose}/${item.unit})`
+                                      : ''}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                            {item.notes && (
+                              <span className="text-[10px] text-indigo-700 italic block mt-0.5">
+                                {item.notes}
+                              </span>
+                            )}
+                            <span className="text-[10px] text-slate-500 font-mono block mt-0.5">
                               @ Rp {item.price.toLocaleString('id-ID')} / {item.unit}
                             </span>
                           </td>
@@ -1268,6 +1515,7 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
                               }}
                               className="w-14 p-1 border rounded font-mono font-bold text-center bg-white"
                             />
+                            <span className="text-[10px] text-slate-500 block mt-0.5">{item.unit}</span>
                           </td>
                           <td className="p-2.5">
                             <input
@@ -1282,12 +1530,28 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
                             />
                           </td>
                           <td className="p-2.5 text-center">
-                            <button
-                              onClick={() => handleRemovePresItem(idx)}
-                              className="text-slate-400 hover:text-rose-600 transition"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                            <div className="inline-flex items-center gap-1">
+                              {item.isRacikan && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingRacikanIdx(idx);
+                                    setShowRacikanModal(true);
+                                  }}
+                                  title="Edit Komposisi Racikan"
+                                  className="p-1 text-indigo-500 hover:text-indigo-700 transition cursor-pointer"
+                                >
+                                  <Pencil className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => handleRemovePresItem(idx)}
+                                className="p-1 text-slate-400 hover:text-rose-600 transition cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))
@@ -1405,6 +1669,103 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Supabase ICD-10 SQL DDL Schema Modal */}
+      {isOwnerAdmin && showIcdSqlModal && (
+        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl w-full max-w-2xl shadow-2xl overflow-hidden border border-slate-200 max-h-[90vh] flex flex-col">
+            <div className="p-5 border-b border-slate-200 flex items-center justify-between bg-slate-900 text-white">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-emerald-500/20 text-emerald-400 rounded-xl">
+                  <Database className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm">Integrasi Database Supabase — Master ICD-10</h3>
+                  <p className="text-[11px] text-slate-400">Skema SQL DDL untuk Tabel Diagnosa Penyakit (icd10)</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowIcdSqlModal(false)}
+                className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-5 text-xs">
+              <div className="bg-sky-50 border border-sky-200 rounded-2xl p-4 text-sky-900 space-y-1.5">
+                <p className="font-bold flex items-center gap-1.5 text-xs">
+                  <CheckCircle className="w-4 h-4 text-sky-600" />
+                  Sinkronisasi Real-Time Master ICD-10
+                </p>
+                <p className="text-[11px] text-sky-800 leading-relaxed">
+                  Seluruh data diagnosa ICD-10 pada modul RME Dokter bersumber langsung dari tabel <code>icd10</code> di Supabase. Jika tabel belum dibuat di Supabase, jalankan skrip SQL di bawah ini pada SQL Editor Supabase Anda. Aplikasi juga menyediakan fitur auto-seed data awal ICD-10 secara otomatis.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <Code className="w-4 h-4 text-slate-600" />
+                    <h4 className="font-bold text-slate-800 text-xs">Skema DDL SQL Tabel icd10</h4>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleCopyIcdSchema}
+                    className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-lg text-[11px] font-bold transition flex items-center gap-1 cursor-pointer"
+                  >
+                    {copiedIcdSchema ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                        <span className="text-emerald-700">Tersalin!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Code className="w-3.5 h-3.5" />
+                        <span>Salin Skrip SQL</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                <div className="bg-slate-900 rounded-2xl p-3.5 border border-slate-800 text-[11px] font-mono text-emerald-400 overflow-x-auto max-h-56">
+                  <pre>{SUPABASE_ICD10_SQL_SCHEMA}</pre>
+                </div>
+              </div>
+
+              <div className="flex justify-between items-center pt-2 border-t">
+                <span className="text-[11px] text-slate-500 font-semibold">
+                  Jumlah Kode ICD-10 Tersedia: <strong>{icd10List.length} Kode</strong>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowIcdSqlModal(false)}
+                  className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs"
+                >
+                  Selesai / Tutup
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Pembuat Puyer / Racikan Obat */}
+      <RacikanBuilderModal
+        isOpen={showRacikanModal}
+        onClose={() => {
+          setShowRacikanModal(false);
+          setEditingRacikanIdx(null);
+        }}
+        medicines={medicines}
+        patientAllergy={patientAllergy}
+        initialItem={
+          editingRacikanIdx !== null && presItems[editingRacikanIdx]
+            ? presItems[editingRacikanIdx]
+            : null
+        }
+        onSaveRacikan={handleSaveRacikanItem}
+      />
     </div>
   );
 };

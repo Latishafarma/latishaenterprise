@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { demoSetItem } from '../utils/demoSandbox';
 import {
   Truck,
   Plus,
@@ -21,13 +22,14 @@ import {
 } from 'lucide-react';
 import { PurchaseInvoice, PurchaseItem, Medicine, Supplier } from '../types';
 import { openPrintWindow } from '../utils/printHelper';
+import { PaginationControls } from './PaginationControls';
 
 interface PurchaseInvoiceViewProps {
   invoices: PurchaseInvoice[];
   medicines: Medicine[];
   suppliers?: Supplier[];
   onAddInvoice: (invoice: PurchaseInvoice, stockIncrements: { medId: string; qty: number }[]) => void;
-  onUpdateInvoice?: (invoice: PurchaseInvoice) => void;
+  onUpdateInvoice?: (invoice: PurchaseInvoice, stockIncrements: { medId: string; qty: number }[]) => void;
   onDeleteInvoice?: (id: string) => void;
   onProcessReturn?: (invoiceId: string, returnedItems: { medicineId: string; qty: number; unit: string; batchNo?: string; reason?: string }[]) => void;
   onUpdateInvoiceStatus: (id: string, status: 'Lunas' | 'Belum Lunas' | 'Sebagian') => void;
@@ -248,7 +250,7 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
 
   const handlePrintRetur = (inv: PurchaseInvoice) => {
     try {
-      localStorage.setItem('latisha_active_print_retur', JSON.stringify(inv));
+      demoSetItem('latisha_active_print_retur', JSON.stringify(inv));
       openPrintWindow('retur-pembelian', { invoiceId: inv.id });
     } catch (err) {
       console.error('Print retur error:', err);
@@ -288,8 +290,11 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
 
     const increments = items.map((it) => {
       const med = medicines.find((m) => m.id === it.medicineId);
-      const ratio = med?.rasioKonversi || 1;
-      const multiplier = it.unit === med?.satuanBesar ? ratio : 1;
+      const ratio = Math.max(1, Number(med?.rasioKonversi) || 1);
+      const isBesar =
+        !med?.satuanBesar ||
+        (it.unit || '').trim().toLowerCase() === med.satuanBesar.trim().toLowerCase();
+      const multiplier = isBesar ? ratio : 1;
       return {
         medId: it.medicineId || '',
         qty: it.qty * multiplier
@@ -297,7 +302,7 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
     });
 
     if (editingInvoiceId && onUpdateInvoice) {
-      onUpdateInvoice(invoiceData);
+      onUpdateInvoice(invoiceData, increments);
     } else {
       onAddInvoice(invoiceData, increments);
     }
@@ -307,12 +312,30 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
     alert(`Faktur pembelian ${invoiceData.invoiceNo} dari ${invoiceData.pbfName} berhasil ${editingInvoiceId ? 'diperbarui' : 'dicatat'}!`);
   };
 
-  const filteredInvoices = invoices.filter(
-    (inv) =>
-      inv.invoiceNo.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      inv.pbfName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      inv.salesman.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const filteredInvoices = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    if (!q) return invoices;
+    return invoices.filter(
+      (inv) =>
+        inv.invoiceNo.toLowerCase().includes(q) ||
+        inv.pbfName.toLowerCase().includes(q) ||
+        inv.salesman.toLowerCase().includes(q)
+    );
+  }, [invoices, searchTerm]);
+
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(25);
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchTerm]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredInvoices.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const paginatedInvoices = useMemo(() => {
+    const start = (safePage - 1) * pageSize;
+    return filteredInvoices.slice(start, start + pageSize);
+  }, [filteredInvoices, safePage, pageSize]);
 
   return (
     <div className="space-y-6">
@@ -382,7 +405,8 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
 
       {/* Main Table */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
-        <table className="w-full text-left text-xs">
+        <div className="overflow-x-auto w-full custom-scrollbar">
+          <table className="w-full min-w-[780px] text-left text-xs">
           <thead className="bg-slate-50 text-slate-600 font-black uppercase text-[10px] tracking-wider border-b border-slate-200">
             <tr>
               <th className="p-3">No. Faktur & PBF</th>
@@ -396,7 +420,7 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
-            {filteredInvoices.length === 0 ? (
+            {paginatedInvoices.length === 0 ? (
               <tr>
                 <td colSpan={8} className="p-8 text-center text-slate-400">
                   <Receipt className="w-8 h-8 mx-auto mb-2 opacity-40 text-slate-400" />
@@ -404,7 +428,7 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
                 </td>
               </tr>
             ) : (
-              filteredInvoices.map((inv) => (
+              paginatedInvoices.map((inv) => (
                 <tr key={inv.id} className="hover:bg-slate-50/80 transition-colors">
                   <td className="p-3 font-mono">
                     <span className="font-extrabold text-teal-700 text-sm block">{inv.invoiceNo}</span>
@@ -509,7 +533,20 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
               ))
             )}
           </tbody>
-        </table>
+          </table>
+        </div>
+        <PaginationControls
+          currentPage={safePage}
+          totalPages={totalPages}
+          totalCount={filteredInvoices.length}
+          pageSize={pageSize}
+          onPageChange={setPage}
+          onPageSizeChange={(sz) => {
+            setPageSize(sz);
+            setPage(1);
+          }}
+          itemLabel="faktur PBF"
+        />
       </div>
 
       {/* Add Invoice Modal */}
@@ -698,7 +735,13 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
                           );
                           if (found) {
                             setSelectedMedToAdd(found.id);
-                            if (found.hpp) setPriceToAdd(found.hpp);
+                            const defaultHnaBesar =
+                              found.hnaBesar > 0
+                                ? found.hnaBesar
+                                : found.hpp > 0
+                                ? Math.round((found.hpp * Math.max(1, found.rasioKonversi || 1)) / 1.11)
+                                : 0;
+                            if (defaultHnaBesar > 0) setPriceToAdd(defaultHnaBesar);
                             if (found.satuanBesar) setUnitToAdd(found.satuanBesar);
                           } else {
                             setSelectedMedToAdd('');
@@ -715,7 +758,11 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
                         {medicines
                           .filter((m) => {
                             if (!medSearchQuery.trim()) return true;
-                            return m.name.toLowerCase().includes(medSearchQuery.toLowerCase());
+                            const q = medSearchQuery.toLowerCase();
+                            return (
+                              m.name.toLowerCase().includes(q) ||
+                              (m.kekuatan || '').toLowerCase().includes(q)
+                            );
                           })
                           .map((m) => (
                             <div
@@ -723,7 +770,13 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
                               onClick={() => {
                                 setSelectedMedToAdd(m.id);
                                 setMedSearchQuery(`${m.name} ${m.kekuatan ? `(${m.kekuatan})` : ''}`);
-                                if (m.hpp) setPriceToAdd(m.hpp);
+                                const defaultHnaBesar =
+                                  m.hnaBesar > 0
+                                    ? m.hnaBesar
+                                    : m.hpp > 0
+                                    ? Math.round((m.hpp * Math.max(1, m.rasioKonversi || 1)) / 1.11)
+                                    : 0;
+                                if (defaultHnaBesar > 0) setPriceToAdd(defaultHnaBesar);
                                 if (m.satuanBesar) setUnitToAdd(m.satuanBesar);
                                 setIsMedDropdownOpen(false);
                               }}
@@ -733,9 +786,13 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
                               <span className="text-[10px] text-slate-400 font-mono">Stk: {m.stock} {m.unit}</span>
                             </div>
                           ))}
-                        {medicines.filter((m) =>
-                          m.name.toLowerCase().includes(medSearchQuery.toLowerCase())
-                        ).length === 0 && (
+                        {medicines.filter((m) => {
+                          const q = medSearchQuery.toLowerCase();
+                          return (
+                            m.name.toLowerCase().includes(q) ||
+                            (m.kekuatan || '').toLowerCase().includes(q)
+                          );
+                        }).length === 0 && (
                           <div className="p-3 text-slate-400 text-xs italic">
                             Tidak ditemukan obat "{medSearchQuery}"
                           </div>

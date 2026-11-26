@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { demoSetItem } from '../utils/demoSandbox';
 import { Truck, Search, Printer, Trash2, RotateCcw, Calendar, Receipt, Plus, X, Edit2 } from 'lucide-react';
 import { PurchaseReturnRecord, PurchaseReturnItem, PurchaseInvoice } from '../types';
 import { openPrintWindow } from '../utils/printHelper';
@@ -120,7 +121,7 @@ export const PurchaseReturnHistoryView: React.FC<PurchaseReturnHistoryViewProps>
         totalReturValue: payloadItems.reduce((acc, it) => acc + it.subtotal, 0),
         timestamp: Date.now()
       };
-      localStorage.setItem('latisha_active_print_retur', JSON.stringify(returnDocData));
+      demoSetItem('latisha_active_print_retur', JSON.stringify(returnDocData));
     } catch (e) {
       console.error('syncActivePrintStorage error:', e);
     }
@@ -339,7 +340,7 @@ export const PurchaseReturnHistoryView: React.FC<PurchaseReturnHistoryViewProps>
     };
 
     try {
-      localStorage.setItem('latisha_active_print_retur', JSON.stringify(returnDocData));
+      demoSetItem('latisha_active_print_retur', JSON.stringify(returnDocData));
       openPrintWindow('retur-pembelian', {
         invoiceId: activeReturnInvoice.id,
         returId: docId
@@ -452,7 +453,7 @@ export const PurchaseReturnHistoryView: React.FC<PurchaseReturnHistoryViewProps>
         branchId: ret.branchId,
         timestamp: Date.now()
       };
-      localStorage.setItem('latisha_active_print_retur', JSON.stringify(formattedForPrint));
+      demoSetItem('latisha_active_print_retur', JSON.stringify(formattedForPrint));
       openPrintWindow('retur-pembelian', {
         invoiceId: ret.invoiceId,
         returId: ret.id

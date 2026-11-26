@@ -1,14 +1,42 @@
 import React, { useEffect, useState } from 'react';
 import { Printer, X, CheckCircle, FileText } from 'lucide-react';
-import { INITIAL_MEDICINES, INITIAL_STOCK_MUTATIONS, INITIAL_TRANSACTIONS, INITIAL_RME_RECORDS, INITIAL_PATIENTS } from '../data/initialData';
-import { Medicine, StockMutation, Transaction, RMERecord, Patient } from '../types';
+import { INITIAL_MEDICINES, INITIAL_STOCK_MUTATIONS, INITIAL_TRANSACTIONS, INITIAL_RME_RECORDS, INITIAL_PATIENTS, INITIAL_STAFF } from '../data/initialData';
+import { Medicine, PurchaseInvoice, StockMutation, StockOpnameRecord, Transaction, RMERecord, Patient, Staff, DutySchedule, StaffFeeItem } from '../types';
 import {
   getSavedPharmacyProfile,
   getSavedAPJProfile,
   getSavedDPJProfile,
   useFacilityProfiles,
-  formatPharmacyAddress
+  formatPharmacyAddress,
+  formatPharmacyLegalInfo
 } from './PharmacySettingsModal';
+import { demoGetItem, demoSetItem, isDemoMode } from '../utils/demoSandbox';
+import {
+  isJasaCartItem,
+  summarizeTransactionForDocument,
+  getDefaultKwitansiKeterangan
+} from '../utils/transactionPrintHelper';
+import {
+  loadLocalFeeLedger,
+  normalizeTransactionDateToYMD,
+  resolveTransactionStaffFees
+} from '../utils/serviceFeeHelper';
+import { getDeletedIdsSet } from '../utils/deletionRegistry';
+import { loadLocalAttendanceRecords, formatMinutesDuration } from '../utils/attendanceService';
+import { buildStaffPayrollSummary, loadLocalPayrollConfig } from '../utils/payrollService';
+import {
+  resolveMutationBatchDetails,
+  getTransactionTypeShortLabel
+} from '../utils/stockCardBatchHelper';
+import {
+  MEDICATION_LABEL_PRINT_KEY,
+  MedicationLabelLayout,
+  MedicationLabelPrintPayload,
+  isRacikanPrescriptionItem,
+  loadMedicationLabelPrintPayload,
+  normalizeMedicationLabelLayout
+} from '../utils/medicationLabelHelper';
+import { formatDateDDMMYYYY } from '../utils/racikanBudHelper';
 
 interface PrintViewProps {
   mode: string;
@@ -32,11 +60,18 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
         'kartu-pasien': 'latisha_active_print_patient',
         'nota-retur': 'latisha_active_print_retur',
         'retur-pembelian': 'latisha_active_print_retur',
-        'telaah-drp': 'latisha_active_print_drp'
+        'telaah-drp': 'latisha_active_print_drp',
+        'skrining-resep': 'latisha_active_print_skrining',
+        'etiket-obat': MEDICATION_LABEL_PRINT_KEY
       };
       const storageKey = payloadKeyMap[mode];
       if (storageKey) {
-        localStorage.setItem(storageKey, rawPayload);
+        try {
+          if (typeof sessionStorage !== 'undefined') {
+            sessionStorage.setItem(storageKey, rawPayload);
+          }
+        } catch {}
+        demoSetItem(storageKey, rawPayload);
       }
     }
   } catch {}
@@ -52,6 +87,10 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
   const [serverSyncedDpj, setServerSyncedDpj] = useState(() => getSavedDPJProfile());
   const [activeInvoicePrintType, setActiveInvoicePrintType] = useState<'faktur' | 'kwitansi'>(
     mode === 'kwitansi-penjualan' ? 'kwitansi' : 'faktur'
+  );
+  const [printKwitansiKeterangan, setPrintKwitansiKeterangan] = useState<string | null>(null);
+  const [etiketLayoutOverride, setEtiketLayoutOverride] = useState<MedicationLabelLayout | null>(
+    null
   );
 
   const safePrint = () => {
@@ -82,23 +121,46 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
       'kartu-pasien': 'latisha_active_print_patient',
       'nota-retur': 'latisha_active_print_retur',
       'retur-pembelian': 'latisha_active_print_retur',
-      'telaah-drp': 'latisha_active_print_drp'
+      'telaah-drp': 'latisha_active_print_drp',
+      'skrining-resep': 'latisha_active_print_skrining',
+      'etiket-obat': MEDICATION_LABEL_PRINT_KEY
     };
     const storageKey = payloadKeyMap[mode];
-    if (storageKey) {
+    const demoActive = isDemoMode();
+    const hasInlineUrlPayload = Boolean(searchParams.get('_payload'));
+    const fetchRemotePayload = (): Promise<any> =>
       fetch(`/api/print-payload/${storageKey}`)
         .then((r) => (r.ok ? r.json() : null))
-        .then((data) => {
-          if (data?.payload && !cancelled) {
-            const rawStr = typeof data.payload === 'string' ? data.payload : JSON.stringify(data.payload);
-            try {
-              localStorage.setItem(storageKey, rawStr);
-            } catch {}
-            setRemotePayloadFetched(true);
-          }
-        })
-        .catch(() => {});
-    }
+        .catch(() => null);
+
+    const remotePayloadPromise =
+      storageKey && !demoActive && !hasInlineUrlPayload
+        ? fetchRemotePayload()
+            .then((data) => {
+              if (data?.payload || cancelled) return data;
+              return new Promise((resolve) => setTimeout(resolve, 250)).then(() =>
+                cancelled ? null : fetchRemotePayload()
+              );
+            })
+            .then((data) => {
+              if (data?.payload && !cancelled) {
+                const rawStr =
+                  typeof data.payload === 'string'
+                    ? data.payload
+                    : JSON.stringify(data.payload);
+                try {
+                  if (typeof sessionStorage !== 'undefined') {
+                    sessionStorage.setItem(storageKey, rawStr);
+                  }
+                } catch {}
+                try {
+                  demoSetItem(storageKey, rawStr);
+                } catch {}
+                setRemotePayloadFetched(true);
+              }
+            })
+            .catch(() => {})
+        : Promise.resolve();
 
     let hasTriggeredPrint = false;
 
@@ -150,46 +212,56 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
       }
     };
 
-    fetch('/api/facility-profile')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (cancelled) return;
-        if (data?.pharmacy) {
-          const currentLocal = getSavedPharmacyProfile();
-          const mergedPharm = {
-            ...currentLocal,
-            ...data.pharmacy,
-            logoUrl: data.pharmacy.logoUrl || currentLocal.logoUrl || ''
-          };
-          if (mergedPharm.logoUrl) {
+    if (demoActive) {
+      setTimeout(triggerPrintWhenImagesReady, 200);
+    } else {
+      const facilityPromise = fetch('/api/facility-profile')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (cancelled) return;
+          if (data?.pharmacy) {
+            const currentLocal = getSavedPharmacyProfile();
+            const mergedPharm = {
+              ...currentLocal,
+              ...data.pharmacy,
+              logoUrl: data.pharmacy.logoUrl || currentLocal.logoUrl || ''
+            };
+            if (mergedPharm.logoUrl) {
+              try {
+                demoSetItem('latisha_facility_logo', mergedPharm.logoUrl);
+              } catch {}
+            }
             try {
-              localStorage.setItem('latisha_facility_logo', mergedPharm.logoUrl);
+              demoSetItem('latisha_pharmacy_profile', JSON.stringify(mergedPharm));
             } catch {}
+            setServerSyncedPharm(mergedPharm);
           }
-          try {
-            localStorage.setItem('latisha_pharmacy_profile', JSON.stringify(mergedPharm));
-          } catch {}
-          setServerSyncedPharm(mergedPharm);
+          if (data?.apj) {
+            const mergedApj = { ...getSavedAPJProfile(), ...data.apj };
+            try {
+              demoSetItem('latisha_apj_profile', JSON.stringify(mergedApj));
+            } catch {}
+            setServerSyncedApj(mergedApj);
+          }
+          if (data?.dpj) {
+            const mergedDpj = { ...getSavedDPJProfile(), ...data.dpj };
+            try {
+              demoSetItem('latisha_dpj_profile', JSON.stringify(mergedDpj));
+            } catch {}
+            setServerSyncedDpj(mergedDpj);
+          }
+          if (data?.pharmacy || data?.apj || data?.dpj) {
+            window.dispatchEvent(new Event('latisha_profile_updated'));
+          }
+        })
+        .catch(() => {});
+
+      Promise.all([remotePayloadPromise, facilityPromise]).then(() => {
+        if (!cancelled) {
+          setTimeout(triggerPrintWhenImagesReady, 180);
         }
-        if (data?.apj) {
-          const mergedApj = { ...getSavedAPJProfile(), ...data.apj };
-          try {
-            localStorage.setItem('latisha_apj_profile', JSON.stringify(mergedApj));
-          } catch {}
-          setServerSyncedApj(mergedApj);
-        }
-        if (data?.dpj) {
-          const mergedDpj = { ...getSavedDPJProfile(), ...data.dpj };
-          try {
-            localStorage.setItem('latisha_dpj_profile', JSON.stringify(mergedDpj));
-          } catch {}
-          setServerSyncedDpj(mergedDpj);
-        }
-        setTimeout(triggerPrintWhenImagesReady, 150);
-      })
-      .catch(() => {
-        setTimeout(triggerPrintWhenImagesReady, 300);
       });
+    }
 
     return () => {
       cancelled = true;
@@ -197,13 +269,13 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
   }, []);
 
   const pharmacyProfile = {
-    ...reactivePharm,
     ...serverSyncedPharm,
-    logoUrl: serverSyncedPharm.logoUrl || reactivePharm.logoUrl || ''
+    ...reactivePharm,
+    logoUrl: reactivePharm.logoUrl || serverSyncedPharm.logoUrl || ''
   };
   const pharmacyFullAddress = formatPharmacyAddress(pharmacyProfile);
-  const apjProfile = { ...reactiveApj, ...serverSyncedApj };
-  const dpjProfile = { ...reactiveDpj, ...serverSyncedDpj };
+  const apjProfile = { ...serverSyncedApj, ...reactiveApj };
+  const dpjProfile = { ...serverSyncedDpj, ...reactiveDpj };
 
   // Shared Floating Top Action Bar
   const renderFloatingTopBar = (title: string) => (
@@ -291,7 +363,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
     // 2. Second priority: lookup purchase order from localStorage by poId
     if (defectaItems.length === 0 && poIdParam) {
       try {
-        const savedPOs = localStorage.getItem('latisha_purchase_orders');
+        const savedPOs = demoGetItem('latisha_purchase_orders');
         if (savedPOs) {
           const pos = JSON.parse(savedPOs);
           const foundPo = pos.find((p: any) => p.id === poIdParam || p.poNumber === poIdParam);
@@ -325,7 +397,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
     // 3. Third priority: localStorage latisha_active_print_sp
     if (defectaItems.length === 0) {
       try {
-        const savedSp = localStorage.getItem('latisha_active_print_sp');
+        const savedSp = demoGetItem('latisha_active_print_sp');
         if (savedSp) {
           const parsed = JSON.parse(savedSp);
           if (parsed?.items && Array.isArray(parsed.items) && parsed.items.length > 0) {
@@ -342,7 +414,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
     if (defectaItems.length === 0) {
       let medicines: Medicine[] = INITIAL_MEDICINES;
       try {
-        const savedMed = localStorage.getItem('latisha_medicines');
+        const savedMed = demoGetItem('latisha_medicines');
         if (savedMed) medicines = JSON.parse(savedMed);
       } catch (e) {}
       defectaItems = medicines.filter((m) => m.stock <= m.minStock);
@@ -429,6 +501,8 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
 
     const currentMeta = spMeta[spType] || spMeta.REG;
 
+    const isRegOrAlk = spType === 'REG' || spType === 'ALK';
+
     return (
       <div className="bg-white min-h-screen text-slate-800 p-6 max-w-4xl mx-auto font-sans text-xs">
         {printStyles}
@@ -460,12 +534,12 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                   {pharmacyFullAddress}
                 </p>
                 <p className="text-[10px] text-slate-600">
-                  Telp / WhatsApp: {pharmacyProfile.phone} | Email: {pharmacyProfile.email}
+                  Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
                 </p>
                 <div className="flex flex-wrap justify-center gap-x-4 text-[10px] text-slate-700 font-mono mt-1 border-t border-slate-300 pt-1">
-                  <span>SIA: <strong>{pharmacyProfile.sia}</strong></span>
+                  {pharmacyProfile.sia && <span>SIA: <strong>{pharmacyProfile.sia}</strong></span>}
                   {pharmacyProfile.nib && <span>NIB: <strong>{pharmacyProfile.nib}</strong></span>}
-                  <span>APJ: <strong>{apjProfile.name}</strong> (SIPA: {apjProfile.sipa})</span>
+                  {pharmacyProfile.npwp && <span>NPWP: <strong>{pharmacyProfile.npwp}</strong></span>}
                 </div>
               </div>
               {pharmacyProfile.logoUrl ? <div className="w-16 shrink-0" /> : <div className="w-16 shrink-0" />}
@@ -487,9 +561,6 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
               </p>
               <p className="text-slate-600 mt-2 font-bold">TANGGAL PEMESANAN:</p>
               <p className="font-bold text-slate-800">{todayStr}</p>
-              <p className="text-[10px] text-slate-500 mt-1">
-                Kelompok Regulasi: <strong className="text-slate-800">{spType} ({currentMeta.badge})</strong>
-              </p>
             </div>
             <div className="text-right">
               <p className="text-slate-600 font-bold uppercase text-[10px] tracking-wider">
@@ -512,21 +583,33 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
           {/* Tabel Pesanan Resmi BPOM */}
           <table className="w-full text-left text-xs border border-collapse border-slate-400">
             <thead className="bg-slate-100 font-bold uppercase text-[10px] text-slate-900 border-b border-slate-400">
-              <tr>
-                <th className="p-2 border border-slate-400 text-center w-8">No</th>
-                <th className="p-2 border border-slate-400">Nama Obat / Barang</th>
-                <th className="p-2 border border-slate-400 text-center w-28">Kekuatan & Bentuk</th>
-                <th className="p-2 border border-slate-400 text-center w-36">Kemasan</th>
-                <th className="p-2 border border-slate-400 text-center w-28 bg-slate-200">
-                  Jumlah Pesanan
-                </th>
-                <th className="p-2 border border-slate-400">Jumlah Dalam Huruf (Terbilang)</th>
-              </tr>
+              {isRegOrAlk ? (
+                <tr>
+                  <th className="p-2 border border-slate-400 text-center w-8">No</th>
+                  <th className="p-2 border border-slate-400">Nama Obat / Barang</th>
+                  <th className="p-2 border border-slate-400 text-center w-44">Bentuk &amp; Kemasan</th>
+                  <th className="p-2 border border-slate-400 text-center w-28 bg-slate-200">
+                    Jumlah Pesanan
+                  </th>
+                  <th className="p-2 border border-slate-400">Ket</th>
+                </tr>
+              ) : (
+                <tr>
+                  <th className="p-2 border border-slate-400 text-center w-8">No</th>
+                  <th className="p-2 border border-slate-400">Nama Obat / Barang</th>
+                  <th className="p-2 border border-slate-400 text-center w-36">Zat Aktif, Kekuatan &amp; Bentuk</th>
+                  <th className="p-2 border border-slate-400 text-center w-36">Kemasan</th>
+                  <th className="p-2 border border-slate-400 text-center w-28 bg-slate-200">
+                    Jumlah Pesanan
+                  </th>
+                  <th className="p-2 border border-slate-400">Jumlah Dalam Huruf (Terbilang)</th>
+                </tr>
+              )}
             </thead>
             <tbody className="divide-y divide-slate-300 font-medium text-slate-900">
               {defectaItems.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="p-8 text-center text-slate-400 italic">
+                  <td colSpan={isRegOrAlk ? 5 : 6} className="p-8 text-center text-slate-400 italic">
                     Tidak ada obat dalam daftar surat pesanan ini.
                   </td>
                 </tr>
@@ -534,6 +617,38 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                 defectaItems.map((item, idx) => {
                   const qty = item.qtyBesar || item.qtyOrder || Math.max(1, (item.minStock * 2) - item.stock);
                   const satuan = item.satuanBesar || item.unit || 'Box';
+                  const kemasanLabel = `${item.satuanBesar || 'Box'}${
+                    item.rasioKonversi > 1 ? ` @ ${item.rasioKonversi} ${item.satuanKecil || item.unit}` : ''
+                  }`;
+                  const shapeLabel =
+                    spType === 'ALK' && (!item.form || item.form === '-' || item.form === 'Tablet')
+                      ? ''
+                      : item.form && item.form !== '-'
+                      ? item.form
+                      : 'Tablet';
+                  const bentukKemasanLabel = shapeLabel ? `${shapeLabel} · ${kemasanLabel}` : kemasanLabel;
+                  const terbilangText = getTerbilang(qty).replace('Rupiah', satuan);
+
+                  if (isRegOrAlk) {
+                    return (
+                      <tr key={item.id || idx} className="border-b border-slate-300">
+                        <td className="p-2 border border-slate-400 text-center font-mono">{idx + 1}</td>
+                        <td className="p-2 border border-slate-400 font-bold text-slate-900">
+                          {item.name}
+                        </td>
+                        <td className="p-2 border border-slate-400 text-center text-[11px]">
+                          {bentukKemasanLabel}
+                        </td>
+                        <td className="p-2 border border-slate-400 text-center font-mono font-black text-slate-900 bg-slate-100 text-xs">
+                          {qty} {satuan}
+                        </td>
+                        <td className="p-2 border border-slate-400 italic text-[11px] text-slate-800">
+                          {item.ket || terbilangText}
+                        </td>
+                      </tr>
+                    );
+                  }
+
                   return (
                     <tr key={item.id || idx} className="border-b border-slate-300">
                       <td className="p-2 border border-slate-400 text-center font-mono">{idx + 1}</td>
@@ -549,14 +664,13 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                         {item.kekuatan || '-'} · {item.form || 'Tablet'}
                       </td>
                       <td className="p-2 border border-slate-400 text-center text-[11px]">
-                        {item.satuanBesar || 'Box'}
-                        {item.rasioKonversi > 1 ? ` @ ${item.rasioKonversi} ${item.satuanKecil || item.unit}` : ''}
+                        {kemasanLabel}
                       </td>
                       <td className="p-2 border border-slate-400 text-center font-mono font-black text-slate-900 bg-slate-100 text-xs">
                         {qty} {satuan}
                       </td>
                       <td className="p-2 border border-slate-400 italic text-[11px] text-slate-800">
-                        {getTerbilang(qty).replace('Rupiah', satuan)}
+                        {terbilangText}
                       </td>
                     </tr>
                   );
@@ -565,25 +679,14 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
             </tbody>
           </table>
 
-          {/* Pernyataan & Regulasi BPOM */}
-          <div className="p-3 bg-slate-50 border border-slate-300 rounded-xl space-y-1 text-[10px] text-slate-700">
-            <p className="font-bold text-slate-900">Pernyataan Kepatuhan Regulasi BPOM:</p>
+          {/* Keterangan & Catatan */}
+          <div className="p-3 bg-slate-50 border border-slate-300 rounded-xl space-y-1.5 text-[10px] text-slate-700">
             <p>
-              1. Obat-obatan / sediaan farmasi tersebut di atas akan dipergunakan untuk memenuhi kebutuhan pelayanan kefarmasian resmi di sarana <strong>{pharmacyProfile.name}</strong> (SIA: {pharmacyProfile.sia}) sesuai ketentuan perundang-undangan.
+              <strong className="text-slate-900">Keterangan :</strong> Obat-obatan / sediaan farmasi tersebut di atas akan dipergunakan untuk memenuhi kebutuhan pelayanan kefarmasian resmi di sarana <strong>{pharmacyProfile.name || 'LATISHA FARMA'}</strong> (SIA: {pharmacyProfile.sia || '23082300357340002'}) sesuai ketentuan perundang-undangan.
             </p>
-            <p>
-              2. PBF wajib melampirkan salinan Certificate of Analysis (CoA) untuk setiap batch, serta menjamin tanggal kedaluwarsa (Expired Date) minimal 2 (dua) tahun pada saat penyerahan barang.
+            <p className="font-semibold text-slate-900">
+              <strong>Catatan :</strong> "Jangan memberikan produk obat/alkes yang tanggal kedaluwarsa (Expired Date) &lt; 2 (dua) tahun pada saat penyerahan barang."
             </p>
-            {spType === 'NAR' && (
-              <p className="font-bold text-rose-800">
-                3. Khusus Narkotika: Surat Pesanan ini hanya berlaku untuk 1 (satu) jenis sediaan Narkotika sesuai Pasal 10 Permenkes No. 3/2015.
-              </p>
-            )}
-            {spType === 'PSI' && (
-              <p className="font-bold text-purple-800">
-                3. Khusus Psikotropika: Surat Pesanan dibuat terpisah dari obat lain dan dilaporkan secara berkala melalui aplikasi SIPNAP Kemenkes RI.
-              </p>
-            )}
           </div>
 
           {/* Tanda Tangan APJ Resmi & Pemesan */}
@@ -619,7 +722,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
     let selectedTrx: Transaction | null = null;
 
     try {
-      const savedReceipt = localStorage.getItem('latisha_active_print_receipt');
+      const savedReceipt = demoGetItem('latisha_active_print_receipt');
       if (savedReceipt) {
         const parsed = JSON.parse(savedReceipt);
         if (!trxId || parsed.id === trxId) {
@@ -627,7 +730,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
         }
       }
       if (!selectedTrx) {
-        const savedList = localStorage.getItem('latisha_transactions');
+        const savedList = demoGetItem('latisha_transactions');
         if (savedList) {
           const list: Transaction[] = JSON.parse(savedList);
           selectedTrx = list.find((t) => t.id === trxId) || list[0] || null;
@@ -648,6 +751,8 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
         </div>
       );
     }
+
+    const docSummary = summarizeTransactionForDocument(selectedTrx);
 
     return (
       <div className="bg-slate-100 min-h-screen text-slate-900 p-4 font-mono text-xs flex flex-col items-center">
@@ -678,9 +783,9 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
             <p className="text-[10px] text-slate-600">
               {pharmacyFullAddress}
             </p>
-            <p className="text-[10px] text-slate-600">Telp / WA: {pharmacyProfile.phone}</p>
-            <p className="text-[9px] text-slate-500 font-mono mt-0.5">
-              SIA: {pharmacyProfile.sia} · APJ: {apjProfile.name}
+            <p className="text-[10px] text-slate-600">Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}</p>
+            <p className="text-[9px] text-slate-600 font-mono mt-0.5">
+              {formatPharmacyLegalInfo(pharmacyProfile)}
             </p>
           </div>
 
@@ -735,7 +840,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
 
           {/* Daftar Item Obat */}
           <div className="space-y-2 border-b border-dashed border-slate-300 pb-2">
-            {selectedTrx.items.map((it, idx) => (
+            {docSummary.productItems.map((it, idx) => (
               <div key={idx} className="flex justify-between text-[11px]">
                 <div className="flex-1 pr-2">
                   <div className="font-bold text-slate-900">{it.name}</div>
@@ -749,13 +854,58 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                 </div>
               </div>
             ))}
+            {docSummary.jasaItems.length > 0 ? (
+              <>
+                {docSummary.jasaItems.map((it, jIdx) => (
+                  <div key={`jasa-${jIdx}`} className="flex justify-between text-[11px]">
+                    <div className="flex-1 pr-2">
+                      <div className="font-bold text-slate-900">{it.name}</div>
+                      <div className="text-[10px] text-slate-500">
+                        {it.qty || 1} {it.unit || 'Layanan'} x Rp {it.price.toLocaleString('id-ID')}
+                        {it.nama_petugas ? ` · Petugas: ${it.nama_petugas}` : ''}
+                      </div>
+                    </div>
+                    <div className="font-bold text-slate-900 text-right">
+                      Rp {it.subtotal.toLocaleString('id-ID')}
+                    </div>
+                  </div>
+                ))}
+                {docSummary.isKlinikPath && docSummary.serviceChargeAmount > 0 && (
+                  <div className="flex justify-between text-[11px]">
+                    <div className="flex-1 pr-2">
+                      <div className="font-bold text-slate-900">Biaya Layanan / Service Charge</div>
+                      <div className="text-[10px] text-slate-500">
+                        1 Layanan x Rp {docSummary.serviceChargeAmount.toLocaleString('id-ID')}
+                      </div>
+                    </div>
+                    <div className="font-bold text-slate-900 text-right">
+                      Rp {docSummary.serviceChargeAmount.toLocaleString('id-ID')}
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              docSummary.totalJasaPelayanan > 0 && (
+                <div className="flex justify-between text-[11px]">
+                  <div className="flex-1 pr-2">
+                    <div className="font-bold text-slate-900">Jasa Pelayanan</div>
+                    <div className="text-[10px] text-slate-500">
+                      1 Layanan x Rp {docSummary.totalJasaPelayanan.toLocaleString('id-ID')}
+                    </div>
+                  </div>
+                  <div className="font-bold text-slate-900 text-right">
+                    Rp {docSummary.totalJasaPelayanan.toLocaleString('id-ID')}
+                  </div>
+                </div>
+              )
+            )}
           </div>
 
           {/* Ringkasan Pembayaran */}
           <div className="space-y-1 text-right border-b border-dashed border-slate-400 pb-2 text-xs">
             <div className="flex justify-between text-slate-600">
               <span>Subtotal:</span>
-              <span>Rp {selectedTrx.subtotal.toLocaleString('id-ID')}</span>
+              <span>Rp {docSummary.displayedSubtotal.toLocaleString('id-ID')}</span>
             </div>
             {selectedTrx.discount > 0 && (
               <div className="flex justify-between text-rose-600 font-bold">
@@ -763,12 +913,14 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                 <span>-Rp {selectedTrx.discount.toLocaleString('id-ID')}</span>
               </div>
             )}
-            {Boolean(selectedTrx.serviceCharge) && selectedTrx.serviceCharge! > 0 && (
-              <div className="flex justify-between text-indigo-700 font-bold">
-                <span>Service Charge:</span>
-                <span>+Rp {selectedTrx.serviceCharge!.toLocaleString('id-ID')}</span>
-              </div>
-            )}
+            {!docSummary.isKlinikPath &&
+              Boolean(selectedTrx.serviceCharge) &&
+              selectedTrx.serviceCharge! > 0 && (
+                <div className="flex justify-between text-indigo-700 font-bold">
+                  <span>Service Charge:</span>
+                  <span>+Rp {selectedTrx.serviceCharge!.toLocaleString('id-ID')}</span>
+                </div>
+              )}
             {Boolean(selectedTrx.pembulatan) && selectedTrx.pembulatan! > 0 && (
               <div className="flex justify-between text-slate-600 text-[11px]">
                 <span>Pembulatan:</span>
@@ -814,29 +966,45 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
     );
   }
 
-  // 3. KARTU STOK FARMASI
-  if (mode === 'kartu-stok') {
-    const medId = searchParams.get('medId') || 'OBT-001';
+  // 3. MUTASI STOK & KARTU STOK DIGITAL FARMASI
+  if (mode === 'mutasi-stok' || mode === 'kartu-stok') {
+    const isKartuMode = mode === 'kartu-stok';
+    const medId = searchParams.get('medId') || 'ALL';
     const startDate = searchParams.get('startDate') || '';
     const endDate = searchParams.get('endDate') || '';
+    const typeFilter = searchParams.get('typeFilter') || 'SEMUA';
+    const searchQuery = (searchParams.get('searchQuery') || '').trim().toLowerCase();
+    const isAllMode = medId === 'ALL' || !medId;
 
     let medicines: Medicine[] = INITIAL_MEDICINES;
     let mutations: StockMutation[] = INITIAL_STOCK_MUTATIONS;
+    let transactionsList: Transaction[] = INITIAL_TRANSACTIONS;
+    let purchasesList: PurchaseInvoice[] = [];
+    let opnameList: StockOpnameRecord[] = [];
 
     try {
-      const savedMed = localStorage.getItem('latisha_medicines');
+      const savedMed = demoGetItem('latisha_medicines');
       if (savedMed) medicines = JSON.parse(savedMed);
-      const savedMut = localStorage.getItem('latisha_stock_mutations');
+      const savedMut = demoGetItem('latisha_stock_mutations');
       if (savedMut) mutations = JSON.parse(savedMut);
+      const savedTrx = demoGetItem('latisha_transactions');
+      if (savedTrx) transactionsList = JSON.parse(savedTrx);
+      const savedPur = demoGetItem('latisha_purchase_invoices');
+      if (savedPur) purchasesList = JSON.parse(savedPur);
+      const savedOpn = demoGetItem('latisha_stock_opname_records');
+      if (savedOpn) opnameList = JSON.parse(savedOpn);
     } catch (e) {}
 
-    const selectedMed = medicines.find((m) => m.id === medId) || medicines[0];
-    if (!selectedMed) {
+    const selectedMed = isAllMode
+      ? undefined
+      : medicines.find((m) => m.id === medId) || medicines[0];
+
+    if (!isAllMode && !selectedMed) {
       return (
         <div className="bg-slate-100 min-h-screen text-slate-900 p-8 font-sans flex flex-col items-center justify-center">
           <div className="bg-white p-6 rounded-2xl shadow-md border border-slate-200 text-center max-w-sm">
             <h2 className="text-sm font-bold text-slate-800 mb-2">Data Obat Tidak Ditemukan</h2>
-            <p className="text-xs text-slate-500 mb-4">Belum ada data master obat untuk kartu stok ini.</p>
+            <p className="text-xs text-slate-500 mb-4">Belum ada data master obat untuk dokumen stok ini.</p>
             <button onClick={() => window.close()} className="px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold">
               Tutup Halaman
             </button>
@@ -844,21 +1012,57 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
         </div>
       );
     }
+
+    const medicineById = new Map<string, Medicine>();
+    medicines.forEach((m) => {
+      if (m.id) medicineById.set(m.id, m);
+    });
+    const transactionById = new Map<string, Transaction>();
+    transactionsList.forEach((t) => {
+      if (t.id) transactionById.set(t.id, t);
+    });
+    const purchaseByInvoiceNo = new Map<string, PurchaseInvoice>();
+    purchasesList.forEach((inv) => {
+      if (inv.invoiceNo) purchaseByInvoiceNo.set(inv.invoiceNo, inv);
+      if (inv.id) purchaseByInvoiceNo.set(inv.id, inv);
+    });
+    const opnameByRefNo = new Map<string, StockOpnameRecord>();
+    opnameList.forEach((rec) => {
+      if (rec.refNo) opnameByRefNo.set(rec.refNo, rec);
+      if (rec.id) opnameByRefNo.set(rec.id, rec);
+    });
+
+    const batchCtx = {
+      medicineById,
+      transactionById,
+      purchaseByInvoiceNo,
+      opnameByRefNo
+    };
+
     const filteredMutations = mutations.filter((m) => {
-      const matchMed = m.medicineId === medId;
-      if (!matchMed) return false;
+      if (!isAllMode && m.medicineId !== (selectedMed?.id || medId)) return false;
       if (startDate && m.date < startDate) return false;
       if (endDate && m.date > endDate) return false;
+      if (typeFilter !== 'SEMUA' && m.type !== typeFilter) return false;
+      if (searchQuery) {
+        const med = medicineById.get(m.medicineId);
+        const bInfo = resolveMutationBatchDetails(m, batchCtx);
+        const bText = bInfo.details.map((d) => `${d.batchNo} ${d.expDate}`).join(' ');
+        const hay = `${m.refNo} ${m.medicineName} ${m.medicineId} ${med?.batchNo || ''} ${med?.barcode || ''} ${bText} ${m.ket} ${m.petugas} ${m.type}`.toLowerCase();
+        if (!hay.includes(searchQuery)) return false;
+      }
       return true;
     });
 
-    const totalIn = filteredMutations.reduce((acc, m) => acc + m.inQty, 0);
-    const totalOut = filteredMutations.reduce((acc, m) => acc + m.outQty, 0);
+    const totalIn = filteredMutations.reduce((acc, m) => acc + (Number(m.inQty) || 0), 0);
+    const totalOut = filteredMutations.reduce((acc, m) => acc + (Number(m.outQty) || 0), 0);
 
     return (
-      <div className="bg-white min-h-screen text-slate-800 p-6 max-w-4xl mx-auto font-sans text-xs">
+      <div className="bg-white min-h-screen text-slate-800 p-6 max-w-5xl mx-auto font-sans text-xs">
         {printStyles}
-        {renderFloatingTopBar('Kartu Stok Resmi Farmasi')}
+        {renderFloatingTopBar(
+          isKartuMode ? 'Kartu Stok Digital Farmasi' : 'Laporan Mutasi Stok Farmasi'
+        )}
 
         <div id="printable-section" className="space-y-4 border border-slate-300 p-6 rounded-2xl bg-white shadow-xs">
           <div className="border-b-2 border-slate-900 pb-3">
@@ -879,72 +1083,192 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                   {pharmacyProfile.name}
                 </h2>
                 <p className="text-[11px] text-slate-600 font-medium">
-                  {pharmacyFullAddress} · Telp: {pharmacyProfile.phone} · SIA: {pharmacyProfile.sia}
+                  {pharmacyFullAddress} · Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
                 </p>
-                <h3 className="font-bold text-xs text-slate-700 uppercase tracking-wide mt-1">
-                  KARTU STOK RESMI FARMASI (FEFO AUDIT LEDGER)
+                <p className="text-[10px] text-slate-600 font-mono">
+                  {formatPharmacyLegalInfo(pharmacyProfile)}
+                </p>
+                <h3 className="font-black text-xs text-slate-900 uppercase tracking-wide mt-1.5">
+                  {isKartuMode
+                    ? 'KARTU STOK DIGITAL FARMASI (BATCH & EXPIRY DATE FEFO)'
+                    : 'LAPORAN MUTASI STOK FARMASI'}
                 </h3>
-                <p className="text-[10px] text-slate-500 font-semibold mt-1">
-                  Nama Obat: <strong className="text-slate-900">{selectedMed?.name}</strong> · Batch:{' '}
-                  <strong className="text-slate-900">{selectedMed?.batchNo}</strong> · Exp Date:{' '}
-                  <strong className="text-slate-900">{selectedMed?.expDate}</strong> · Lokasi:{' '}
-                  <strong className="text-slate-900">{selectedMed?.rack}</strong>
-                </p>
+                {isAllMode ? (
+                  <p className="text-[10px] text-slate-500 font-semibold mt-1">
+                    Cakupan: <strong className="text-slate-900">Semua Produk ({medicines.length} Item Terdaftar)</strong> · Total Catatan:{' '}
+                    <strong className="text-slate-900">{filteredMutations.length}</strong>
+                    {(startDate || endDate) && (
+                      <span>
+                        {' '}
+                        · Periode: <strong className="text-slate-900">{startDate || '...'} s/d {endDate || '...'}</strong>
+                      </span>
+                    )}
+                  </p>
+                ) : (
+                  <p className="text-[10px] text-slate-500 font-semibold mt-1">
+                    Nama Produk: <strong className="text-slate-900">{selectedMed?.name}</strong> · Batch Utama:{' '}
+                    <strong className="text-slate-900">{selectedMed?.batchNo || '-'}</strong> · Exp Date:{' '}
+                    <strong className="text-slate-900">{selectedMed?.expDate || '-'}</strong> · Lokasi:{' '}
+                    <strong className="text-slate-900">{selectedMed?.rack || '-'}</strong>
+                  </p>
+                )}
               </div>
               <div className="w-14 shrink-0" />
             </div>
           </div>
 
           <div className="grid grid-cols-3 gap-2 p-2 bg-slate-50 rounded-xl border border-slate-200 text-center font-bold text-[11px]">
-            <div>Total Masuk: <span className="text-emerald-700">+{totalIn} {selectedMed?.unit}</span></div>
-            <div>Total Keluar: <span className="text-rose-700">-{totalOut} {selectedMed?.unit}</span></div>
-            <div>Saldo Saat Ini: <span className="text-sky-800">{selectedMed?.stock} {selectedMed?.unit}</span></div>
+            <div>
+              Total Masuk:{' '}
+              <span className="text-emerald-700">
+                +{totalIn.toLocaleString('id-ID')} {isAllMode ? 'Unit' : selectedMed?.unit}
+              </span>
+            </div>
+            <div>
+              Total Keluar:{' '}
+              <span className="text-rose-700">
+                -{totalOut.toLocaleString('id-ID')} {isAllMode ? 'Unit' : selectedMed?.unit}
+              </span>
+            </div>
+            <div>
+              {isAllMode ? 'Jumlah Catatan:' : 'Saldo Saat Ini:'}{' '}
+              <span className="text-sky-800">
+                {isAllMode
+                  ? `${filteredMutations.length} Baris`
+                  : `${selectedMed?.stock ?? 0} ${selectedMed?.unit || ''}`}
+              </span>
+            </div>
           </div>
 
-          <table className="w-full text-left text-xs border border-collapse">
-            <thead className="bg-slate-100 font-bold uppercase text-[10px] text-slate-700">
-              <tr>
-                <th className="p-2 border">Tanggal</th>
-                <th className="p-2 border">No. Referensi</th>
-                <th className="p-2 border">Jenis Mutasi</th>
-                <th className="p-2 border text-center w-20">Masuk</th>
-                <th className="p-2 border text-center w-20">Keluar</th>
-                <th className="p-2 border text-center w-24">Saldo Akhir</th>
-                <th className="p-2 border">Keterangan</th>
-                <th className="p-2 border">Petugas</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y font-medium text-slate-700">
-              {filteredMutations.length === 0 ? (
+          {isKartuMode ? (
+            <table className="w-full text-left text-xs border border-collapse">
+              <thead className="bg-indigo-50 font-bold uppercase text-[10px] text-slate-700">
                 <tr>
-                  <td colSpan={8} className="p-6 text-center text-slate-400 italic">
-                    Belum ada catatan mutasi pergerakan stok untuk obat ini pada periode yang dipilih.
-                  </td>
+                  <th className="p-2 border">Tanggal &amp; Jam</th>
+                  <th className="p-2 border">Nama Produk (Lengkap Batch &amp; ED)</th>
+                  <th className="p-2 border text-center w-20">Masuk</th>
+                  <th className="p-2 border text-center w-20">Keluar</th>
+                  <th className="p-2 border text-center w-24">Stok Akhir</th>
+                  <th className="p-2 border">Petugas</th>
                 </tr>
-              ) : (
-                filteredMutations.map((m) => (
-                  <tr key={m.id} className="border-b">
-                    <td className="p-2 border font-mono">{m.date}</td>
-                    <td className="p-2 border font-mono font-bold text-sky-700">{m.refNo}</td>
-                    <td className="p-2 border">
-                      <span className="font-bold text-[10px] uppercase">{m.type}</span>
+              </thead>
+              <tbody className="divide-y font-medium text-slate-700">
+                {filteredMutations.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="p-6 text-center text-slate-400 italic">
+                      Belum ada rekaman Kartu Stok Digital untuk filter yang dipilih.
                     </td>
-                    <td className="p-2 border text-center font-mono font-bold text-emerald-600">
-                      {m.inQty > 0 ? `+${m.inQty}` : '-'}
-                    </td>
-                    <td className="p-2 border text-center font-mono font-bold text-rose-600">
-                      {m.outQty > 0 ? `-${m.outQty}` : '-'}
-                    </td>
-                    <td className="p-2 border text-center font-mono font-black text-slate-900 bg-slate-50">
-                      {m.balance}
-                    </td>
-                    <td className="p-2 border text-slate-600 text-[11px]">{m.ket}</td>
-                    <td className="p-2 border text-slate-500 font-mono text-[10px]">{m.petugas}</td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ) : (
+                  filteredMutations.map((m) => {
+                    const med = medicineById.get(m.medicineId);
+                    const batchInfo = resolveMutationBatchDetails(m, batchCtx);
+                    const details = batchInfo.details;
+                    const trxLabel = getTransactionTypeShortLabel(m.type, m.ket);
+                    const unitLabel = med?.satuanKecil || med?.unit || '';
+                    return (
+                      <tr key={m.id} className="border-b align-top">
+                        <td className="p-2 border font-mono whitespace-nowrap">
+                          <div className="font-bold text-slate-900">{m.date}</div>
+                          {m.time && <div className="text-[10px] text-slate-500">{m.time}</div>}
+                        </td>
+                        <td className="p-2 border">
+                          <div className="font-bold text-slate-900">
+                            {m.medicineName || med?.name || '-'}{' '}
+                            <span className="text-[10px] font-semibold text-slate-500">
+                              [{trxLabel}{m.refNo && m.refNo !== '-' ? ` #${m.refNo}` : ''}]
+                            </span>
+                          </div>
+                          <div className="mt-1 space-y-0.5 text-[10px] font-mono text-slate-700">
+                            {details.map((bd, idx) => (
+                              <div key={`${m.id}-pbd-${idx}`}>
+                                Batch: <strong>{bd.batchNo || '-'}</strong> · ED:{' '}
+                                <strong>{bd.expDate || '-'}</strong>
+                                {details.length > 1 && bd.qty > 0
+                                  ? ` (${bd.qty}${unitLabel ? ` ${unitLabel}` : ''})`
+                                  : ''}
+                              </div>
+                            ))}
+                          </div>
+                        </td>
+                        <td className="p-2 border text-center font-mono font-bold text-emerald-600 whitespace-nowrap">
+                          {m.inQty > 0 ? `+${m.inQty}` : '-'}
+                        </td>
+                        <td className="p-2 border text-center font-mono font-bold text-rose-600 whitespace-nowrap">
+                          {m.outQty > 0 ? `-${m.outQty}` : '-'}
+                        </td>
+                        <td className="p-2 border text-center font-mono font-black text-slate-900 bg-slate-50">
+                          {m.balance}
+                        </td>
+                        <td className="p-2 border text-slate-600 font-mono text-[10px] whitespace-nowrap">
+                          {m.petugas || '-'}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          ) : (
+            <table className="w-full text-left text-xs border border-collapse">
+              <thead className="bg-slate-100 font-bold uppercase text-[10px] text-slate-700">
+                <tr>
+                  <th className="p-2 border">Tanggal &amp; Jam</th>
+                  <th className="p-2 border">No. Referensi</th>
+                  {isAllMode && <th className="p-2 border">Nama Obat</th>}
+                  <th className="p-2 border">Jenis Mutasi</th>
+                  <th className="p-2 border text-center w-20">Masuk</th>
+                  <th className="p-2 border text-center w-20">Keluar</th>
+                  <th className="p-2 border text-center w-24">Saldo Akhir</th>
+                  <th className="p-2 border">Keterangan</th>
+                  <th className="p-2 border">Petugas</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y font-medium text-slate-700">
+                {filteredMutations.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={isAllMode ? 9 : 8}
+                      className="p-6 text-center text-slate-400 italic"
+                    >
+                      Belum ada catatan mutasi pergerakan stok untuk filter yang dipilih.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredMutations.map((m) => (
+                    <tr key={m.id} className="border-b">
+                      <td className="p-2 border font-mono whitespace-nowrap">
+                        <div>{m.date}</div>
+                        {m.time && <div className="text-[10px] text-slate-400">{m.time}</div>}
+                      </td>
+                      <td className="p-2 border font-mono font-bold text-sky-700 whitespace-nowrap">
+                        {m.refNo}
+                      </td>
+                      {isAllMode && (
+                        <td className="p-2 border font-bold text-slate-800">{m.medicineName}</td>
+                      )}
+                      <td className="p-2 border whitespace-nowrap">
+                        <span className="font-bold text-[10px] uppercase">{m.type}</span>
+                      </td>
+                      <td className="p-2 border text-center font-mono font-bold text-emerald-600">
+                        {m.inQty > 0 ? `+${m.inQty}` : '-'}
+                      </td>
+                      <td className="p-2 border text-center font-mono font-bold text-rose-600">
+                        {m.outQty > 0 ? `-${m.outQty}` : '-'}
+                      </td>
+                      <td className="p-2 border text-center font-mono font-black text-slate-900 bg-slate-50">
+                        {m.balance}
+                      </td>
+                      <td className="p-2 border text-slate-600 text-[11px]">{m.ket}</td>
+                      <td className="p-2 border text-slate-500 font-mono text-[10px] whitespace-nowrap">
+                        {m.petugas}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          )}
 
           <div className="grid grid-cols-2 pt-6 text-xs">
             <div />
@@ -969,11 +1293,11 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
   if (mode === 'faktur-penjualan' || mode === 'kwitansi-penjualan') {
     const trxId = searchParams.get('trxId') || '';
     const loggedInStaffName =
-      searchParams.get('petugas') || localStorage.getItem('latisha_user_name') || '';
+      searchParams.get('petugas') || demoGetItem('latisha_user_name') || '';
 
     let selectedTrx: Transaction | null = null;
     try {
-      const activeSaved = localStorage.getItem('latisha_active_print_trx');
+      const activeSaved = demoGetItem('latisha_active_print_trx');
       if (activeSaved) {
         const parsed = JSON.parse(activeSaved);
         if (!trxId || parsed.id === trxId) {
@@ -981,7 +1305,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
         }
       }
       if (!selectedTrx) {
-        const savedList = localStorage.getItem('latisha_transactions');
+        const savedList = demoGetItem('latisha_transactions');
         if (savedList) {
           const list: Transaction[] = JSON.parse(savedList);
           selectedTrx = list.find((t) => t.id === trxId) || list[0] || null;
@@ -1009,6 +1333,14 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
         : selectedTrx.customerName;
 
     const petugasAkun = loggedInStaffName || selectedTrx.kasir || apjProfile.name;
+    const docSummary = summarizeTransactionForDocument(selectedTrx);
+    const paramKeterangan = searchParams.get('keterangan');
+    const effectiveKeterangan =
+      printKwitansiKeterangan !== null
+        ? printKwitansiKeterangan
+        : paramKeterangan !== null
+        ? paramKeterangan
+        : getDefaultKwitansiKeterangan(selectedTrx);
 
     return (
       <div className="bg-white min-h-screen text-slate-800 p-6 max-w-4xl mx-auto font-sans text-xs">
@@ -1084,11 +1416,12 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                     {pharmacyFullAddress}
                   </p>
                   <p className="text-[11px] text-slate-600">
-                    Telp / WhatsApp: {pharmacyProfile.phone} | Email: {pharmacyProfile.email}
+                    Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
                   </p>
-                  <div className="text-[10px] text-slate-600 font-medium mt-0.5">
-                    <span>SIA: <strong>{pharmacyProfile.sia}</strong></span> |{' '}
-                    <span>APJ: <strong>{apjProfile.name}</strong></span>
+                  <div className="text-[10px] text-slate-600 font-mono font-medium mt-0.5 flex flex-wrap gap-x-2">
+                    {pharmacyProfile.sia && <span>SIA: <strong>{pharmacyProfile.sia}</strong></span>}
+                    {pharmacyProfile.nib && <span>· NIB: <strong>{pharmacyProfile.nib}</strong></span>}
+                    {pharmacyProfile.npwp && <span>· NPWP: <strong>{pharmacyProfile.npwp}</strong></span>}
                   </div>
                 </div>
               </div>
@@ -1119,6 +1452,38 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                 </div>
               </div>
 
+              {docSummary.totalJasaPelayanan > 0 && (
+                <div className="grid grid-cols-12 items-center border-b border-dashed border-slate-300 pb-2.5">
+                  <div className="col-span-4 font-bold text-slate-600 uppercase tracking-wider">
+                    Jasa Pelayanan
+                  </div>
+                  <div className="col-span-8 font-mono font-black text-slate-900 text-sm">
+                    : Rp {docSummary.totalJasaPelayanan.toLocaleString('id-ID')}
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-12 items-start border-b border-dashed border-slate-300 pb-3">
+                <div className="col-span-4 font-bold text-slate-600 uppercase tracking-wider pt-1">
+                  Keterangan
+                </div>
+                <div className="col-span-8">
+                  <div className="no-print flex items-start gap-1.5">
+                    <span className="font-bold text-slate-900 pt-1.5">:</span>
+                    <textarea
+                      rows={2}
+                      value={effectiveKeterangan}
+                      onChange={(e) => setPrintKwitansiKeterangan(e.target.value)}
+                      placeholder="Ketik keterangan kwitansi..."
+                      className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-medium text-slate-900 focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none resize-y"
+                    />
+                  </div>
+                  <div className="hidden print:block font-semibold text-slate-900 whitespace-pre-wrap leading-relaxed">
+                    : {effectiveKeterangan.trim() || '-'}
+                  </div>
+                </div>
+              </div>
+
               <div className="grid grid-cols-12 items-center border-b border-dashed border-slate-300 pb-2.5">
                 <div className="col-span-4 font-bold text-slate-600 uppercase tracking-wider">
                   Nilai Tagihan
@@ -1141,18 +1506,21 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
             </div>
 
             {/* TANGGAL & TANDA TANGAN PETUGAS SESUAI AKUN */}
-            <div className="mt-8 pt-4 flex justify-end">
-              <div className="w-64 text-center space-y-1">
+            <div className="mt-10 pt-4 flex justify-end">
+              <div className="w-72 text-center">
                 <p className="text-[11px] font-semibold text-slate-700">
                   {pharmacyProfile.city || 'Tangerang'}, {selectedTrx.date}
                 </p>
-                <p className="text-[11px] font-bold text-slate-800">
+                <p className="text-[11px] font-bold text-slate-800 mt-1">
                   Petugas Penerima,
                 </p>
-                <div className="h-20 flex items-end justify-center">
+                <div
+                  className="min-h-[130px] pt-24 pb-2 flex items-end justify-center"
+                  style={{ minHeight: '130px', paddingTop: '96px' }}
+                >
                   <span className="text-[9px] text-slate-400 italic">(Tanda Tangan & Stempel)</span>
                 </div>
-                <p className="font-black text-slate-900 border-t border-slate-800 pt-1 text-xs">
+                <p className="font-black text-slate-900 border-t border-slate-800 pt-1.5 text-xs">
                   {petugasAkun}
                 </p>
               </div>
@@ -1183,12 +1551,12 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                     {pharmacyFullAddress}
                   </p>
                   <p className="text-[11px] text-slate-600">
-                    Telp / WhatsApp: {pharmacyProfile.phone} | Email: {pharmacyProfile.email}
+                    Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
                   </p>
-                  <div className="text-[10px] text-slate-600 font-medium mt-1">
-                    <span>SIA: <strong>{pharmacyProfile.sia}</strong></span> |{' '}
-                    <span>NPWP: <strong>{pharmacyProfile.npwp}</strong></span> |{' '}
-                    <span>APJ: <strong>{apjProfile.name}</strong> (SIPA: {apjProfile.sipa})</span>
+                  <div className="text-[10px] text-slate-600 font-mono font-medium mt-1 flex flex-wrap gap-x-2">
+                    {pharmacyProfile.sia && <span>SIA: <strong>{pharmacyProfile.sia}</strong></span>}
+                    {pharmacyProfile.nib && <span>· NIB: <strong>{pharmacyProfile.nib}</strong></span>}
+                    {pharmacyProfile.npwp && <span>· NPWP: <strong>{pharmacyProfile.npwp}</strong></span>}
                   </div>
                 </div>
               </div>
@@ -1247,7 +1615,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                 <tr className="bg-slate-100 text-slate-800 font-bold">
                   <th className="border border-slate-300 p-2 text-center w-8">No</th>
                   <th className="border border-slate-300 p-2 text-left">Nama Obat / Alat Kesehatan</th>
-                  <th className="border border-slate-300 p-2 text-left">Kekuatan</th>
+                  <th className="border border-slate-300 p-2 text-left">Zat Aktif &amp; Kekuatan</th>
                   <th className="border border-slate-300 p-2 text-left">No. Batch</th>
                   <th className="border border-slate-300 p-2 text-center">Exp Date</th>
                   <th className="border border-slate-300 p-2 text-center">Qty</th>
@@ -1258,7 +1626,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                 </tr>
               </thead>
               <tbody>
-                {selectedTrx.items.map((it, idx) => (
+                {docSummary.productItems.map((it, idx) => (
                   <tr key={idx} className="hover:bg-slate-50">
                     <td className="border border-slate-300 p-1.5 text-center">{idx + 1}</td>
                     <td className="border border-slate-300 p-1.5 font-bold text-slate-800">{it.name}</td>
@@ -1278,6 +1646,87 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                     </td>
                   </tr>
                 ))}
+                {docSummary.jasaItems.length > 0 ? (
+                  <>
+                    {docSummary.jasaItems.map((it, jIdx) => (
+                      <tr key={`jasa-${jIdx}`} className="hover:bg-slate-50">
+                        <td className="border border-slate-300 p-1.5 text-center">
+                          {docSummary.productItems.length + jIdx + 1}
+                        </td>
+                        <td className="border border-slate-300 p-1.5 font-bold text-slate-800">
+                          <div>{it.name}</div>
+                          {it.nama_petugas && (
+                            <div className="text-[10px] font-medium text-indigo-700">
+                              Petugas: {it.nama_petugas}
+                              {it.role_petugas ? ` (${it.role_petugas})` : ''}
+                            </div>
+                          )}
+                        </td>
+                        <td className="border border-slate-300 p-1.5">Pelayanan Medis &amp; Kefarmasian</td>
+                        <td className="border border-slate-300 p-1.5 font-mono">-</td>
+                        <td className="border border-slate-300 p-1.5 text-center font-mono">-</td>
+                        <td className="border border-slate-300 p-1.5 text-center font-bold">{it.qty || 1}</td>
+                        <td className="border border-slate-300 p-1.5 text-center">{it.unit || 'Layanan'}</td>
+                        <td className="border border-slate-300 p-1.5 text-right">
+                          {it.price.toLocaleString('id-ID')}
+                        </td>
+                        <td className="border border-slate-300 p-1.5 text-center">
+                          {it.discount && it.discount > 100
+                            ? `Rp ${it.discount.toLocaleString('id-ID')}`
+                            : `${it.discount || 0}%`}
+                        </td>
+                        <td className="border border-slate-300 p-1.5 text-right font-bold">
+                          {it.subtotal.toLocaleString('id-ID')}
+                        </td>
+                      </tr>
+                    ))}
+                    {docSummary.serviceChargeAmount > 0 && (
+                      <tr className="hover:bg-slate-50">
+                        <td className="border border-slate-300 p-1.5 text-center">
+                          {docSummary.productItems.length + docSummary.jasaItems.length + 1}
+                        </td>
+                        <td className="border border-slate-300 p-1.5 font-bold text-slate-800">
+                          Biaya Layanan / Service Charge
+                        </td>
+                        <td className="border border-slate-300 p-1.5">Layanan Tambahan POS</td>
+                        <td className="border border-slate-300 p-1.5 font-mono">-</td>
+                        <td className="border border-slate-300 p-1.5 text-center font-mono">-</td>
+                        <td className="border border-slate-300 p-1.5 text-center font-bold">1</td>
+                        <td className="border border-slate-300 p-1.5 text-center">Layanan</td>
+                        <td className="border border-slate-300 p-1.5 text-right">
+                          {docSummary.serviceChargeAmount.toLocaleString('id-ID')}
+                        </td>
+                        <td className="border border-slate-300 p-1.5 text-center">0%</td>
+                        <td className="border border-slate-300 p-1.5 text-right font-bold">
+                          {docSummary.serviceChargeAmount.toLocaleString('id-ID')}
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                ) : (
+                  docSummary.totalJasaPelayanan > 0 && (
+                    <tr className="hover:bg-slate-50">
+                      <td className="border border-slate-300 p-1.5 text-center">
+                        {docSummary.productItems.length + 1}
+                      </td>
+                      <td className="border border-slate-300 p-1.5 font-bold text-slate-800">
+                        Jasa Pelayanan
+                      </td>
+                      <td className="border border-slate-300 p-1.5">Pelayanan Medis &amp; Kefarmasian</td>
+                      <td className="border border-slate-300 p-1.5 font-mono">-</td>
+                      <td className="border border-slate-300 p-1.5 text-center font-mono">-</td>
+                      <td className="border border-slate-300 p-1.5 text-center font-bold">1</td>
+                      <td className="border border-slate-300 p-1.5 text-center">Layanan</td>
+                      <td className="border border-slate-300 p-1.5 text-right">
+                        {docSummary.totalJasaPelayanan.toLocaleString('id-ID')}
+                      </td>
+                      <td className="border border-slate-300 p-1.5 text-center">0%</td>
+                      <td className="border border-slate-300 p-1.5 text-right font-bold">
+                        {docSummary.totalJasaPelayanan.toLocaleString('id-ID')}
+                      </td>
+                    </tr>
+                  )
+                )}
               </tbody>
             </table>
 
@@ -1299,16 +1748,28 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
               </div>
 
               <div className="w-64 space-y-1 text-slate-700 border border-slate-300 p-3 rounded bg-slate-50">
+                {selectedTrx.discount ? (
+                  <div className="flex justify-between text-rose-700">
+                    <span>Total Diskon:</span>
+                    <span className="font-mono">- Rp {selectedTrx.discount.toLocaleString('id-ID')}</span>
+                  </div>
+                ) : null}
                 <div className="flex justify-between">
                   <span>Dasar Pengenaan Pajak (DPP):</span>
                   <span className="font-mono">
-                    Rp {(selectedTrx.dpp || (selectedTrx.total - (selectedTrx.ppn || 0))).toLocaleString('id-ID')}
+                    Rp {(selectedTrx.dpp || (selectedTrx.total - (selectedTrx.ppn || 0) - (selectedTrx.shippingFee || 0))).toLocaleString('id-ID')}
                   </span>
                 </div>
                 {selectedTrx.ppn ? (
                   <div className="flex justify-between">
                     <span>PPN 11%:</span>
                     <span className="font-mono">Rp {selectedTrx.ppn.toLocaleString('id-ID')}</span>
+                  </div>
+                ) : null}
+                {selectedTrx.shippingFee ? (
+                  <div className="flex justify-between">
+                    <span>Est. Ongkir:</span>
+                    <span className="font-mono">Rp {selectedTrx.shippingFee.toLocaleString('id-ID')}</span>
                   </div>
                 ) : null}
                 <div className="flex justify-between font-black text-slate-900 border-t border-slate-300 pt-1 text-xs">
@@ -1364,7 +1825,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
     let record: RMERecord | null = null;
 
     try {
-      const activeRme = localStorage.getItem('latisha_active_print_rme');
+      const activeRme = demoGetItem('latisha_active_print_rme');
       if (activeRme) {
         const parsed = JSON.parse(activeRme);
         if (!rmeId || parsed.id === rmeId) {
@@ -1372,7 +1833,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
         }
       }
       if (!record) {
-        const savedList = localStorage.getItem('latisha_rme_records');
+        const savedList = demoGetItem('latisha_rme_records');
         const list: RMERecord[] = savedList ? JSON.parse(savedList) : INITIAL_RME_RECORDS;
         record = list.find((r) => r.id === rmeId) || list[0] || null;
       }
@@ -1465,7 +1926,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
 
     const lookupPatientForRx = (rmId: string, patientName: string): Patient | null => {
       try {
-        const saved = localStorage.getItem('latisha_patients');
+        const saved = demoGetItem('latisha_patients');
         const list: Patient[] = saved ? JSON.parse(saved) : INITIAL_PATIENTS;
         return list.find((p) => p.id === rmId || p.name.toLowerCase() === patientName.toLowerCase()) || null;
       } catch {
@@ -1493,47 +1954,47 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
           id="printable-section"
           className="space-y-6 border border-slate-300 p-8 rounded-2xl bg-white shadow-xs text-xs"
         >
-          {/* Header Terintegrasi Profil Apotek (Hanya untuk RME & Surat Sakit) */}
-          {mode !== 'copy-resep' && (
-            <div className="border-b-2 border-slate-900 pb-4">
-              <div className="flex items-center justify-between gap-4">
-                {pharmacyProfile.logoUrl ? (
-                  <div className="w-16 h-16 shrink-0 flex items-center justify-center">
-                    <img
-                      src={pharmacyProfile.logoUrl || '/api/facility-logo'}
-                      onError={(e) => {
-                        e.currentTarget.onerror = null;
-                        e.currentTarget.src = '/api/facility-logo';
-                      }}
-                      alt="Logo Faskes"
-                      className="w-16 h-16 object-contain"
-                    />
-                  </div>
-                ) : (
-                  <div className="w-16 shrink-0" />
-                )}
-                <div className="flex-1 text-center">
-                  <h2 className="text-base font-black tracking-wider text-slate-900 uppercase">
-                    {pharmacyProfile.name}
-                  </h2>
-                  <p className="text-[11px] text-slate-600 mt-0.5">
-                    {pharmacyFullAddress} · Telp / WA: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
-                  </p>
-                  <p className="text-[10px] text-slate-500 font-mono">
-                    SIA: {pharmacyProfile.sia} · APJ: {apjProfile.name} (SIPA: {apjProfile.sipa}) · DPJ: {dpjProfile.name} (SIP: {dpjProfile.sip})
-                  </p>
+          {/* Header Terintegrasi Profil Apotek, APJ, dan DPJ */}
+          <div className="border-b-2 border-slate-900 pb-4">
+            <div className="flex items-center justify-between gap-4">
+              {pharmacyProfile.logoUrl ? (
+                <div className="w-16 h-16 shrink-0 flex items-center justify-center">
+                  <img
+                    src={pharmacyProfile.logoUrl || '/api/facility-logo'}
+                    onError={(e) => {
+                      e.currentTarget.onerror = null;
+                      e.currentTarget.src = '/api/facility-logo';
+                    }}
+                    alt="Logo Faskes"
+                    className="w-16 h-16 object-contain"
+                  />
                 </div>
+              ) : (
                 <div className="w-16 shrink-0" />
+              )}
+              <div className="flex-1 text-center">
+                <h2 className="text-base font-black tracking-wider text-slate-900 uppercase">
+                  {pharmacyProfile.name}
+                </h2>
+                <p className="text-[11px] text-slate-600 mt-0.5">
+                  {pharmacyFullAddress} · Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
+                </p>
+                <p className="text-[10px] text-slate-600 font-mono">
+                  {formatPharmacyLegalInfo(pharmacyProfile)}
+                </p>
               </div>
-              <div className="text-center">
-                <div className="mt-2 inline-block px-4 py-1 bg-sky-50 text-sky-900 rounded-full font-black text-xs uppercase border border-sky-200">
-                  {mode === 'rme'
-                    ? 'RESUME REKAM MEDIS PASIEN'
-                    : 'SURAT KETERANGAN ISTIRAHAT SAKIT'}
-                </div>
+              <div className="w-16 shrink-0" />
+            </div>
+            <div className="text-center">
+              <div className="mt-2 inline-block px-4 py-1 bg-sky-50 text-sky-900 rounded-full font-black text-xs uppercase border border-sky-200">
+                {mode === 'rme'
+                  ? 'RESUME REKAM MEDIS PASIEN'
+                  : mode === 'copy-resep'
+                  ? 'SALINAN RESEP (COPY RESEP / APOGRAPH)'
+                  : 'SURAT KETERANGAN ISTIRAHAT SAKIT'}
               </div>
             </div>
-          )}
+          </div>
 
           {mode === 'rme' ? (
             <>
@@ -1606,144 +2067,151 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
               </div>
             </>
           ) : mode === 'copy-resep' ? (
-            /* FORMAT BAKU SALINAN RESEP (COPY RX / APOGRAPH) SESUAI DESAIN ACUAN */
-            <div className="space-y-4 text-xs font-mono text-green-700 bg-white p-2">
-              {/* KOP SALINAN RESEP */}
-              <div className="border-b-2 border-green-700 pb-3">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="w-20 h-20 shrink-0 flex items-center justify-center">
-                    <img
-                      src={pharmacyProfile.logoUrl || '/api/facility-logo'}
-                      onError={(e) => {
-                        e.currentTarget.onerror = null;
-                        e.currentTarget.src = '/api/facility-logo';
-                      }}
-                      alt="Logo Faskes"
-                      className="w-20 h-20 object-contain"
-                    />
+            /* FORMAT BAKU SALINAN RESEP (COPY RX / APOGRAPH) SESUAI DOKUMEN PRATINJAU */
+            <div className="space-y-4 text-xs text-slate-900">
+              {/* 1. INSCRIPTIO: Identitas Administratif Resep, Dokter & Pasien */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3.5 bg-slate-50 rounded-xl border border-slate-300 text-[11px]">
+                <div className="space-y-1 border-b sm:border-b-0 sm:border-r border-slate-300 pb-2 sm:pb-0 sm:pr-3">
+                  <div className="text-[10px] font-black uppercase tracking-wider text-indigo-900 mb-1">
+                    I. Inscriptio (Asal Resep & Dokter Penulis)
                   </div>
-                  <div className="flex-1 text-center font-mono">
-                    <h1 className="text-xl font-black text-green-700 tracking-wide uppercase">
-                      {pharmacyProfile.name || 'Apotek LATISHA FARMA'}
-                    </h1>
-                    <p className="text-[11px] text-green-700 font-bold mt-0.5">
-                      {pharmacyFullAddress || 'Jl. Poros KTM Tanjung Mas Makmur RT 004 RW 002'}
-                    </p>
-                    <p className="text-[11px] text-green-700 font-bold">
-                      Kec. Mesuji Timur Kabupaten Mesuji - Lampung
-                    </p>
-                    <p className="text-[11px] text-green-700 font-bold">
-                      Telp. {pharmacyProfile.phone || '0895326272957'}
-                    </p>
-                    <p className="text-[11px] text-green-700 font-bold">
-                      SIA : {pharmacyProfile.sia || '23082300357340002'}
-                    </p>
-                    <p className="text-[11px] text-green-700 font-bold">
-                      SIPA : {apjProfile.sipa || '400.7.5.4/256/SIPA/IV.13/MSJ/2026'}
-                    </p>
+                  <div className="grid grid-cols-12">
+                    <span className="col-span-5 text-slate-600 font-semibold">No. Salinan Resep</span>
+                    <span className="col-span-7 font-mono font-black text-slate-900">: CRX/{record.id}</span>
                   </div>
-                  <div className="w-20 shrink-0" />
-                </div>
-              </div>
-
-              {/* JUDUL SALINAN RESEP */}
-              <div className="text-center my-3">
-                <h2 className="font-black text-base text-green-700 uppercase tracking-widest">
-                  SALINAN RESEP
-                </h2>
-              </div>
-
-              {/* METADATA INFORMASI RESEP & PASIEN (TABLE 2 KOLOM) */}
-              <div className="grid grid-cols-2 gap-4 py-2 border-b-2 border-green-700 text-[11px] text-green-700 font-mono">
-                <div className="space-y-1">
-                  <div className="flex">
-                    <span className="w-28 shrink-0">No</span>
-                    <span>: {record.id ? `RX/${record.date?.split('-').reverse().join('/') || '11/2026'}/00080` : 'RX/11/2026/00080'}</span>
+                  <div className="grid grid-cols-12">
+                    <span className="col-span-5 text-slate-600 font-semibold">Dari Dokter</span>
+                    <span className="col-span-7 font-bold text-slate-900">: {record.doctorName || dpjProfile.name}</span>
                   </div>
-                  <div className="flex">
-                    <span className="w-28 shrink-0">Pelanggan</span>
-                    <span>: {record.patientName}</span>
+                  <div className="grid grid-cols-12">
+                    <span className="col-span-5 text-slate-600 font-semibold">No. SIP Dokter</span>
+                    <span className="col-span-7 font-mono text-slate-800">: {dpjProfile.sip}</span>
                   </div>
-                  <div className="flex">
-                    <span className="w-28 shrink-0">Dari Dokter</span>
-                    <span>: {record.doctorName || dpjProfile.name}</span>
+                  <div className="grid grid-cols-12">
+                    <span className="col-span-5 text-slate-600 font-semibold">Tertanggal Resep</span>
+                    <span className="col-span-7 font-mono font-bold text-slate-900">: {record.date} ({record.time} WIB)</span>
                   </div>
-                  <div className="flex">
-                    <span className="w-28 shrink-0">Nama Pasien</span>
-                    <span>: {record.patientName}</span>
-                  </div>
-                  <div className="flex">
-                    <span className="w-28 shrink-0">Alamat</span>
-                    <span>: {patientAddress}</span>
-                  </div>
-                  <div className="flex">
-                    <span className="w-28 shrink-0">Telepon</span>
-                    <span>: {patientPhone}</span>
+                  <div className="grid grid-cols-12">
+                    <span className="col-span-5 text-slate-600 font-semibold">Tgl. Copy Resep</span>
+                    <span className="col-span-7 font-mono text-slate-800">: {record.date}</span>
                   </div>
                 </div>
 
-                <div className="space-y-1">
-                  <div className="flex">
-                    <span className="w-32 shrink-0">Tgl. Resep Asli</span>
-                    <span>: {record.date}</span>
+                <div className="space-y-1 sm:pl-1">
+                  <div className="text-[10px] font-black uppercase tracking-wider text-indigo-900 mb-1">
+                    II. Identitas Lengkap Pasien (Pro)
                   </div>
-                  <div className="flex">
-                    <span className="w-32 shrink-0">Tgl. Cetak</span>
-                    <span>: {new Date().toISOString().split('T')[0].split('-').reverse().join('-')}</span>
+                  <div className="grid grid-cols-12">
+                    <span className="col-span-4 text-slate-600 font-semibold">Pro (Pasien)</span>
+                    <span className="col-span-8 font-black text-slate-900">: {record.patientName} ({record.rmId})</span>
                   </div>
-                  <div className="flex">
-                    <span className="w-32 shrink-0">Umur</span>
-                    <span>: {record.age} Tahun</span>
+                  <div className="grid grid-cols-12">
+                    <span className="col-span-4 text-slate-600 font-semibold">Umur / JK</span>
+                    <span className="col-span-8 font-bold text-slate-800">
+                      : {record.age} Tahun / {record.gender}
+                      {record.vitalSign?.bb ? ` · BB: ${record.vitalSign.bb} kg` : ''}
+                    </span>
                   </div>
-                  <div className="flex">
-                    <span className="w-32 shrink-0">Iter</span>
-                    <span>: 0</span>
+                  <div className="grid grid-cols-12">
+                    <span className="col-span-4 text-slate-600 font-semibold">Alamat</span>
+                    <span className="col-span-8 text-slate-800 truncate" title={patientAddress}>: {patientAddress}</span>
+                  </div>
+                  <div className="grid grid-cols-12">
+                    <span className="col-span-4 text-slate-600 font-semibold">No. Telp</span>
+                    <span className="col-span-8 font-mono text-slate-800">: {patientPhone}</span>
+                  </div>
+                  <div className="grid grid-cols-12">
+                    <span className="col-span-4 text-slate-600 font-semibold">Alergi Obat</span>
+                    <span className="col-span-8 font-bold text-rose-700">: {patientAllergy}</span>
                   </div>
                 </div>
               </div>
 
-              {/* DAFTAR ITEM RESEP */}
-              <div className="py-4 space-y-6 text-xs text-slate-900 font-mono">
-                {record.prescription && record.prescription.length > 0 ? (
-                  record.prescription.map((item, idx) => {
-                    const romanQty = toRomanNumeral(item.qty);
-                    return (
-                      <div key={idx} className="space-y-2">
-                        <div className="flex items-baseline gap-3">
-                          <span className="font-black text-base text-slate-900 shrink-0">R /</span>
-                          <span className="font-bold text-sm text-slate-900 flex-1 uppercase">
-                            {item.name} No. {romanQty}
-                          </span>
+              {/* 2. INVOCATIO (R/), PRAESCRIPTIO / ORDONATIO, SIGNATURA (S), & SUBSCRIPTIO (det) */}
+              <div className="border-2 border-slate-900 rounded-2xl p-5 bg-white space-y-4 min-h-[250px] flex flex-col justify-between">
+                <div className="space-y-4">
+                  {record.prescription && record.prescription.length > 0 ? (
+                    record.prescription.map((item, idx) => {
+                      const romanQty = toRomanNumeral(item.qty);
+                      const signa = formatStandardSigna(item.dosage, item.unit);
+                      return (
+                        <div key={idx} className="pb-3 border-b border-dashed border-slate-300 last:border-b-0">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex items-start gap-3 flex-1">
+                              {/* Invocatio: Tanda R/ */}
+                              <span className="font-serif italic font-black text-lg text-slate-900 leading-none select-none pt-0.5">
+                                R/
+                              </span>
+                              <div className="flex-1 space-y-1">
+                                {/* Praescriptio / Ordonatio: Nama Sediaan + Numero Angka Romawi */}
+                                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                                  <span className="font-bold text-sm text-slate-900">
+                                    {item.name}
+                                  </span>
+                                  <span className="font-serif font-black text-sm text-slate-900 tracking-wide">
+                                    No. {romanQty}{' '}
+                                    <span className="font-sans font-normal text-[11px] text-slate-600">
+                                      ({item.qty} {item.unit})
+                                    </span>
+                                  </span>
+                                </div>
+
+                                {/* Signatura: Simbol S + Aturan Pakai Latin & Indonesia */}
+                                <div className="pl-3 flex flex-wrap items-baseline gap-2 text-slate-800">
+                                  <span className="font-serif italic font-black text-sm text-slate-900">
+                                    ∫
+                                  </span>
+                                  <span className="font-mono font-bold text-xs text-indigo-950">
+                                    {signa.latin}
+                                  </span>
+                                  <span className="text-[11px] text-slate-700 italic">
+                                    — ({signa.clearText}{item.notes ? ` · ${item.notes}` : ''})
+                                  </span>
+                                </div>
+
+                                {/* Garis Penutup Setiap R/ + Paraf */}
+                                <div className="pt-1.5 flex items-center gap-2">
+                                  <div className="flex-1 border-b border-slate-400" />
+                                  <span className="text-[9px] font-mono text-slate-500 italic">paraf</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Keterangan Penyerahan Salinan Resep (det / nedet) */}
+                            <div className="shrink-0 text-right pl-2">
+                              <span className="inline-block px-2.5 py-1 rounded border border-slate-800 bg-slate-100 font-serif italic font-black text-xs text-slate-900">
+                                det orig
+                              </span>
+                              <span className="block text-[9px] text-slate-500 mt-0.5 font-mono">
+                                (Sudah diserahkan)
+                              </span>
+                            </div>
+                          </div>
                         </div>
-                        <div className="pl-8 text-xs font-semibold text-slate-800">
-                          S {item.dosage || '1x Sehari'}
-                        </div>
-                        <div className="text-right text-xs font-mono font-bold text-slate-900 pt-1">
-                          det {item.qty || 1}
-                        </div>
-                        <div className="border-b-2 border-slate-900 pt-2" />
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div className="py-8 text-center text-slate-400 italic">
-                    Tidak ada item obat pada resep ini.
-                  </div>
-                )}
-              </div>
-
-              {/* FOOTER PCC & TANDA TANGAN APOTEKER */}
-              <div className="pt-8 space-y-12 text-green-700 font-mono">
-                <div className="text-center font-bold text-sm tracking-widest text-green-700">
-                  PCC
+                      );
+                    })
+                  ) : (
+                    <div className="py-12 text-center text-slate-400 italic">
+                      Tidak ada item obat pada resep kunjungan ini.
+                    </div>
+                  )}
                 </div>
-                <div className="text-center font-bold text-xs space-y-1">
-                  <p className="underline text-green-700 font-bold">
-                    apt. {apjProfile.name || 'Mardin, S.Farm'}
-                  </p>
-                  <p className="uppercase text-[10px] text-green-700 font-bold tracking-wider">
-                    APOTEKER
-                  </p>
+
+                {/* Tanda Penutup Salinan Resep: p.c.c (Pro Copia Conform) */}
+                <div className="pt-4 border-t-2 border-slate-800 flex items-center justify-between text-xs">
+                  <div className="text-[10px] text-slate-600">
+                    <div>
+                      <strong>Diagnosa Klinis (ICD-10):</strong> {record.soapA}
+                    </div>
+                  </div>
+                  <div className="text-right shrink-0 pl-4">
+                    <span className="font-serif italic font-black text-base tracking-widest text-slate-900 border-2 border-slate-900 px-3 py-0.5 rounded">
+                      p. c. c
+                    </span>
+                    <span className="block text-[9px] text-slate-600 font-semibold mt-0.5">
+                      (Pro Copia Conform / Sesuai Aslinya)
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1778,7 +2246,23 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
             </div>
           )}
 
-          {mode === 'copy-resep' ? null : (
+          {/* Signature Block: Copy Resep (APJ p.c.c only) vs RME / Surat Sakit */}
+          {mode === 'copy-resep' ? (
+            <div className="grid grid-cols-2 pt-4 text-xs gap-4">
+              <div />
+              <div className="text-center space-y-12">
+                <p className="font-semibold text-slate-700">
+                  {pharmacyProfile.city}, {record.date}<br />
+                  Disalin Sesuai Aslinya (p.c.c) Oleh Apoteker (APJ),
+                </p>
+                <div>
+                  <p className="font-extrabold underline text-slate-900">{apjProfile.name}</p>
+                  <p className="text-[10px] text-slate-600 font-mono">SIPA: {apjProfile.sipa}</p>
+                  <p className="text-[10px] text-slate-500 font-mono">STRA: {apjProfile.stra}</p>
+                </div>
+              </div>
+            </div>
+          ) : (
             <div className="grid grid-cols-2 pt-6 text-xs">
               <div />
               <div className="text-center space-y-14">
@@ -1805,7 +2289,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
     let patient: Patient | null = null;
 
     try {
-      const savedActive = localStorage.getItem('latisha_active_print_patient');
+      const savedActive = demoGetItem('latisha_active_print_patient');
       if (savedActive) {
         const parsed = JSON.parse(savedActive);
         if (!patientId || parsed.id === patientId) {
@@ -1813,7 +2297,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
         }
       }
       if (!patient) {
-        const savedList = localStorage.getItem('latisha_patients');
+        const savedList = demoGetItem('latisha_patients');
         if (savedList) {
           const list: Patient[] = JSON.parse(savedList);
           patient = list.find((p) => p.id === patientId) || list[0] || null;
@@ -1863,7 +2347,10 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                   {pharmacyProfile.name}
                 </h2>
                 <p className="text-[9px] text-sky-200 mt-0.5">
-                  {pharmacyFullAddress} · Telp: {pharmacyProfile.phone}
+                  {pharmacyFullAddress} · Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
+                </p>
+                <p className="text-[9px] text-sky-200 font-mono">
+                  {formatPharmacyLegalInfo(pharmacyProfile)}
                 </p>
               </div>
             </div>
@@ -1912,18 +2399,29 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
     const tabParam = searchParams.get('tab') || 'fee-medis';
     const startDate = searchParams.get('startDate') || '2026-10-01';
     const endDate = searchParams.get('endDate') || new Date().toISOString().split('T')[0];
+    const salaryModeParam = (searchParams.get('salaryMode') || 'config') as
+      | 'config'
+      | 'full-month'
+      | 'prorata-days';
 
     let transactions: Transaction[] = INITIAL_TRANSACTIONS;
     let rmeRecords: RMERecord[] = INITIAL_RME_RECORDS;
+    let staffList: Staff[] = INITIAL_STAFF;
+    let schedules: DutySchedule[] = [];
     try {
-      const savedTrx = localStorage.getItem('latisha_transactions');
+      const savedTrx = demoGetItem('latisha_transactions');
       if (savedTrx) transactions = JSON.parse(savedTrx);
-      const savedRme = localStorage.getItem('latisha_rme_records');
+      const savedRme = demoGetItem('latisha_rme_records');
       if (savedRme) rmeRecords = JSON.parse(savedRme);
+      const savedStaff = demoGetItem('latisha_staff');
+      if (savedStaff) staffList = JSON.parse(savedStaff);
+      const savedSchedules = demoGetItem('latisha_schedules');
+      if (savedSchedules) schedules = JSON.parse(savedSchedules);
     } catch (e) {}
 
     const filteredTrx = transactions.filter((t) => {
-      const d = t.date.split(' ')[0];
+      if (t.status === 'Dibatalkan' || t.status === 'Diretur') return false;
+      const d = normalizeTransactionDateToYMD(t.date);
       return (!startDate || d >= startDate) && (!endDate || d <= endDate);
     });
 
@@ -1931,10 +2429,144 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
     const totalHpp = filteredTrx.reduce((acc, t) => acc + t.hppTotal, 0);
     const grossProfit = totalOmzet - totalHpp;
 
+    // Build payroll + fee + Sunday overtime summary when tabParam === 'fee-medis'
+    let payrollPrintSummary: ReturnType<typeof buildStaffPayrollSummary> | null = null;
+    if (tabParam === 'fee-medis') {
+      const deletedTrxIds = getDeletedIdsSet('transactions');
+      const deletedLedgerIds = getDeletedIdsSet('fee_ledger');
+      const activeNonCancelledTrxIds = new Set(
+        transactions
+          .filter(
+            (t) =>
+              t?.id &&
+              t.status !== 'Dibatalkan' &&
+              t.status !== 'Diretur' &&
+              !deletedTrxIds.has(String(t.id).trim())
+          )
+          .map((t) => String(t.id).trim())
+      );
+      const feeLedgerEntries = loadLocalFeeLedger();
+      const activeLedgerEntries = feeLedgerEntries.filter((e) => {
+        if (!e?.id) return false;
+        const cleanId = String(e.id).trim();
+        const cleanTrxId = String(e.transaction_id || '').trim();
+        if (deletedLedgerIds.has(cleanId) || (cleanTrxId && deletedTrxIds.has(cleanTrxId))) {
+          return false;
+        }
+        if (!cleanTrxId || !activeNonCancelledTrxIds.has(cleanTrxId)) return false;
+        return (
+          e.status_pembayaran !== 'dibatalkan' &&
+          (Number(e.total_fee_item) || 0) > 0 &&
+          (!startDate || normalizeTransactionDateToYMD(e.transaction_date) >= startDate) &&
+          (!endDate || normalizeTransactionDateToYMD(e.transaction_date) <= endDate)
+        );
+      });
+      const activeLedgerTrxIds = new Set(activeLedgerEntries.map((e) => e.transaction_id));
+
+      const filteredRme = rmeRecords.filter((r) => {
+        const d = normalizeTransactionDateToYMD(r.date);
+        return (!startDate || d >= startDate) && (!endDate || d <= endDate);
+      });
+      const serviceTrx = filteredTrx.filter(
+        (t) =>
+          t.type === 'KLINIK' ||
+          (t.assignedStaff && t.assignedStaff.length > 0) ||
+          (t.items || []).some(
+            (it) =>
+              isJasaCartItem(it) &&
+              Boolean(it.petugas_id) &&
+              (Number(it.total_fee_item) || 0) > 0
+          ) ||
+          activeLedgerTrxIds.has(t.id)
+      );
+      const matchedTrxIds = new Set<string>();
+      const feeMap = new Map<
+        string,
+        { staffId: string; staffName: string; role: string; patientCount: number; totalFee: number }
+      >();
+
+      const addFee = (item: StaffFeeItem) => {
+        const key = item.staffId || item.staffName;
+        const prev = feeMap.get(key) || {
+          staffId: item.staffId,
+          staffName: item.staffName,
+          role: item.role,
+          patientCount: 0,
+          totalFee: 0
+        };
+        prev.patientCount += 1;
+        prev.totalFee += item.fee || 0;
+        feeMap.set(key, prev);
+      };
+
+      filteredRme.forEach((rme) => {
+        const matchedTrx = serviceTrx.find(
+          (t) =>
+            !matchedTrxIds.has(t.id) &&
+            ((t.rmId && t.rmId === rme.rmId) ||
+              t.customerName.toLowerCase() === rme.patientName.toLowerCase() ||
+              (t.description && t.description.includes(rme.id)))
+        );
+        if (matchedTrx) matchedTrxIds.add(matchedTrx.id);
+        const posResolved = matchedTrx
+          ? resolveTransactionStaffFees(matchedTrx, feeLedgerEntries, staffList)
+          : [];
+        const assigned: StaffFeeItem[] =
+          posResolved.length > 0
+            ? posResolved
+            : rme.assignedStaff && rme.assignedStaff.length > 0
+            ? rme.assignedStaff
+            : [
+                {
+                  staffId:
+                    staffList.find((s) => s.role === 'Dokter' || s.name === rme.doctorName)?.id ||
+                    'STF-02',
+                  staffName: rme.doctorName || 'dr. Anis Prima Dewi',
+                  role: 'Dokter',
+                  fee: rme.doctorFee || 20000
+                }
+              ];
+        assigned.forEach(addFee);
+      });
+
+      serviceTrx.forEach((trx) => {
+        if (matchedTrxIds.has(trx.id)) return;
+        matchedTrxIds.add(trx.id);
+        const assigned = resolveTransactionStaffFees(trx, feeLedgerEntries, staffList);
+        assigned.forEach(addFee);
+      });
+
+      // Any orphaned active ledger rows whose transaction isn't in filteredTrx
+      activeLedgerEntries.forEach((entry) => {
+        if (matchedTrxIds.has(entry.transaction_id)) return;
+        addFee({
+          staffId: entry.petugas_id,
+          staffName: entry.nama_petugas,
+          role: entry.role_petugas,
+          fee: entry.total_fee_item
+        });
+      });
+
+      payrollPrintSummary = buildStaffPayrollSummary({
+        staffList,
+        payrollConfig: loadLocalPayrollConfig(null),
+        attendanceRecords: loadLocalAttendanceRecords(),
+        schedules,
+        staffFeeInputs: Array.from(feeMap.values()),
+        startDate,
+        endDate,
+        salaryModeOverride: salaryModeParam
+      });
+    }
+
     return (
       <div className="bg-white min-h-screen text-slate-800 p-6 max-w-4xl mx-auto font-sans text-xs">
         {printStyles}
-        {renderFloatingTopBar('Laporan Keuangan & Rekapitulasi')}
+        {renderFloatingTopBar(
+          tabParam === 'fee-medis'
+            ? 'Rekap Gaji, Fee, dan Lembur Hari Minggu'
+            : 'Laporan Keuangan & Rekapitulasi'
+        )}
 
         <div id="printable-section" className="space-y-6 border border-slate-300 p-8 rounded-2xl bg-white shadow-xs">
           <div className="border-b-2 border-slate-900 pb-4">
@@ -1957,15 +2589,17 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                 <p className="text-[11px] text-slate-600">
                   {pharmacyFullAddress} · Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
                 </p>
-                <p className="text-[10px] text-slate-500 font-mono mt-0.5">
-                  SIA: {pharmacyProfile.sia} · NPWP: {pharmacyProfile.npwp} · APJ: {apjProfile.name} (SIPA: {apjProfile.sipa})
+                <p className="text-[10px] text-slate-600 font-mono mt-0.5">
+                  {formatPharmacyLegalInfo(pharmacyProfile)}
                 </p>
               </div>
               <div className="w-16 shrink-0" />
             </div>
             <div className="text-center">
               <div className="mt-2 inline-block px-4 py-1 bg-emerald-50 text-emerald-900 rounded-full font-black text-xs uppercase border border-emerald-300">
-                LAPORAN KEUANGAN RESMI & REKAPITULASI PELAYANAN
+                {tabParam === 'fee-medis'
+                  ? 'REKAPITULASI GAJI, FEE LAYANAN MEDIS, DAN LEMBUR HARI MINGGU'
+                  : 'LAPORAN KEUANGAN RESMI & REKAPITULASI PELAYANAN'}
               </div>
               <p className="text-[10px] text-slate-500 font-bold mt-1">
                 Periode: {startDate} s.d. {endDate}
@@ -1973,81 +2607,201 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-3 text-center">
-            <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-              <span className="text-[10px] text-slate-500 uppercase block font-bold">Total Omzet Penjualan</span>
-              <span className="text-base font-black font-mono text-slate-900 mt-1 block">
-                Rp {totalOmzet.toLocaleString('id-ID')}
-              </span>
-            </div>
-            <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-              <span className="text-[10px] text-slate-500 uppercase block font-bold">HPP Obat Terjual (COGS)</span>
-              <span className="text-base font-black font-mono text-amber-800 mt-1 block">
-                Rp {totalHpp.toLocaleString('id-ID')}
-              </span>
-            </div>
-            <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
-              <span className="text-[10px] text-emerald-800 uppercase block font-bold">Laba Kotor (Gross Profit)</span>
-              <span className="text-base font-black font-mono text-emerald-800 mt-1 block">
-                Rp {grossProfit.toLocaleString('id-ID')}
-              </span>
-            </div>
-          </div>
+          {tabParam === 'fee-medis' && payrollPrintSummary ? (
+            <>
+              <div className="grid grid-cols-4 gap-3 text-center">
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                  <span className="text-[10px] text-slate-500 uppercase block font-bold">Total Gaji & Tunj.</span>
+                  <span className="text-sm font-black font-mono text-slate-900 mt-1 block">
+                    Rp {payrollPrintSummary.totals.totalSalaryPay.toLocaleString('id-ID')}
+                  </span>
+                </div>
+                <div className="p-3 bg-indigo-50 rounded-xl border border-indigo-200">
+                  <span className="text-[10px] text-indigo-700 uppercase block font-bold">Total Fee Medis</span>
+                  <span className="text-sm font-black font-mono text-indigo-800 mt-1 block">
+                    Rp {payrollPrintSummary.totals.totalFeePay.toLocaleString('id-ID')}
+                  </span>
+                </div>
+                <div className="p-3 bg-amber-50 rounded-xl border border-amber-200">
+                  <span className="text-[10px] text-amber-800 uppercase block font-bold">Total Lembur Minggu</span>
+                  <span className="text-sm font-black font-mono text-amber-800 mt-1 block">
+                    Rp {payrollPrintSummary.totals.totalOvertimePay.toLocaleString('id-ID')}
+                  </span>
+                </div>
+                <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-300">
+                  <span className="text-[10px] text-emerald-800 uppercase block font-bold">Grand Total SDM</span>
+                  <span className="text-sm font-black font-mono text-emerald-900 mt-1 block">
+                    Rp {payrollPrintSummary.totals.grandTotal.toLocaleString('id-ID')}
+                  </span>
+                </div>
+              </div>
 
-          <div className="space-y-2">
-            <h3 className="font-bold text-xs uppercase tracking-wider text-slate-800">
-              Daftar Riwayat Transaksi Jalur Kasir & Pasien:
-            </h3>
-            <table className="w-full text-left text-xs border border-collapse">
-              <thead className="bg-slate-100 font-bold text-[10px] uppercase text-slate-700">
-                <tr>
-                  <th className="p-2 border">No. Transaksi</th>
-                  <th className="p-2 border">Tanggal & Waktu</th>
-                  <th className="p-2 border">Nama Pelanggan / Pasien</th>
-                  <th className="p-2 border">Jalur</th>
-                  <th className="p-2 border text-right">Total Transaksi</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y text-slate-700 font-medium">
-                {filteredTrx.map((t) => (
-                  <tr key={t.id} className="border-b">
-                    <td className="p-2 border font-mono font-bold text-sky-800">{t.id}</td>
-                    <td className="p-2 border font-mono">{t.date}</td>
-                    <td className="p-2 border font-bold text-slate-900">{t.customerName}</td>
-                    <td className="p-2 border">{t.type}</td>
-                    <td className="p-2 border text-right font-mono font-bold">
-                      Rp {t.total.toLocaleString('id-ID')}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+              <div className="space-y-2">
+                <h3 className="font-bold text-xs uppercase tracking-wider text-slate-800">
+                  Rincian Gaji, Fee Layanan Medis, dan Lembur Hari Minggu per Pegawai:
+                </h3>
+                <table className="w-full text-left text-xs border border-collapse">
+                  <thead className="bg-slate-100 font-bold text-[10px] uppercase text-slate-700">
+                    <tr>
+                      <th className="p-2 border text-center w-8">No</th>
+                      <th className="p-2 border">Nama Pegawai & Peran</th>
+                      <th className="p-2 border text-center">Absensi</th>
+                      <th className="p-2 border text-right">Gaji & Tunjangan</th>
+                      <th className="p-2 border text-right">Fee Layanan</th>
+                      <th className="p-2 border text-right">Lembur Minggu</th>
+                      <th className="p-2 border text-right">Total Diterima</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y text-slate-700 font-medium">
+                    {payrollPrintSummary.rows.map((r, i) => (
+                      <tr key={r.staffId} className="border-b">
+                        <td className="p-2 border text-center font-mono">{i + 1}</td>
+                        <td className="p-2 border">
+                          <span className="font-bold text-slate-900 block">{r.staffName}</span>
+                          <span className="text-[10px] text-slate-500">{r.role}</span>
+                        </td>
+                        <td className="p-2 border text-center text-[10px]">
+                          H:{r.presentDays} · C:{r.leaveDays}
+                        </td>
+                        <td className="p-2 border text-right font-mono">
+                          Rp {r.totalSalaryPay.toLocaleString('id-ID')}
+                        </td>
+                        <td className="p-2 border text-right font-mono">
+                          Rp {r.totalFeePay.toLocaleString('id-ID')}
+                          <span className="text-[9px] text-slate-500 block">{r.patientCount} pasien</span>
+                        </td>
+                        <td className="p-2 border text-right font-mono">
+                          Rp {r.totalOvertimePay.toLocaleString('id-ID')}
+                          {r.sundayOvertimeSessions > 0 && (
+                            <span className="text-[9px] text-slate-500 block">
+                              {r.sundayOvertimeSessions} sesi ({formatMinutesDuration(r.totalOvertimeMinutes)})
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-2 border text-right font-mono font-black text-emerald-800">
+                          Rp {r.grandTotal.toLocaleString('id-ID')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-slate-100 font-black border-t-2 border-slate-300">
+                      <td colSpan={3} className="p-2 border text-right uppercase text-[10px]">
+                        TOTAL KESELURUHAN:
+                      </td>
+                      <td className="p-2 border text-right font-mono">
+                        Rp {payrollPrintSummary.totals.totalSalaryPay.toLocaleString('id-ID')}
+                      </td>
+                      <td className="p-2 border text-right font-mono">
+                        Rp {payrollPrintSummary.totals.totalFeePay.toLocaleString('id-ID')}
+                      </td>
+                      <td className="p-2 border text-right font-mono">
+                        Rp {payrollPrintSummary.totals.totalOvertimePay.toLocaleString('id-ID')}
+                      </td>
+                      <td className="p-2 border text-right font-mono text-emerald-900">
+                        Rp {payrollPrintSummary.totals.grandTotal.toLocaleString('id-ID')}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="grid grid-cols-3 gap-3 text-center">
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                  <span className="text-[10px] text-slate-500 uppercase block font-bold">Total Omzet Penjualan</span>
+                  <span className="text-base font-black font-mono text-slate-900 mt-1 block">
+                    Rp {totalOmzet.toLocaleString('id-ID')}
+                  </span>
+                </div>
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                  <span className="text-[10px] text-slate-500 uppercase block font-bold">HPP Obat Terjual (COGS)</span>
+                  <span className="text-base font-black font-mono text-amber-800 mt-1 block">
+                    Rp {totalHpp.toLocaleString('id-ID')}
+                  </span>
+                </div>
+                <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
+                  <span className="text-[10px] text-emerald-800 uppercase block font-bold">Laba Kotor (Gross Profit)</span>
+                  <span className="text-base font-black font-mono text-emerald-800 mt-1 block">
+                    Rp {grossProfit.toLocaleString('id-ID')}
+                  </span>
+                </div>
+              </div>
 
-          <div className="grid grid-cols-2 pt-8 text-xs">
-            <div className="text-center space-y-12">
-              <p className="font-semibold text-slate-700">
-                Mengetahui,<br />
-                Dokter Penanggung Jawab Klinis (DPJ),
-              </p>
-              <div>
-                <p className="font-extrabold underline text-slate-900">{dpjProfile.name}</p>
-                <p className="text-[10px] text-slate-600 font-mono">SIP: {dpjProfile.sip}</p>
-                <p className="text-[10px] text-slate-500 font-mono">{dpjProfile.idi}</p>
+              <div className="space-y-2">
+                <h3 className="font-bold text-xs uppercase tracking-wider text-slate-800">
+                  Daftar Riwayat Transaksi Jalur Kasir & Pasien:
+                </h3>
+                <table className="w-full text-left text-xs border border-collapse">
+                  <thead className="bg-slate-100 font-bold text-[10px] uppercase text-slate-700">
+                    <tr>
+                      <th className="p-2 border">No. Transaksi</th>
+                      <th className="p-2 border">Tanggal & Waktu</th>
+                      <th className="p-2 border">Nama Pelanggan / Pasien</th>
+                      <th className="p-2 border">Jalur</th>
+                      <th className="p-2 border text-right">Total Transaksi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y text-slate-700 font-medium">
+                    {filteredTrx.map((t) => (
+                      <tr key={t.id} className="border-b">
+                        <td className="p-2 border font-mono font-bold text-sky-800">{t.id}</td>
+                        <td className="p-2 border font-mono">{t.date}</td>
+                        <td className="p-2 border font-bold text-slate-900">{t.customerName}</td>
+                        <td className="p-2 border">{t.type}</td>
+                        <td className="p-2 border text-right font-mono font-bold">
+                          Rp {t.total.toLocaleString('id-ID')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+
+          {tabParam === 'laba-rugi' || !searchParams.get('tab') ? (
+            <div className="grid grid-cols-2 pt-8 text-xs">
+              <div />
+              <div className="text-center space-y-14">
+                <p className="font-semibold text-slate-700">
+                  {pharmacyProfile.city}, {new Date().toLocaleDateString('id-ID')}<br />
+                  Pimpinan,
+                </p>
+                <div>
+                  <p className="font-extrabold underline text-slate-900">
+                    {apjProfile.name || 'apt. Mardin, S.Farm'}
+                  </p>
+                </div>
               </div>
             </div>
-            <div className="text-center space-y-12">
-              <p className="font-semibold text-slate-700">
-                {pharmacyProfile.city}, {new Date().toLocaleDateString('id-ID')}<br />
-                Disahkan oleh Apoteker Penanggung Jawab (APJ),
-              </p>
-              <div>
-                <p className="font-extrabold underline text-slate-900">{apjProfile.name}</p>
-                <p className="text-[10px] text-slate-600 font-mono">SIPA: {apjProfile.sipa}</p>
-                <p className="text-[10px] text-slate-500 font-mono">STRA: {apjProfile.stra}</p>
+          ) : (
+            <div className="grid grid-cols-2 pt-8 text-xs">
+              <div className="text-center space-y-12">
+                <p className="font-semibold text-slate-700">
+                  Mengetahui,<br />
+                  Dokter Penanggung Jawab Klinis (DPJ),
+                </p>
+                <div>
+                  <p className="font-extrabold underline text-slate-900">{dpjProfile.name}</p>
+                  <p className="text-[10px] text-slate-600 font-mono">SIP: {dpjProfile.sip}</p>
+                  <p className="text-[10px] text-slate-500 font-mono">{dpjProfile.idi}</p>
+                </div>
+              </div>
+              <div className="text-center space-y-12">
+                <p className="font-semibold text-slate-700">
+                  {pharmacyProfile.city}, {new Date().toLocaleDateString('id-ID')}<br />
+                  Disahkan oleh Apoteker Penanggung Jawab (APJ),
+                </p>
+                <div>
+                  <p className="font-extrabold underline text-slate-900">{apjProfile.name}</p>
+                  <p className="text-[10px] text-slate-600 font-mono">SIPA: {apjProfile.sipa}</p>
+                  <p className="text-[10px] text-slate-500 font-mono">STRA: {apjProfile.stra}</p>
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
     );
@@ -2062,7 +2816,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
     try {
       // Prioritas 1: Sesi cetak retur aktif (latisha_active_print_retur)
       // Membawa state input atau edit terbaru hasil two-way binding dari form secara 100% dinamis
-      const savedRetur = localStorage.getItem('latisha_active_print_retur');
+      const savedRetur = demoGetItem('latisha_active_print_retur');
       let parsedActive: any = null;
       if (savedRetur) {
         try {
@@ -2070,7 +2824,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
         } catch (e) {}
       }
 
-      const savedReturns = localStorage.getItem('latisha_purchase_returns');
+      const savedReturns = demoGetItem('latisha_purchase_returns');
       let returnList: any[] = [];
       if (savedReturns) {
         try {
@@ -2109,7 +2863,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
 
       // D. Prioritas terakhir: arsip faktur pembelian (latisha_purchase_invoices) jika cetak awal
       if (!returInv && invoiceId) {
-        const savedInvoices = localStorage.getItem('latisha_purchase_invoices');
+        const savedInvoices = demoGetItem('latisha_purchase_invoices');
         if (savedInvoices) {
           const invList = JSON.parse(savedInvoices);
           const foundInv = invList.find((i: any) => i.id === invoiceId || i.invoiceNo === invoiceId) || invList[0] || null;
@@ -2184,7 +2938,10 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                   {pharmacyFullAddress}
                 </p>
                 <p className="text-[10px] text-slate-600">
-                  Telp / WhatsApp: {pharmacyProfile.phone} | Email: {pharmacyProfile.email} | SIA: {pharmacyProfile.sia}
+                  Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
+                </p>
+                <p className="text-[10px] text-slate-600 font-mono">
+                  {formatPharmacyLegalInfo(pharmacyProfile)}
                 </p>
               </div>
               <div className="w-16 shrink-0" />
@@ -2325,7 +3082,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
   if (mode === 'telaah-drp') {
     let drpPayload: any = null;
     try {
-      const raw = sessionStorage.getItem('latisha_active_print_drp') || localStorage.getItem('latisha_active_print_drp');
+      const raw = sessionStorage.getItem('latisha_active_print_drp') || demoGetItem('latisha_active_print_drp');
       if (raw) {
         drpPayload = JSON.parse(raw);
       }
@@ -2365,17 +3122,17 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                 <h1 className="text-xl font-black tracking-tight text-slate-900 uppercase">
                   {pharmacyProfile.name}
                 </h1>
-                <p className="text-xs text-slate-600 font-medium">
-                  SIA: {pharmacyProfile.sia} · SIPA APJ: {apjProfile.sipa} · STRA: {apjProfile.stra}
-                </p>
                 <p className="text-xs text-slate-600">
                   {pharmacyFullAddress} · Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
+                </p>
+                <p className="text-xs text-slate-600 font-mono font-medium">
+                  {formatPharmacyLegalInfo(pharmacyProfile)}
                 </p>
               </div>
             </div>
             <div className="text-right shrink-0">
-              <span className="px-3 py-1 bg-indigo-50 border border-indigo-200 text-indigo-900 text-xs font-black rounded-lg inline-block uppercase">
-                CDSS Clinical Pharmacy
+              <span className="px-3 py-1 bg-sky-50 border border-sky-200 text-sky-900 text-xs font-black rounded-lg inline-block uppercase">
+                {drpData?.interactionResult ? 'Interaction Checker' : 'CDSS Clinical Pharmacy'}
               </span>
               <p className="text-[11px] text-slate-500 font-mono mt-1">
                 Waktu Telaah: {new Date().toLocaleDateString('id-ID', { dateStyle: 'long' })}
@@ -2385,10 +3142,14 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
 
           <div className="text-center pt-1">
             <h2 className="text-base font-black uppercase tracking-wider text-slate-900">
-              Lembar Telaah Drug-Related Problems (DRPs) & Keputusan Klinis Apoteker
+              {drpData?.interactionResult
+                ? 'Lembar Hasil Interaction Checker (Database interaksi_obat)'
+                : 'Lembar Telaah Drug-Related Problems (DRPs) & Keputusan Klinis Apoteker'}
             </h2>
             <p className="text-xs text-slate-500">
-              Berdasarkan Standar BNF 86, Lexicomp, Pedoman Praktik Klinis Kemenkes RI, dan Rekam Medis Elektronik (RME)
+              {drpData?.interactionResult
+                ? 'Pencocokan langsung pasangan obat terhadap tabel interaksi_obat (minor, moderate, major, contraindicated)'
+                : 'Berdasarkan Standar BNF 86, Lexicomp, Pedoman Praktik Klinis Kemenkes RI, dan Rekam Medis Elektronik (RME)'}
             </p>
           </div>
 
@@ -2601,7 +3362,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
 
     let rmeRecords: RMERecord[] = INITIAL_RME_RECORDS;
     try {
-      const savedRme = localStorage.getItem('latisha_rme_records');
+      const savedRme = demoGetItem('latisha_rme_records');
       if (savedRme) rmeRecords = JSON.parse(savedRme);
     } catch (e) {}
 
@@ -2635,13 +3396,12 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                   {pharmacyProfile.name}
                 </h2>
                 <p className="text-[11px] text-slate-700 font-medium mt-0.5">
-                  {pharmacyFullAddress} · Telepon / WA: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
+                  {pharmacyFullAddress} · Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
                 </p>
-                <p className="text-[10px] text-slate-600 font-mono mt-0.5">
-                  SIA: <strong>{pharmacyProfile.sia}</strong> · NIB: {pharmacyProfile.nib} · APJ: <strong>{apjProfile.name}</strong> (SIPA: {apjProfile.sipa})
-                </p>
-                <p className="text-[10px] text-emerald-800 font-mono font-bold mt-0.5">
-                  Dokter Penanggung Jawab (DPJ): {dpjProfile.name} · SIP: {dpjProfile.sip} · {dpjProfile.idi}
+                <p className="text-[10px] text-slate-600 font-mono mt-0.5 flex flex-wrap justify-center gap-x-2">
+                  {pharmacyProfile.sia && <span>SIA: <strong>{pharmacyProfile.sia}</strong></span>}
+                  {pharmacyProfile.nib && <span>· NIB: <strong>{pharmacyProfile.nib}</strong></span>}
+                  {pharmacyProfile.npwp && <span>· NPWP: <strong>{pharmacyProfile.npwp}</strong></span>}
                 </p>
               </div>
               <div className="w-16 shrink-0" />
@@ -2667,10 +3427,6 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
               <span className="block font-mono text-[10px] text-slate-600">
                 SIP: {dpjProfile.sip} · {dpjProfile.idi} · Telp: {dpjProfile.phone}
               </span>
-            </div>
-            <div className="text-right font-mono text-[10px] text-slate-700">
-              <span className="block font-sans text-[9px] uppercase text-slate-400 font-bold">Jadwal Praktik</span>
-              <strong>{dpjProfile.schedule}</strong>
             </div>
           </div>
 
@@ -2713,19 +3469,8 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
             </tbody>
           </table>
 
-          <div className="grid grid-cols-2 pt-8 text-xs">
-            <div className="text-center space-y-12">
-              <p className="font-semibold text-slate-700">
-                Mengetahui,<br />
-                Apoteker Penanggung Jawab (APJ),
-              </p>
-              <div>
-                <p className="font-extrabold underline text-slate-900">{apjProfile.name}</p>
-                <p className="text-[10px] text-slate-600 font-mono">SIPA: {apjProfile.sipa}</p>
-                <p className="text-[10px] text-slate-500 font-mono">STRA: {apjProfile.stra}</p>
-              </div>
-            </div>
-            <div className="text-center space-y-12">
+          <div className="flex justify-end pt-8 text-xs">
+            <div className="w-1/2 text-center space-y-12">
               <p className="font-semibold text-slate-700">
                 {pharmacyProfile.city}, {new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}<br />
                 Dokter Penanggung Jawab Klinis (DPJ),
@@ -2746,13 +3491,13 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
   if (mode === 'hasil-lab') {
     let labRecord: any = null;
     try {
-      const savedActive = localStorage.getItem('latisha_active_print_lab');
+      const savedActive = demoGetItem('latisha_active_print_lab');
       if (savedActive) {
         labRecord = JSON.parse(savedActive);
       }
       if (!labRecord) {
         const labId = searchParams.get('labId');
-        const savedList = localStorage.getItem('latisha_lab_records');
+        const savedList = demoGetItem('latisha_lab_records');
         if (savedList && labId) {
           const list = JSON.parse(savedList);
           labRecord = list.find((r: any) => r.id === labId);
@@ -2785,10 +3530,10 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                   {pharmacyProfile.name}
                 </h2>
                 <p className="text-[11px] text-slate-700 font-medium">
-                  {pharmacyFullAddress} · Telp / WA: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
+                  {pharmacyFullAddress} · Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
                 </p>
                 <p className="text-[10px] text-slate-600 font-mono">
-                  SIA: {pharmacyProfile.sia} · APJ: {apjProfile.name} (SIPA: {apjProfile.sipa}) · DPJ: {dpjProfile.name} (SIP: {dpjProfile.sip})
+                  {formatPharmacyLegalInfo(pharmacyProfile)}
                 </p>
               </div>
               <div className="w-16 shrink-0" />
@@ -2921,6 +3666,703 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
           ) : (
             <div className="p-6 text-center text-slate-400 italic">
               Data hasil laboratorium tidak ditemukan.
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ==========================================
+  // MODE 11: LEMBAR SALINAN RESEP & HASIL SKRINING RESEP APOTEKER
+  // ==========================================
+  if (mode === 'skrining-resep') {
+    let skriningPayload: any = null;
+    try {
+      const raw =
+        sessionStorage.getItem('latisha_active_print_skrining') ||
+        demoGetItem('latisha_active_print_skrining');
+      if (raw) {
+        skriningPayload = JSON.parse(raw);
+      }
+    } catch (e) {
+      console.warn('Error reading active print skrining resep:', e);
+    }
+
+    const rx = skriningPayload?.rx || skriningPayload || {};
+    const patient = skriningPayload?.patient;
+    const extMeta = rx?.screeningChecks?.externalMeta;
+    const isExtRx = Boolean(rx?.isExternalRx || extMeta?.isExternalRx || String(rx?.id || '').startsWith('RXL-'));
+    const resolvedOriginFacility = rx?.originFacility || extMeta?.originFacility || '';
+    const resolvedPatientAge =
+      rx?.patientAge !== undefined && rx?.patientAge !== ''
+        ? rx.patientAge
+        : extMeta?.patientAge !== undefined && extMeta?.patientAge !== ''
+        ? extMeta.patientAge
+        : patient?.age || '-';
+    const resolvedPatientAddress =
+      rx?.patientAddress || extMeta?.patientAddress || patient?.address || '-';
+    const checks = rx?.screeningChecks || {
+      admin: { namaDokter: true, sip: true, tglResep: true, paraf: true },
+      farmasetik: { bentukSediaan: true, dosis: true, stabilitas: true, kompatibilitas: true },
+      klinis: { tepatDosis: true, tepatWaktu: true, kontraIndikasi: true, interaksi: true, duplikasi: true }
+    };
+
+    return (
+      <div className="min-h-screen bg-slate-100 p-4 sm:p-8 flex flex-col items-center">
+        {printStyles}
+        <div className="w-full max-w-3xl">
+          {renderFloatingTopBar(
+            isExtRx
+              ? 'Salinan Resep Luar (Apograph) & Hasil Skrining Apoteker'
+              : 'Salinan Resep & Lembar Hasil Skrining Resep Apoteker'
+          )}
+        </div>
+
+        <div
+          id="printable-section"
+          className="bg-white w-full max-w-3xl p-8 rounded-3xl shadow-xl border border-slate-300 text-slate-800 space-y-5"
+        >
+          {/* Kop Apotek Resmi */}
+          <div className="border-b-2 border-slate-900 pb-4 flex justify-between items-center gap-4">
+            <div className="flex items-center gap-3.5">
+              {pharmacyProfile.logoUrl && (
+                <div className="w-14 h-14 shrink-0 flex items-center justify-center">
+                  <img
+                    src={pharmacyProfile.logoUrl}
+                    alt="Logo Faskes"
+                    className="w-14 h-14 object-contain"
+                  />
+                </div>
+              )}
+              <div>
+                <h1 className="text-xl font-black tracking-tight text-slate-900 uppercase">
+                  {pharmacyProfile.name}
+                </h1>
+                <p className="text-xs text-slate-600">
+                  {pharmacyFullAddress} · Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
+                </p>
+                <p className="text-xs text-slate-600 font-mono font-medium">
+                  {formatPharmacyLegalInfo(pharmacyProfile)}
+                </p>
+                <p className="text-[11px] text-slate-700 font-semibold mt-0.5">
+                  Apoteker Penanggung Jawab (APJ): {apjProfile.name} (SIPA: {apjProfile.sipa})
+                </p>
+              </div>
+            </div>
+            <div className="text-right shrink-0">
+              <span
+                className={`px-3 py-1 border text-xs font-black rounded-lg inline-block uppercase ${
+                  isExtRx
+                    ? 'bg-indigo-50 border-indigo-200 text-indigo-900'
+                    : 'bg-sky-50 border-sky-200 text-sky-900'
+                }`}
+              >
+                {isExtRx ? 'Resep Dokter Luar (Rx Luar)' : 'Salinan & Skrining E-Resep'}
+              </span>
+              <p className="text-[11px] text-slate-500 font-mono mt-1">
+                No. Resep: <strong>{rx?.id || searchParams.get('rxId') || '-'}</strong>
+              </p>
+            </div>
+          </div>
+
+          {/* Judul Dokumen */}
+          <div className="text-center">
+            <h2 className="text-base font-black uppercase tracking-widest text-slate-900 underline">
+              SALINAN RESEP (APOGRAPH) &amp; HASIL SKRINING APOTEKER
+            </h2>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              Berdasarkan Permenkes RI No. 73 Tahun 2016 tentang Standar Pelayanan Kefarmasian di Apotek
+            </p>
+          </div>
+
+          {/* Informasi Dokter & Pasien */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-slate-50 p-4 rounded-2xl border border-slate-300 text-xs">
+            <div className="space-y-1.5">
+              <div className="flex">
+                <span className="w-32 text-slate-500 font-semibold">No. Resep</span>
+                <span className="font-mono font-black text-slate-900">: {rx?.id || '-'}</span>
+              </div>
+              <div className="flex">
+                <span className="w-32 text-slate-500 font-semibold">Tanggal Resep</span>
+                <span className="font-mono text-slate-800">: {rx?.timestamp || '-'}</span>
+              </div>
+              <div className="flex">
+                <span className="w-32 text-slate-500 font-semibold">Dokter Peresep</span>
+                <span className="font-bold text-slate-900">: {rx?.doctorName || '-'}</span>
+              </div>
+              {resolvedOriginFacility && (
+                <div className="flex">
+                  <span className="w-32 text-slate-500 font-semibold">Instansi / RS Asal</span>
+                  <span className="font-semibold text-slate-800">: {resolvedOriginFacility}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex">
+                <span className="w-28 text-slate-500 font-semibold">Nama Pasien</span>
+                <span className="font-black text-slate-900">: {rx?.patientName || '-'}</span>
+              </div>
+              <div className="flex">
+                <span className="w-28 text-slate-500 font-semibold">Umur / No. RM</span>
+                <span className="font-semibold text-slate-800">
+                  : {resolvedPatientAge} Tahun {rx?.rmId ? `(RM: ${rx.rmId})` : ''}
+                </span>
+              </div>
+              <div className="flex">
+                <span className="w-28 text-slate-500 font-semibold">Alamat Pasien</span>
+                <span className="text-slate-800">: {resolvedPatientAddress}</span>
+              </div>
+              <div className="flex">
+                <span className="w-28 text-slate-500 font-semibold">Status Skrining</span>
+                <span className="font-bold text-emerald-800">: {rx?.status || 'Lolos Skrining'}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Daftar Obat (R/) */}
+          <div className="border-2 border-slate-800 rounded-2xl p-4 space-y-3 bg-white">
+            <div className="flex justify-between items-center border-b border-slate-200 pb-2">
+              <span className="font-serif italic font-black text-lg text-slate-900">R /</span>
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                Daftar Obat &amp; Signatura ({Array.isArray(rx?.items) ? rx.items.length : 0} Item)
+              </span>
+            </div>
+
+            <div className="divide-y divide-dashed divide-slate-300">
+              {(rx?.items || []).map((it: any, idx: number) => (
+                <div key={idx} className="py-2.5 flex justify-between items-start gap-4 text-xs">
+                  <div className="space-y-0.5">
+                    <div className="font-black text-slate-900 text-sm">
+                      R/ {it.name}{' '}
+                      <span className="font-mono font-bold text-slate-700">
+                        No. {it.qty} ({it.unit || 'Tab'})
+                      </span>
+                    </div>
+                    <div className="pl-5 text-slate-700 font-semibold italic">
+                      ∫ {it.dosage || 'Sesuai petunjuk dokter / apoteker'}
+                    </div>
+                  </div>
+                  <span className="font-mono text-[11px] font-bold px-2.5 py-0.5 rounded bg-slate-100 border border-slate-300 text-slate-800 shrink-0">
+                    det / orig
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Ceklis Skrining Standar Apoteker */}
+          <div className="grid grid-cols-3 gap-3 text-[11px]">
+            <div className="p-3 rounded-xl border border-slate-300 bg-slate-50 space-y-1">
+              <strong className="uppercase text-[10px] text-slate-700 block border-b border-slate-200 pb-1">
+                1. Skrining Administratif
+              </strong>
+              <div>[{checks.admin?.namaDokter ? '✓' : '×'}] Nama &amp; Identitas Dokter</div>
+              <div>[{checks.admin?.sip ? '✓' : '×'}] SIP / Asal Faskes</div>
+              <div>[{checks.admin?.tglResep ? '✓' : '×'}] Tanggal Penulisan Resep</div>
+              <div>[{checks.admin?.paraf ? '✓' : '×'}] Paraf / Validitas Resep</div>
+            </div>
+            <div className="p-3 rounded-xl border border-slate-300 bg-slate-50 space-y-1">
+              <strong className="uppercase text-[10px] text-slate-700 block border-b border-slate-200 pb-1">
+                2. Skrining Farmasetik
+              </strong>
+              <div>[{checks.farmasetik?.bentukSediaan ? '✓' : '×'}] Bentuk &amp; Kekuatan Sediaan</div>
+              <div>[{checks.farmasetik?.dosis ? '✓' : '×'}] Dosis &amp; Jumlah Obat</div>
+              <div>[{checks.farmasetik?.stabilitas ? '✓' : '×'}] Stabilitas &amp; Ketersediaan</div>
+              <div>[{checks.farmasetik?.kompatibilitas ? '✓' : '×'}] Kompatibilitas</div>
+            </div>
+            <div className="p-3 rounded-xl border border-slate-300 bg-slate-50 space-y-1">
+              <strong className="uppercase text-[10px] text-slate-700 block border-b border-slate-200 pb-1">
+                3. Pertimbangan Klinis
+              </strong>
+              <div>[{checks.klinis?.tepatDosis ? '✓' : '×'}] Ketepatan Indikasi &amp; Dosis</div>
+              <div>[{checks.klinis?.tepatWaktu ? '✓' : '×'}] Aturan &amp; Cara Penggunaan</div>
+              <div>[{checks.klinis?.interaksi ? '✓' : '!'}] Bebas Interaksi Obat</div>
+              <div>[{checks.klinis?.kontraIndikasi ? '✓' : '!'}] Bebas Kontraindikasi</div>
+            </div>
+          </div>
+
+          {/* Catatan Skrining & Hasil Interaction Checker */}
+          <div className="p-3.5 bg-slate-50 border border-slate-300 rounded-2xl space-y-1 text-xs">
+            <span className="font-black text-slate-800 text-[10px] uppercase tracking-wider block">
+              Catatan Skrining Klinis &amp; Hasil Interaction Checker (interaksi_obat):
+            </span>
+            <p className="text-slate-800 whitespace-pre-line leading-relaxed font-medium">
+              {rx?.screeningNotes || 'Memenuhi standar administratif, farmasetik & klinis.'}
+            </p>
+          </div>
+
+          {/* Tanda Tangan PCC & Apoteker */}
+          <div className="grid grid-cols-2 pt-4 text-center text-xs">
+            <div>
+              <span className="text-slate-500 block mb-12">Penerima Obat / Pasien,</span>
+              <strong className="text-slate-900 underline block">{rx?.patientName || '....................'}</strong>
+              <span className="text-[10px] text-slate-400">Tanda Tangan &amp; Nama Terang</span>
+            </div>
+
+            <div>
+              <span className="text-slate-500 block mb-12">
+                {pharmacyProfile.city}, {rx?.screenedAt || rx?.timestamp || new Date().toLocaleDateString('id-ID')}
+                <br />
+                Pro Copy Conform (PCC) — Apoteker Pemeriksa,
+              </span>
+              <strong className="text-slate-900 underline block">
+                {rx?.screenedBy || apjProfile.name}
+              </strong>
+              <span className="text-[10px] text-slate-600 font-mono block">SIPA: {apjProfile.sipa}</span>
+              <span className="text-[10px] text-slate-400 font-mono block">STRA: {apjProfile.stra}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ==========================================
+  // MODE 12: ETIKET / LABEL INSTRUKSI PENGGUNAAN OBAT
+  // ==========================================
+  if (mode === 'etiket-obat') {
+    const payload: MedicationLabelPrintPayload | null = loadMedicationLabelPrintPayload(searchParams);
+    const rawLayoutParam = searchParams.get('layout');
+    const activeLayout = normalizeMedicationLabelLayout(
+      etiketLayoutOverride || rawLayoutParam || payload?.layout || 'thermal-80'
+    );
+    const is58mm = activeLayout === 'thermal-58';
+    const is80mm = activeLayout === 'thermal-80';
+    const isThermal = is58mm || is80mm;
+
+    const selectedItems = (payload?.labels || []).filter((l) => l.selected !== false);
+    const expandedLabels = selectedItems.flatMap((item) => {
+      const count = Math.max(1, Math.min(20, Number(item.copies) || 1));
+      return Array.from({ length: count }, (_, copyIdx) => ({
+        ...item,
+        copyIndex: copyIdx + 1,
+        totalCopies: count
+      }));
+    });
+
+    const rxIdDisplay = payload?.rxId || searchParams.get('rxId') || '-';
+    const patientNameDisplay = payload?.patientName || '-';
+    const dateDisplay = payload?.date || new Date().toLocaleDateString('id-ID');
+
+    const pageSizeCss = is58mm
+      ? '@page { size: 58mm auto; margin: 1.5mm 2mm; }'
+      : is80mm
+      ? '@page { size: 80mm auto; margin: 2mm 3mm; }'
+      : '@page { size: A4 portrait; margin: 10mm; }';
+
+    return (
+      <div className="min-h-screen bg-slate-100 p-4 sm:p-8 flex flex-col items-center">
+        {printStyles}
+        <style>{`
+          ${pageSizeCss}
+          @media print {
+            #printable-section.etiket-printable-58 {
+              width: 48mm !important;
+              max-width: 48mm !important;
+              margin: 0 auto !important;
+              padding: 0 !important;
+            }
+            #printable-section.etiket-printable-80 {
+              width: 72mm !important;
+              max-width: 72mm !important;
+              margin: 0 auto !important;
+              padding: 0 !important;
+            }
+            #printable-section .etiket-preserve {
+              -webkit-print-color-adjust: exact !important;
+              print-color-adjust: exact !important;
+            }
+            #printable-section .etiket-thermal-stack {
+              display: flex !important;
+              flex-direction: column !important;
+              align-items: center !important;
+              gap: 2.5mm !important;
+            }
+            #printable-section .etiket-sheet-grid {
+              display: grid !important;
+              grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+              gap: 3.5mm !important;
+            }
+            #printable-section .etiket-card {
+              break-inside: avoid !important;
+              page-break-inside: avoid !important;
+            }
+            #printable-section .etiket-card-ext {
+              background-color: #f0f9ff !important;
+              border-color: #0369a1 !important;
+            }
+            #printable-section .etiket-card-int {
+              background-color: #ffffff !important;
+              border-color: #0f172a !important;
+            }
+            #printable-section .etiket-ext-tint {
+              background-color: #e0f2fe !important;
+            }
+            #printable-section .etiket-int-tint {
+              background-color: #f1f5f9 !important;
+            }
+            #printable-section .etiket-blue-header {
+              background-color: #0369a1 !important;
+              color: #ffffff !important;
+              border-color: #075985 !important;
+            }
+            #printable-section .etiket-blue-header * {
+              color: #ffffff !important;
+            }
+            #printable-section .etiket-dark-header {
+              background-color: #0f172a !important;
+              color: #ffffff !important;
+              border-color: #0f172a !important;
+            }
+            #printable-section .etiket-dark-header * {
+              color: #ffffff !important;
+            }
+            #printable-section .etiket-card .etiket-badge-light {
+              background-color: #ffffff !important;
+              color: #0f172a !important;
+            }
+            #printable-section .etiket-card-ext .etiket-badge-light {
+              color: #0c4a6e !important;
+            }
+            #printable-section .etiket-warning {
+              color: #be123c !important;
+            }
+            #printable-section .etiket-cut-line {
+              border-bottom: 1px dashed #64748b !important;
+              padding-bottom: 2mm !important;
+            }
+          }
+        `}</style>
+
+        <div className="w-full max-w-4xl space-y-3">
+          {renderFloatingTopBar(
+            `Etiket / Label Instruksi Obat (${expandedLabels.length} Label)`
+          )}
+
+          {/* Toolbar Pilihan Ukuran / Layout Cetak (Non-Print) */}
+          <div className="no-print bg-white p-3 rounded-2xl border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-3 mb-4">
+            <div className="text-xs text-slate-700">
+              <span className="font-bold">Resep #{rxIdDisplay}</span> · Pasien:{' '}
+              <strong className="text-slate-900">{patientNameDisplay}</strong> ·{' '}
+              <span className="font-mono text-emerald-700 font-bold">
+                {expandedLabels.length} stiker siap cetak
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
+              <button
+                type="button"
+                onClick={() => setEtiketLayoutOverride('thermal-80')}
+                className={`px-3 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                  is80mm
+                    ? 'bg-slate-900 text-white shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Thermal 80 mm
+              </button>
+              <button
+                type="button"
+                onClick={() => setEtiketLayoutOverride('thermal-58')}
+                className={`px-3 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                  is58mm
+                    ? 'bg-slate-900 text-white shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Thermal 58 mm
+              </button>
+              <button
+                type="button"
+                onClick={() => setEtiketLayoutOverride('sheet')}
+                className={`px-3 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                  activeLayout === 'sheet'
+                    ? 'bg-slate-900 text-white shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Lembar A4 (2 Kolom)
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div
+          id="printable-section"
+          className={`w-full bg-white rounded-2xl shadow-lg border border-slate-300 ${
+            is58mm
+              ? 'etiket-printable-58 max-w-[58mm] p-2'
+              : is80mm
+              ? 'etiket-printable-80 max-w-[80mm] p-2.5'
+              : 'max-w-[210mm] p-5'
+          }`}
+        >
+          {expandedLabels.length === 0 ? (
+            <div className="p-8 text-center text-slate-500 text-xs font-semibold">
+              Belum ada item obat yang dipilih untuk dicetak etiketnya.
+            </div>
+          ) : (
+            <div
+              className={
+                isThermal
+                  ? 'etiket-thermal-stack flex flex-col items-center gap-3'
+                  : 'etiket-sheet-grid grid grid-cols-1 sm:grid-cols-2 gap-3.5'
+              }
+            >
+              {expandedLabels.map((item, idx) => {
+                const isExternal = item.routeType === 'luar';
+                const isRacikan = isRacikanPrescriptionItem(item);
+                const hasMoreAfter = isThermal && idx < expandedLabels.length - 1;
+                return (
+                  <div
+                    key={`${item.id}-${idx}`}
+                    className={`w-full flex flex-col items-center ${
+                      hasMoreAfter ? 'etiket-cut-line border-b border-dashed border-slate-300 pb-3' : ''
+                    }`}
+                  >
+                    <div
+                      className={`etiket-card etiket-preserve rounded-xl overflow-hidden border-2 flex flex-col justify-between ${
+                        is58mm
+                          ? 'w-[48mm] max-w-full'
+                          : is80mm
+                          ? 'w-[72mm] max-w-full'
+                          : 'w-full min-h-[48mm]'
+                      } ${
+                        isExternal
+                          ? 'etiket-card-ext bg-sky-50 border-sky-700'
+                          : 'etiket-card-int bg-white border-slate-900'
+                      }`}
+                    >
+                      {/* Header Apotek & Status Obat Dalam/Luar */}
+                      <div
+                        className={`etiket-preserve border-b flex items-start justify-between gap-1.5 ${
+                          is58mm ? 'px-2 py-1 flex-col' : 'px-2.5 py-1.5'
+                        } ${
+                          isExternal
+                            ? 'etiket-blue-header bg-sky-700 text-white border-sky-800'
+                            : 'etiket-dark-header bg-slate-900 text-white border-slate-900'
+                        }`}
+                      >
+                        <div className="min-w-0 w-full">
+                          <div className="flex items-center justify-between gap-1">
+                            <div
+                              className={`font-black uppercase tracking-wide leading-tight truncate ${
+                                is58mm ? 'text-[8.5px]' : 'text-[10px]'
+                              }`}
+                            >
+                              {pharmacyProfile.name}
+                            </div>
+                            {is58mm && (
+                              <span
+                                className={`etiket-badge-light px-1 py-0.5 rounded text-[7px] font-black uppercase shrink-0 border bg-white ${
+                                  isExternal
+                                    ? 'text-sky-900 border-sky-200'
+                                    : 'text-slate-900 border-slate-300'
+                                }`}
+                              >
+                                {isExternal ? 'LUAR' : 'DALAM'}
+                              </span>
+                            )}
+                          </div>
+                          <div
+                            className={`leading-tight opacity-95 truncate ${
+                              is58mm ? 'text-[7px]' : 'text-[8px]'
+                            }`}
+                          >
+                            {pharmacyFullAddress}
+                            {pharmacyProfile.phone ? ` · ${pharmacyProfile.phone}` : ''}
+                          </div>
+                          <div
+                            className={`font-mono leading-tight opacity-90 truncate ${
+                              is58mm ? 'text-[6.5px]' : 'text-[7.5px]'
+                            }`}
+                          >
+                            APJ: {apjProfile.name}
+                            {!is58mm && apjProfile.sipa ? ` (${apjProfile.sipa})` : ''}
+                            {!is58mm && pharmacyProfile.sia ? ` · SIA: ${pharmacyProfile.sia}` : ''}
+                          </div>
+                        </div>
+                        {!is58mm && (
+                          <span
+                            className={`etiket-badge-light px-1.5 py-0.5 rounded text-[8px] font-black uppercase shrink-0 border bg-white ${
+                              isExternal
+                                ? 'text-sky-900 border-sky-200'
+                                : 'text-slate-900 border-slate-300'
+                            }`}
+                          >
+                            {isExternal ? 'OBAT LUAR' : 'OBAT DALAM'}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Isi Etiket */}
+                      <div
+                        className={`flex-1 flex flex-col justify-between ${
+                          is58mm ? 'px-2 py-1.5 space-y-1' : 'px-2.5 py-2 space-y-1.5'
+                        }`}
+                      >
+                        <div className="space-y-0.5">
+                          <div
+                            className={`flex items-center justify-between font-mono text-slate-700 border-b border-dashed border-slate-300 pb-0.5 ${
+                              is58mm ? 'text-[7.5px]' : 'text-[8.5px]'
+                            }`}
+                          >
+                            <span className="truncate">
+                              No: <strong className="text-slate-900">{rxIdDisplay}</strong>
+                            </span>
+                            <span className="shrink-0">
+                              {is58mm ? dateDisplay : `Tgl: ${dateDisplay}`}
+                            </span>
+                          </div>
+
+                          <div
+                            className={`flex items-baseline justify-between gap-1 ${
+                              is58mm ? 'text-[8.5px]' : 'text-[10px]'
+                            }`}
+                          >
+                            <div className="truncate">
+                              <span className="text-slate-600">Pro: </span>
+                              <strong className="font-black text-slate-900 uppercase">
+                                {patientNameDisplay}
+                              </strong>
+                              {payload?.patientAge ? (
+                                <span className="text-slate-700 font-semibold">
+                                  {' '}
+                                  ({payload.patientAge} Th)
+                                </span>
+                              ) : null}
+                            </div>
+                            {payload?.rmId && !is58mm && (
+                              <span className="font-mono text-[8.5px] text-slate-600 shrink-0">
+                                RM: {payload.rmId}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div
+                          className={`bg-white border border-slate-300 rounded-lg space-y-1 ${
+                            is58mm ? 'px-1.5 py-1' : 'px-2 py-1.5'
+                          }`}
+                        >
+                          {isRacikan ? (
+                            <div className="flex items-baseline justify-between gap-1.5">
+                              <span
+                                className={`font-bold text-slate-600 ${
+                                  is58mm ? 'text-[8px]' : 'text-[9.5px]'
+                                }`}
+                              >
+                                Jumlah:
+                              </span>
+                              <span
+                                className={`font-mono font-bold text-slate-800 shrink-0 ${
+                                  is58mm ? 'text-[8px]' : 'text-[9.5px]'
+                                }`}
+                              >
+                                {item.qty} {item.unit}
+                              </span>
+                            </div>
+                          ) : (
+                            <div className="flex items-baseline justify-between gap-1.5">
+                              <strong
+                                className={`font-black text-slate-900 leading-tight ${
+                                  is58mm ? 'text-[9.5px]' : 'text-[11px]'
+                                }`}
+                              >
+                                {item.name}
+                              </strong>
+                              <span
+                                className={`font-mono font-bold text-slate-800 shrink-0 ${
+                                  is58mm ? 'text-[8px]' : 'text-[9.5px]'
+                                }`}
+                              >
+                                {item.qty} {item.unit}
+                              </span>
+                            </div>
+                          )}
+
+                          <div
+                            className={`etiket-preserve rounded text-center border ${
+                              is58mm ? 'px-1.5 py-0.5' : 'px-2 py-1'
+                            } ${
+                              isExternal
+                                ? 'etiket-ext-tint bg-sky-100/80 border-sky-300 text-sky-950'
+                                : 'etiket-int-tint bg-slate-100 border-slate-300 text-slate-950'
+                            }`}
+                          >
+                            <div
+                              className={`font-black tracking-wide leading-snug ${
+                                is58mm ? 'text-[10px]' : 'text-[12px]'
+                              }`}
+                            >
+                              {item.dosage || 'Sesuai petunjuk'}
+                            </div>
+                            {item.timingNote && (
+                              <div
+                                className={`font-bold uppercase leading-tight ${
+                                  is58mm ? 'text-[8px]' : 'text-[9.5px]'
+                                }`}
+                              >
+                                {item.timingNote}
+                              </div>
+                            )}
+                          </div>
+
+                          {item.extraWarning && (
+                            <div
+                              className={`etiket-warning font-extrabold text-rose-700 text-center uppercase tracking-tight ${
+                                is58mm ? 'text-[7.5px]' : 'text-[8.5px]'
+                              }`}
+                            >
+                              ⚠ {item.extraWarning}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Footer */}
+                      <div
+                        className={`etiket-preserve font-mono flex items-center justify-between border-t ${
+                          is58mm ? 'px-2 py-0.5 text-[7px]' : 'px-2.5 py-1 text-[8px]'
+                        } ${
+                          isExternal
+                            ? 'etiket-ext-tint bg-sky-100/70 border-sky-200 text-sky-900'
+                            : 'bg-slate-50 border-slate-200 text-slate-600'
+                        }`}
+                      >
+                        <span className="truncate">
+                          {isRacikan ? (
+                            item.budDate ? (
+                              <strong className="font-bold">BUD: {formatDateDDMMYYYY(item.budDate)}</strong>
+                            ) : is58mm ? (
+                              'Simpan tempat sejuk'
+                            ) : (
+                              'Simpan di tempat sejuk & kering'
+                            )
+                          ) : (
+                            <>
+                              {item.expDate
+                                ? `ED: ${item.expDate}`
+                                : is58mm
+                                ? 'Simpan tempat sejuk'
+                                : 'Simpan di tempat sejuk & kering'}
+                              {item.batchNo && !is58mm ? ` · B: ${item.batchNo}` : ''}
+                            </>
+                          )}
+                        </span>
+                        <span className="font-bold shrink-0">
+                          {item.totalCopies > 1
+                            ? `${item.copyIndex}/${item.totalCopies}`
+                            : is58mm
+                            ? 'Lekas Sembuh'
+                            : 'Semoga Lekas Sembuh'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

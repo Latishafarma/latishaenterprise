@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   CreditCard,
   TrendingDown,
@@ -21,7 +21,12 @@ import {
   RefreshCw,
   Wallet,
   Receipt,
-  ExternalLink
+  ExternalLink,
+  Database,
+  Copy,
+  Check,
+  Code2,
+  AlertCircle
 } from 'lucide-react';
 import {
   PurchaseInvoice,
@@ -32,6 +37,35 @@ import {
 } from '../types';
 import { useFacilityProfiles, formatPharmacyAddress } from './PharmacySettingsModal';
 import { openPrintWindow } from '../utils/printHelper';
+import { PaginationControls } from './PaginationControls';
+import { demoGetItem, demoSetItem, isDemoMode } from '../utils/demoSandbox';
+import {
+  getSupabaseClient,
+  fetchPurchaseInvoicesFromSupabase,
+  syncPurchaseInvoiceToSupabase,
+  seedPurchaseInvoicesToSupabase,
+  fetchTransactionsFromSupabase,
+  syncTransactionToSupabase,
+  seedTransactionsToSupabase,
+  fetchDebtPaymentsFromSupabase,
+  syncDebtPaymentToSupabase,
+  seedDebtPaymentsToSupabase,
+  subscribeDebtPaymentsRealtime,
+  isDemoDebtPaymentId,
+  fetchReceivablePaymentsFromSupabase,
+  syncReceivablePaymentToSupabase,
+  seedReceivablePaymentsToSupabase,
+  subscribeReceivablePaymentsRealtime,
+  isDemoReceivablePaymentId,
+  fetchCashFlowsFromSupabase,
+  syncCashFlowToSupabase,
+  seedCashFlowsToSupabase,
+  subscribeCashFlowsRealtime,
+  isDemoCashFlowId,
+  clearSupabaseTableSchemaCache,
+  SUPABASE_DEBT_RECEIVABLE_SQL_SCHEMA
+} from '../utils/supabaseClient';
+import { useIsOwnerAdmin } from '../utils/roleAccess';
 
 interface DebtReceivableViewProps {
   purchaseInvoices: PurchaseInvoice[];
@@ -40,6 +74,7 @@ interface DebtReceivableViewProps {
   onUpdateTransactions: (transactions: Transaction[]) => void;
   userName?: string;
   onAddAuditLog?: (module: string, action: string) => void;
+  isDemoSandbox?: boolean;
 }
 
 export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
@@ -48,9 +83,10 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
   onUpdatePurchaseInvoices,
   onUpdateTransactions,
   userName = 'apt. Mardin, S.Farm',
-  onAddAuditLog
+  onAddAuditLog,
+  isDemoSandbox = false
 }) => {
-  const { pharmacyProfile, apjProfile } = useFacilityProfiles();
+  const { pharmacyProfile } = useFacilityProfiles();
   const pharmacyFullAddress = formatPharmacyAddress(pharmacyProfile);
   // Navigation sub-tab
   const [activeTab, setActiveTab] = useState<'hutang' | 'piutang' | 'riwayat'>('hutang');
@@ -62,7 +98,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
   // Local storage for payment history and cash flow ledger
   const [debtPayments, setDebtPayments] = useState<DebtPaymentRecord[]>(() => {
     try {
-      const saved = localStorage.getItem('latisha_debt_payments');
+      const saved = demoGetItem('latisha_debt_payments');
       if (saved) {
         const list: DebtPaymentRecord[] = JSON.parse(saved);
         return list.filter((p) => p.id !== 'PAY-HUTANG-001');
@@ -73,7 +109,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
 
   const [receivablePayments, setReceivablePayments] = useState<ReceivablePaymentRecord[]>(() => {
     try {
-      const saved = localStorage.getItem('latisha_receivable_payments');
+      const saved = demoGetItem('latisha_receivable_payments');
       if (saved) {
         const list: ReceivablePaymentRecord[] = JSON.parse(saved);
         return list.filter((p) => p.id !== 'PAY-PIUTANG-001');
@@ -84,7 +120,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
 
   const [cashFlowRecords, setCashFlowRecords] = useState<CashFlowRecord[]>(() => {
     try {
-      const saved = localStorage.getItem('latisha_cash_flow');
+      const saved = demoGetItem('latisha_cash_flow');
       if (saved) {
         const list: CashFlowRecord[] = JSON.parse(saved);
         return list.filter((c) => !['CSH-001', 'CSH-002'].includes(c.id));
@@ -92,6 +128,304 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     } catch (e) {}
     return [];
   });
+
+  // Supabase Sync & Table Setup State
+  const [isSyncingSupabase, setIsSyncingSupabase] = useState<boolean>(false);
+  const isOwnerAdmin = useIsOwnerAdmin();
+  const [needsTableSetup, setNeedsTableSetup] = useState<boolean>(false);
+  const [showSqlModal, setShowSqlModal] = useState<boolean>(false);
+  const [copiedSql, setCopiedSql] = useState<boolean>(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string>('');
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+
+  // Persist local ledger state
+  useEffect(() => {
+    try {
+      demoSetItem('latisha_debt_payments', JSON.stringify(debtPayments));
+    } catch {}
+  }, [debtPayments]);
+
+  useEffect(() => {
+    try {
+      demoSetItem('latisha_receivable_payments', JSON.stringify(receivablePayments));
+    } catch {}
+  }, [receivablePayments]);
+
+  useEffect(() => {
+    try {
+      demoSetItem('latisha_cash_flow', JSON.stringify(cashFlowRecords));
+    } catch {}
+  }, [cashFlowRecords]);
+
+  // Two-way Supabase Real-Time Integration for Hutang, Piutang & Buku Kas (disabled in Demo Mode)
+  useEffect(() => {
+    if (isDemoSandbox || isDemoMode()) return;
+    const client = getSupabaseClient();
+    if (!client) return;
+
+    let cancelled = false;
+    let debtPayChannel: ReturnType<typeof subscribeDebtPaymentsRealtime> = null;
+    let recPayChannel: ReturnType<typeof subscribeReceivablePaymentsRealtime> = null;
+    let cashFlowChannel: ReturnType<typeof subscribeCashFlowsRealtime> = null;
+
+    // 1. Sync Riwayat Pembayaran Hutang PBF (pembayaran_hutang)
+    fetchDebtPaymentsFromSupabase().then((res) => {
+      if (cancelled || isDemoMode()) return;
+      if (res.needsTableSetup) setNeedsTableSetup(true);
+
+      const localValid = debtPayments.filter((d) => d.id && !isDemoDebtPaymentId(d.id));
+      if (res.data && res.data.length > 0) {
+        const remoteIds = new Set(res.data.map((r) => r.id));
+        const localOnly = localValid.filter((d) => !remoteIds.has(d.id));
+        if (localOnly.length > 0) {
+          seedDebtPaymentsToSupabase(localOnly).catch(() => {});
+        }
+        setDebtPayments((prev) => {
+          const map = new Map<string, DebtPaymentRecord>();
+          prev.filter((d) => !isDemoDebtPaymentId(d.id)).forEach((d) => map.set(d.id, d));
+          res.data!.forEach((d) => map.set(d.id, d));
+          return Array.from(map.values()).sort((a, b) =>
+            (b.createdAt || b.paymentDate).localeCompare(a.createdAt || a.paymentDate)
+          );
+        });
+        setLastSyncedAt(new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      } else if (res.isEmpty && !res.needsTableSetup && localValid.length > 0) {
+        seedDebtPaymentsToSupabase(localValid).catch(() => {});
+      }
+
+      if (!res.needsTableSetup && !cancelled) {
+        debtPayChannel = subscribeDebtPaymentsRealtime(
+          (newRec) => {
+            if (isDemoMode() || isDemoDebtPaymentId(newRec.id)) return;
+            setDebtPayments((prev) => {
+              if (prev.some((r) => r.id === newRec.id)) {
+                return prev.map((r) => (r.id === newRec.id ? newRec : r));
+              }
+              return [newRec, ...prev];
+            });
+          },
+          (updatedRec) => {
+            if (isDemoMode() || isDemoDebtPaymentId(updatedRec.id)) return;
+            setDebtPayments((prev) => prev.map((r) => (r.id === updatedRec.id ? updatedRec : r)));
+          },
+          (delId) => {
+            if (isDemoMode()) return;
+            setDebtPayments((prev) => prev.filter((r) => r.id !== delId));
+          }
+        );
+      }
+    });
+
+    // 2. Sync Riwayat Pelunasan Piutang POS (pelunasan_piutang)
+    fetchReceivablePaymentsFromSupabase().then((res) => {
+      if (cancelled || isDemoMode()) return;
+      if (res.needsTableSetup) setNeedsTableSetup(true);
+
+      const localValid = receivablePayments.filter((r) => r.id && !isDemoReceivablePaymentId(r.id));
+      if (res.data && res.data.length > 0) {
+        const remoteIds = new Set(res.data.map((r) => r.id));
+        const localOnly = localValid.filter((r) => !remoteIds.has(r.id));
+        if (localOnly.length > 0) {
+          seedReceivablePaymentsToSupabase(localOnly).catch(() => {});
+        }
+        setReceivablePayments((prev) => {
+          const map = new Map<string, ReceivablePaymentRecord>();
+          prev.filter((r) => !isDemoReceivablePaymentId(r.id)).forEach((r) => map.set(r.id, r));
+          res.data!.forEach((r) => map.set(r.id, r));
+          return Array.from(map.values()).sort((a, b) =>
+            (b.createdAt || b.paymentDate).localeCompare(a.createdAt || a.paymentDate)
+          );
+        });
+        setLastSyncedAt(new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      } else if (res.isEmpty && !res.needsTableSetup && localValid.length > 0) {
+        seedReceivablePaymentsToSupabase(localValid).catch(() => {});
+      }
+
+      if (!res.needsTableSetup && !cancelled) {
+        recPayChannel = subscribeReceivablePaymentsRealtime(
+          (newRec) => {
+            if (isDemoMode() || isDemoReceivablePaymentId(newRec.id)) return;
+            setReceivablePayments((prev) => {
+              if (prev.some((r) => r.id === newRec.id)) {
+                return prev.map((r) => (r.id === newRec.id ? newRec : r));
+              }
+              return [newRec, ...prev];
+            });
+          },
+          (updatedRec) => {
+            if (isDemoMode() || isDemoReceivablePaymentId(updatedRec.id)) return;
+            setReceivablePayments((prev) => prev.map((r) => (r.id === updatedRec.id ? updatedRec : r)));
+          },
+          (delId) => {
+            if (isDemoMode()) return;
+            setReceivablePayments((prev) => prev.filter((r) => r.id !== delId));
+          }
+        );
+      }
+    });
+
+    // 3. Sync Buku Kas & Mutasi (buku_kas_mutasi)
+    fetchCashFlowsFromSupabase().then((res) => {
+      if (cancelled || isDemoMode()) return;
+      if (res.needsTableSetup) setNeedsTableSetup(true);
+
+      const localValid = cashFlowRecords.filter((c) => c.id && !isDemoCashFlowId(c.id));
+      if (res.data && res.data.length > 0) {
+        const remoteIds = new Set(res.data.map((c) => c.id));
+        const localOnly = localValid.filter((c) => !remoteIds.has(c.id));
+        if (localOnly.length > 0) {
+          seedCashFlowsToSupabase(localOnly).catch(() => {});
+        }
+        setCashFlowRecords((prev) => {
+          const map = new Map<string, CashFlowRecord>();
+          prev.filter((c) => !isDemoCashFlowId(c.id)).forEach((c) => map.set(c.id, c));
+          res.data!.forEach((c) => map.set(c.id, c));
+          return Array.from(map.values()).sort((a, b) =>
+            (b.createdAt || `${b.date} ${b.time}`).localeCompare(a.createdAt || `${a.date} ${a.time}`)
+          );
+        });
+        setLastSyncedAt(new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      } else if (res.isEmpty && !res.needsTableSetup && localValid.length > 0) {
+        seedCashFlowsToSupabase(localValid).catch(() => {});
+      }
+
+      if (!res.needsTableSetup && !cancelled) {
+        cashFlowChannel = subscribeCashFlowsRealtime(
+          (newCf) => {
+            if (isDemoMode() || isDemoCashFlowId(newCf.id)) return;
+            setCashFlowRecords((prev) => {
+              if (prev.some((c) => c.id === newCf.id)) {
+                return prev.map((c) => (c.id === newCf.id ? newCf : c));
+              }
+              return [newCf, ...prev];
+            });
+          },
+          (updatedCf) => {
+            if (isDemoMode() || isDemoCashFlowId(updatedCf.id)) return;
+            setCashFlowRecords((prev) => prev.map((c) => (c.id === updatedCf.id ? updatedCf : c)));
+          },
+          (delId) => {
+            if (isDemoMode()) return;
+            setCashFlowRecords((prev) => prev.filter((c) => c.id !== delId));
+          }
+        );
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      const activeClient = getSupabaseClient();
+      if (activeClient) {
+        if (debtPayChannel) activeClient.removeChannel(debtPayChannel);
+        if (recPayChannel) activeClient.removeChannel(recPayChannel);
+        if (cashFlowChannel) activeClient.removeChannel(cashFlowChannel);
+      }
+    };
+  }, [isDemoSandbox]);
+
+  // Manual 2-way synchronization handler for all Hutang & Piutang tables
+  const handleManualSyncSupabase = async () => {
+    if (isDemoSandbox || isDemoMode()) {
+      showToast('Mode Demo / Sandbox aktif. Sinkronisasi Supabase produksi dinonaktifkan.');
+      return;
+    }
+
+    setIsSyncingSupabase(true);
+    try {
+      clearSupabaseTableSchemaCache();
+      const [invRes, trxRes, debtPayRes, recPayRes, cfRes] = await Promise.all([
+        fetchPurchaseInvoicesFromSupabase({ forceRefresh: true }),
+        fetchTransactionsFromSupabase({ forceRefresh: true }),
+        fetchDebtPaymentsFromSupabase({ forceRefresh: true }),
+        fetchReceivablePaymentsFromSupabase({ forceRefresh: true }),
+        fetchCashFlowsFromSupabase({ forceRefresh: true })
+      ]);
+
+      const anyMissingTable = Boolean(
+        invRes.needsTableSetup ||
+          debtPayRes.needsTableSetup ||
+          recPayRes.needsTableSetup ||
+          cfRes.needsTableSetup
+      );
+      setNeedsTableSetup(anyMissingTable);
+
+      if (anyMissingTable) {
+        setShowSqlModal(true);
+        setIsSyncingSupabase(false);
+        return;
+      }
+
+      // 1. Merge & seed PurchaseInvoices (faktur_pembelian)
+      const invMap = new Map<string, PurchaseInvoice>();
+      purchaseInvoices.forEach((i) => invMap.set(i.id, i));
+      (invRes.data || []).forEach((i) => invMap.set(i.id, i));
+      const mergedInvoices = Array.from(invMap.values());
+      onUpdatePurchaseInvoices(mergedInvoices);
+      if (mergedInvoices.length > 0) {
+        await seedPurchaseInvoicesToSupabase(mergedInvoices);
+      }
+
+      // 2. Merge & seed Transactions (riwayat_penjualan)
+      if (trxRes.data && trxRes.data.length > 0) {
+        const trxMap = new Map<string, Transaction>();
+        transactions.forEach((t) => trxMap.set(t.id, t));
+        trxRes.data.forEach((t) => trxMap.set(t.id, t));
+        const mergedTrx = Array.from(trxMap.values());
+        onUpdateTransactions(mergedTrx);
+      }
+
+      // 3. Merge & seed DebtPayments (pembayaran_hutang)
+      const dpMap = new Map<string, DebtPaymentRecord>();
+      debtPayments.filter((d) => !isDemoDebtPaymentId(d.id)).forEach((d) => dpMap.set(d.id, d));
+      (debtPayRes.data || []).forEach((d) => dpMap.set(d.id, d));
+      const mergedDebtPays = Array.from(dpMap.values()).sort((a, b) =>
+        (b.createdAt || b.paymentDate).localeCompare(a.createdAt || a.paymentDate)
+      );
+      setDebtPayments(mergedDebtPays);
+      if (mergedDebtPays.length > 0) {
+        await seedDebtPaymentsToSupabase(mergedDebtPays);
+      }
+
+      // 4. Merge & seed ReceivablePayments (pelunasan_piutang)
+      const rpMap = new Map<string, ReceivablePaymentRecord>();
+      receivablePayments.filter((r) => !isDemoReceivablePaymentId(r.id)).forEach((r) => rpMap.set(r.id, r));
+      (recPayRes.data || []).forEach((r) => rpMap.set(r.id, r));
+      const mergedRecPays = Array.from(rpMap.values()).sort((a, b) =>
+        (b.createdAt || b.paymentDate).localeCompare(a.createdAt || a.paymentDate)
+      );
+      setReceivablePayments(mergedRecPays);
+      if (mergedRecPays.length > 0) {
+        await seedReceivablePaymentsToSupabase(mergedRecPays);
+      }
+
+      // 5. Merge & seed CashFlowRecords (buku_kas_mutasi)
+      const cfMap = new Map<string, CashFlowRecord>();
+      cashFlowRecords.filter((c) => !isDemoCashFlowId(c.id)).forEach((c) => cfMap.set(c.id, c));
+      (cfRes.data || []).forEach((c) => cfMap.set(c.id, c));
+      const mergedCashFlows = Array.from(cfMap.values()).sort((a, b) =>
+        (b.createdAt || `${b.date} ${b.time}`).localeCompare(a.createdAt || `${a.date} ${a.time}`)
+      );
+      setCashFlowRecords(mergedCashFlows);
+      if (mergedCashFlows.length > 0) {
+        await seedCashFlowsToSupabase(mergedCashFlows);
+      }
+
+      setLastSyncedAt(
+        new Date().toLocaleTimeString('id-ID', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit'
+        })
+      );
+      showToast(
+        `Sinkronisasi Supabase berhasil! ${mergedInvoices.length} Faktur PBF, ${mergedDebtPays.length} Bayar Hutang, ${mergedRecPays.length} Pelunasan Piutang & ${mergedCashFlows.length} Buku Kas tersinkronisasi.`
+      );
+    } catch (err: any) {
+      showToast(`Gagal sinkronisasi Supabase: ${err?.message || String(err)}`);
+    } finally {
+      setIsSyncingSupabase(false);
+    }
+  };
 
   // Modal States
   const [selectedInvoiceForPay, setSelectedInvoiceForPay] = useState<PurchaseInvoice | null>(null);
@@ -274,8 +608,42 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     });
   }, [receivableItems, searchTerm, statusFilter]);
 
+  const [debtPage, setDebtPage] = useState(1);
+  const [debtPageSize, setDebtPageSize] = useState<number>(25);
+  const [receivablePage, setReceivablePage] = useState(1);
+  const [receivablePageSize, setReceivablePageSize] = useState<number>(25);
+  const [cashPage, setCashPage] = useState(1);
+  const [cashPageSize, setCashPageSize] = useState<number>(25);
+
+  useEffect(() => {
+    setDebtPage(1);
+    setReceivablePage(1);
+  }, [searchTerm, statusFilter]);
+
+  const debtTotalPages = Math.max(1, Math.ceil(filteredDebtList.length / debtPageSize));
+  const safeDebtPage = Math.min(debtPage, debtTotalPages);
+  const paginatedDebtList = useMemo(() => {
+    const start = (safeDebtPage - 1) * debtPageSize;
+    return filteredDebtList.slice(start, start + debtPageSize);
+  }, [filteredDebtList, safeDebtPage, debtPageSize]);
+
+  const receivableTotalPages = Math.max(1, Math.ceil(filteredReceivableList.length / receivablePageSize));
+  const safeReceivablePage = Math.min(receivablePage, receivableTotalPages);
+  const paginatedReceivableList = useMemo(() => {
+    const start = (safeReceivablePage - 1) * receivablePageSize;
+    return filteredReceivableList.slice(start, start + receivablePageSize);
+  }, [filteredReceivableList, safeReceivablePage, receivablePageSize]);
+
+  const cashTotalPages = Math.max(1, Math.ceil(cashFlowRecords.length / cashPageSize));
+  const safeCashPage = Math.min(cashPage, cashTotalPages);
+  const paginatedCashFlowRecords = useMemo(() => {
+    const start = (safeCashPage - 1) * cashPageSize;
+    return cashFlowRecords.slice(start, start + cashPageSize);
+  }, [cashFlowRecords, safeCashPage, cashPageSize]);
+
   // ACTION: Buka Modal Bayar Hutang (PBF)
   const handleOpenPayDebt = (inv: PurchaseInvoice & { calculatedRemaining: number; calculatedPaid: number }) => {
+    setPaymentError(null);
     setSelectedInvoiceForPay(inv);
     setPaymentForm({
       amount: inv.calculatedRemaining,
@@ -288,6 +656,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
 
   // ACTION: Buka Modal Bayar Piutang (POS / Pasien / Mitra)
   const handleOpenPayReceivable = (trx: Transaction & { calculatedRemaining: number; calculatedPaid: number }) => {
+    setPaymentError(null);
     setSelectedTrxForPay(trx);
     setPaymentForm({
       amount: trx.calculatedRemaining,
@@ -301,10 +670,11 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
   // EKSEKUSI PEMBAYARAN HUTANG (PBF)
   const handleProcessDebtPayment = () => {
     if (!selectedInvoiceForPay) return;
+    setPaymentError(null);
 
     const payAmount = Number(paymentForm.amount);
     if (payAmount <= 0) {
-      alert('Nominal pembayaran harus lebih dari 0!');
+      setPaymentError('Nominal pembayaran harus lebih dari 0!');
       return;
     }
 
@@ -313,7 +683,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
       : (selectedInvoiceForPay.totalTagihan - (selectedInvoiceForPay.paidAmount || (selectedInvoiceForPay.status === 'Lunas' ? selectedInvoiceForPay.totalTagihan : 0)));
 
     if (payAmount > currentRemaining) {
-      alert(`Nominal pembayaran (Rp ${payAmount.toLocaleString('id-ID')}) melebihi sisa hutang (Rp ${currentRemaining.toLocaleString('id-ID')})!`);
+      setPaymentError(`Nominal pembayaran (Rp ${payAmount.toLocaleString('id-ID')}) melebihi sisa hutang (Rp ${currentRemaining.toLocaleString('id-ID')})!`);
       return;
     }
 
@@ -322,22 +692,21 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     const newRemaining = Math.max(0, currentRemaining - payAmount);
     const newStatus: 'Lunas' | 'Sebagian' | 'Belum Lunas' = newRemaining <= 0 ? 'Lunas' : 'Sebagian';
 
+    const updatedTargetInvoice: PurchaseInvoice = {
+      ...selectedInvoiceForPay,
+      status: newStatus,
+      paidAmount: newPaid,
+      remainingAmount: newRemaining
+    };
+
     // 1. UPDATE TABEL UTAMA PEMBELIAN & FAKTUR PBF
-    const updatedInvoices = purchaseInvoices.map((inv) => {
-      if (inv.id === selectedInvoiceForPay.id) {
-        return {
-          ...inv,
-          status: newStatus,
-          paidAmount: newPaid,
-          remainingAmount: newRemaining
-        };
-      }
-      return inv;
-    });
+    const updatedInvoices = purchaseInvoices.map((inv) =>
+      inv.id === selectedInvoiceForPay.id ? updatedTargetInvoice : inv
+    );
 
     onUpdatePurchaseInvoices(updatedInvoices);
     try {
-      localStorage.setItem('latisha_purchase_invoices', JSON.stringify(updatedInvoices));
+      demoSetItem('latisha_purchase_invoices', JSON.stringify(updatedInvoices));
     } catch (e) {}
 
     // 2. CATAT KE RIWAYAT PEMBAYARAN HUTANG
@@ -361,7 +730,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     const nextDebtPayments = [newDebtPayment, ...debtPayments];
     setDebtPayments(nextDebtPayments);
     try {
-      localStorage.setItem('latisha_debt_payments', JSON.stringify(nextDebtPayments));
+      demoSetItem('latisha_debt_payments', JSON.stringify(nextDebtPayments));
     } catch (e) {}
 
     // 3. CATAT KE BUKU KAS (CASH FLOW RECORD - KELUAR)
@@ -384,8 +753,34 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     const nextCashFlow = [newCashFlow, ...cashFlowRecords];
     setCashFlowRecords(nextCashFlow);
     try {
-      localStorage.setItem('latisha_cash_flow', JSON.stringify(nextCashFlow));
+      demoSetItem('latisha_cash_flow', JSON.stringify(nextCashFlow));
     } catch (e) {}
+
+    // 3b. SINKRONISASI REAL-TIME KE SUPABASE
+    if (!isDemoSandbox && !isDemoMode()) {
+      syncPurchaseInvoiceToSupabase(updatedTargetInvoice)
+        .then((res) => {
+          if (res.needsTableSetup) setNeedsTableSetup(true);
+        })
+        .catch(() => {});
+      syncDebtPaymentToSupabase(newDebtPayment)
+        .then((res) => {
+          if (res.needsTableSetup) setNeedsTableSetup(true);
+        })
+        .catch(() => {});
+      syncCashFlowToSupabase(newCashFlow)
+        .then((res) => {
+          if (res.needsTableSetup) setNeedsTableSetup(true);
+        })
+        .catch(() => {});
+      setLastSyncedAt(
+        new Date().toLocaleTimeString('id-ID', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit'
+        })
+      );
+    }
 
     // 4. CATAT AUDIT LOG
     if (onAddAuditLog) {
@@ -413,17 +808,18 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
 
     setSelectedInvoiceForPay(null);
     showToast(
-      `Pembayaran hutang faktur #${selectedInvoiceForPay.invoiceNo} sebesar Rp ${payAmount.toLocaleString('id-ID')} berhasil disimpan! Status faktur diperbarui menjadi ${newStatus}.`
+      `Pembayaran hutang faktur #${selectedInvoiceForPay.invoiceNo} sebesar Rp ${payAmount.toLocaleString('id-ID')} berhasil disimpan & disinkronkan! Status faktur diperbarui menjadi ${newStatus}.`
     );
   };
 
   // EKSEKUSI PENERIMAAN / PELUNASAN PIUTANG (POS)
   const handleProcessReceivablePayment = () => {
     if (!selectedTrxForPay) return;
+    setPaymentError(null);
 
     const payAmount = Number(paymentForm.amount);
     if (payAmount <= 0) {
-      alert('Nominal pelunasan piutang harus lebih dari 0!');
+      setPaymentError('Nominal pelunasan piutang harus lebih dari 0!');
       return;
     }
 
@@ -432,7 +828,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
       : Math.max(0, selectedTrxForPay.total - (selectedTrxForPay.paidAmount !== undefined ? selectedTrxForPay.paidAmount : (selectedTrxForPay.payAmount || 0)));
 
     if (payAmount > currentRemaining) {
-      alert(`Nominal pembayaran (Rp ${payAmount.toLocaleString('id-ID')}) melebihi sisa piutang (Rp ${currentRemaining.toLocaleString('id-ID')})!`);
+      setPaymentError(`Nominal pembayaran (Rp ${payAmount.toLocaleString('id-ID')}) melebihi sisa piutang (Rp ${currentRemaining.toLocaleString('id-ID')})!`);
       return;
     }
 
@@ -444,24 +840,23 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     const newRemaining = Math.max(0, currentRemaining - payAmount);
     const newStatus: 'Lunas' | 'Sebagian' | 'Belum Lunas' = newRemaining <= 0 ? 'Lunas' : 'Sebagian';
 
+    const updatedTargetTrx: Transaction = {
+      ...selectedTrxForPay,
+      paymentStatus: newStatus,
+      paidAmount: newPaid,
+      payAmount: newPaid,
+      remainingAmount: newRemaining,
+      status: newStatus === 'Lunas' ? ('Selesai' as const) : selectedTrxForPay.status
+    };
+
     // 1. UPDATE TABEL UTAMA TRANSAKSI PENJUALAN POS
-    const updatedTransactions = transactions.map((trx) => {
-      if (trx.id === selectedTrxForPay.id) {
-        return {
-          ...trx,
-          paymentStatus: newStatus,
-          paidAmount: newPaid,
-          payAmount: newPaid,
-          remainingAmount: newRemaining,
-          status: newStatus === 'Lunas' ? ('Selesai' as const) : trx.status
-        };
-      }
-      return trx;
-    });
+    const updatedTransactions = transactions.map((trx) =>
+      trx.id === selectedTrxForPay.id ? updatedTargetTrx : trx
+    );
 
     onUpdateTransactions(updatedTransactions);
     try {
-      localStorage.setItem('latisha_transactions', JSON.stringify(updatedTransactions));
+      demoSetItem('latisha_transactions', JSON.stringify(updatedTransactions));
     } catch (e) {}
 
     // 2. CATAT KE RIWAYAT PENERIMAAN PIUTANG
@@ -484,7 +879,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     const nextReceivablePayments = [newReceivablePayment, ...receivablePayments];
     setReceivablePayments(nextReceivablePayments);
     try {
-      localStorage.setItem('latisha_receivable_payments', JSON.stringify(nextReceivablePayments));
+      demoSetItem('latisha_receivable_payments', JSON.stringify(nextReceivablePayments));
     } catch (e) {}
 
     // 3. CATAT KE BUKU KAS (CASH FLOW RECORD - MASUK)
@@ -507,8 +902,30 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     const nextCashFlow = [newCashFlow, ...cashFlowRecords];
     setCashFlowRecords(nextCashFlow);
     try {
-      localStorage.setItem('latisha_cash_flow', JSON.stringify(nextCashFlow));
+      demoSetItem('latisha_cash_flow', JSON.stringify(nextCashFlow));
     } catch (e) {}
+
+    // 3b. SINKRONISASI REAL-TIME KE SUPABASE
+    if (!isDemoSandbox && !isDemoMode()) {
+      syncTransactionToSupabase(updatedTargetTrx).catch(() => {});
+      syncReceivablePaymentToSupabase(newReceivablePayment)
+        .then((res) => {
+          if (res.needsTableSetup) setNeedsTableSetup(true);
+        })
+        .catch(() => {});
+      syncCashFlowToSupabase(newCashFlow)
+        .then((res) => {
+          if (res.needsTableSetup) setNeedsTableSetup(true);
+        })
+        .catch(() => {});
+      setLastSyncedAt(
+        new Date().toLocaleTimeString('id-ID', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit'
+        })
+      );
+    }
 
     // 4. CATAT AUDIT LOG
     if (onAddAuditLog) {
@@ -536,7 +953,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
 
     setSelectedTrxForPay(null);
     showToast(
-      `Pelunasan piutang transaksi #${selectedTrxForPay.id} sebesar Rp ${payAmount.toLocaleString('id-ID')} berhasil dicatat! Status transaksi POS diperbarui menjadi ${newStatus}.`
+      `Pelunasan piutang transaksi #${selectedTrxForPay.id} sebesar Rp ${payAmount.toLocaleString('id-ID')} berhasil dicatat & disinkronkan! Status transaksi POS diperbarui menjadi ${newStatus}.`
     );
   };
 
@@ -584,13 +1001,86 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
         </div>
 
         {/* Action / Sync Button */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <div
+            className={`px-3 py-1.5 rounded-xl border text-[11px] font-bold flex items-center gap-1.5 ${
+              isDemoSandbox || isDemoMode()
+                ? 'bg-amber-500/15 border-amber-400/30 text-amber-300'
+                : needsTableSetup
+                ? 'bg-rose-500/20 border-rose-400/40 text-rose-200'
+                : 'bg-emerald-500/15 border-emerald-400/30 text-emerald-300'
+            }`}
+          >
+            <Database className="w-3.5 h-3.5" />
+            <span>
+              {isDemoSandbox || isDemoMode()
+                ? 'Sandbox Lokal'
+                : needsTableSetup
+                ? 'Tabel Supabase Belum Dibuat'
+                : `Supabase Live${lastSyncedAt ? ` · ${lastSyncedAt}` : ''}`}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleManualSyncSupabase}
+            disabled={isSyncingSupabase}
+            className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white text-xs font-bold flex items-center gap-1.5 border border-indigo-400/30 transition cursor-pointer"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isSyncingSupabase ? 'animate-spin' : ''}`} />
+            <span>{isSyncingSupabase ? 'Menyinkronkan...' : 'Sinkronkan Supabase'}</span>
+          </button>
+
+          {isOwnerAdmin && (
+            <button
+              type="button"
+              onClick={() => setShowSqlModal(true)}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition cursor-pointer ${
+                needsTableSetup
+                  ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 border-amber-300'
+                  : 'bg-slate-800/80 hover:bg-slate-700 text-slate-200 border-slate-700'
+              }`}
+              title="Skema SQL Tabel Hutang & Piutang Supabase"
+            >
+              <Code2 className="w-3.5 h-3.5" />
+              <span>Setup Tabel SQL</span>
+            </button>
+          )}
+
           <div className="px-3.5 py-1.5 rounded-xl bg-slate-800/80 border border-slate-700 text-xs font-mono flex items-center gap-2 text-slate-300">
             <Clock className="w-3.5 h-3.5 text-amber-400" />
             <span>Petugas: <strong className="text-white">{userName}</strong></span>
           </div>
         </div>
       </div>
+
+      {/* Banner peringatan jika tabel Supabase belum dibuat (APJ / Owner Only) */}
+      {isOwnerAdmin && needsTableSetup && !isDemoSandbox && !isDemoMode() && (
+        <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-950">
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-black text-amber-900">
+                Tabel Database Hutang & Piutang Belum Tersedia di Supabase
+              </p>
+              <p className="text-amber-800 mt-0.5">
+                Jalankan skrip SQL untuk membuat tabel <code className="font-mono font-bold">faktur_pembelian</code>,{' '}
+                <code className="font-mono font-bold">pembayaran_hutang</code>,{' '}
+                <code className="font-mono font-bold">pelunasan_piutang</code>, dan{' '}
+                <code className="font-mono font-bold">buku_kas_mutasi</code> agar seluruh transaksi hutang & piutang tersimpan secara real-time di cloud.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowSqlModal(true)}
+            className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold shrink-0 flex items-center gap-1.5 cursor-pointer"
+          >
+            <Code2 className="w-4 h-4" />
+            <span>Lihat Skrip SQL</span>
+          </button>
+        </div>
+      )}
 
       {/* KPI Cards Overview */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -820,7 +1310,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 font-medium">
-                {filteredDebtList.length === 0 ? (
+                {paginatedDebtList.length === 0 ? (
                   <tr>
                     <td colSpan={10} className="p-8 text-center text-slate-400">
                       <FileText className="w-8 h-8 mx-auto mb-2 opacity-40" />
@@ -828,11 +1318,12 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  filteredDebtList.map((inv, idx) => {
+                  paginatedDebtList.map((inv, idx) => {
                     const isFullyPaid = inv.status === 'Lunas' || inv.calculatedRemaining <= 0;
+                    const rowNum = (safeDebtPage - 1) * debtPageSize + idx + 1;
                     return (
                       <tr key={inv.id} className="hover:bg-slate-50/80 transition-colors">
-                        <td className="p-3 text-center font-mono text-slate-400">{idx + 1}</td>
+                        <td className="p-3 text-center font-mono text-slate-400">{rowNum}</td>
                         <td className="p-3 font-mono font-bold text-slate-900">
                           <div>{inv.invoiceNo}</div>
                           <div className="text-[10px] text-slate-400 font-normal">ID: {inv.id}</div>
@@ -909,6 +1400,18 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
               </tbody>
             </table>
           </div>
+          <PaginationControls
+            currentPage={safeDebtPage}
+            totalPages={debtTotalPages}
+            totalCount={filteredDebtList.length}
+            pageSize={debtPageSize}
+            onPageChange={setDebtPage}
+            onPageSizeChange={(sz) => {
+              setDebtPageSize(sz);
+              setDebtPage(1);
+            }}
+            itemLabel="faktur hutang"
+          />
         </div>
       )}
 
@@ -947,7 +1450,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 font-medium">
-                {filteredReceivableList.length === 0 ? (
+                {paginatedReceivableList.length === 0 ? (
                   <tr>
                     <td colSpan={10} className="p-8 text-center text-slate-400">
                       <FileText className="w-8 h-8 mx-auto mb-2 opacity-40" />
@@ -955,11 +1458,12 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  filteredReceivableList.map((trx, idx) => {
+                  paginatedReceivableList.map((trx, idx) => {
                     const isFullyPaid = trx.calculatedStatus === 'Lunas' || trx.calculatedRemaining <= 0;
+                    const rowNum = (safeReceivablePage - 1) * receivablePageSize + idx + 1;
                     return (
                       <tr key={trx.id} className="hover:bg-slate-50/80 transition-colors">
-                        <td className="p-3 text-center font-mono text-slate-400">{idx + 1}</td>
+                        <td className="p-3 text-center font-mono text-slate-400">{rowNum}</td>
                         <td className="p-3 font-mono font-bold text-slate-900">
                           <div>{trx.id}</div>
                           <div className="text-[10px] text-slate-400 font-normal">{trx.type}</div>
@@ -1039,6 +1543,18 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
               </tbody>
             </table>
           </div>
+          <PaginationControls
+            currentPage={safeReceivablePage}
+            totalPages={receivableTotalPages}
+            totalCount={filteredReceivableList.length}
+            pageSize={receivablePageSize}
+            onPageChange={setReceivablePage}
+            onPageSizeChange={(sz) => {
+              setReceivablePageSize(sz);
+              setReceivablePage(1);
+            }}
+            itemLabel="piutang"
+          />
         </div>
       )}
 
@@ -1077,7 +1593,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 font-medium">
-                {cashFlowRecords.length === 0 ? (
+                {paginatedCashFlowRecords.length === 0 ? (
                   <tr>
                     <td colSpan={10} className="p-8 text-center text-slate-400">
                       <Receipt className="w-8 h-8 mx-auto mb-2 opacity-40" />
@@ -1085,9 +1601,11 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  cashFlowRecords.map((cf, idx) => (
+                  paginatedCashFlowRecords.map((cf, idx) => (
                     <tr key={cf.id} className="hover:bg-slate-50/80 transition-colors">
-                      <td className="p-3 text-center font-mono text-slate-400">{idx + 1}</td>
+                      <td className="p-3 text-center font-mono text-slate-400">
+                        {(safeCashPage - 1) * cashPageSize + idx + 1}
+                      </td>
                       <td className="p-3 font-mono">
                         <div className="font-bold text-slate-800">{cf.date}</div>
                         <div className="text-[10px] text-slate-400">{cf.time}</div>
@@ -1150,6 +1668,18 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
               </tbody>
             </table>
           </div>
+          <PaginationControls
+            currentPage={safeCashPage}
+            totalPages={cashTotalPages}
+            totalCount={cashFlowRecords.length}
+            pageSize={cashPageSize}
+            onPageChange={setCashPage}
+            onPageSizeChange={(sz) => {
+              setCashPageSize(sz);
+              setCashPage(1);
+            }}
+            itemLabel="mutasi kas"
+          />
         </div>
       )}
 
@@ -1308,11 +1838,21 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                 />
               </div>
 
+              {paymentError && (
+                <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <span>{paymentError}</span>
+                </div>
+              )}
+
               {/* Action Buttons */}
               <div className="pt-4 flex items-center justify-end gap-2 border-t border-slate-200">
                 <button
                   type="button"
-                  onClick={() => setSelectedInvoiceForPay(null)}
+                  onClick={() => {
+                    setPaymentError(null);
+                    setSelectedInvoiceForPay(null);
+                  }}
                   className="px-5 py-2.5 bg-slate-200 hover:bg-slate-300 rounded-xl font-bold text-slate-700 transition cursor-pointer"
                 >
                   Batal
@@ -1485,11 +2025,21 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                 />
               </div>
 
+              {paymentError && (
+                <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <span>{paymentError}</span>
+                </div>
+              )}
+
               {/* Action Buttons */}
               <div className="pt-4 flex items-center justify-end gap-2 border-t border-slate-200">
                 <button
                   type="button"
-                  onClick={() => setSelectedTrxForPay(null)}
+                  onClick={() => {
+                    setPaymentError(null);
+                    setSelectedTrxForPay(null);
+                  }}
                   className="px-5 py-2.5 bg-slate-200 hover:bg-slate-300 rounded-xl font-bold text-slate-700 transition cursor-pointer"
                 >
                   Batal
@@ -1548,10 +2098,14 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                       {pharmacyProfile.name}
                     </h2>
                     <p className="text-[11px] text-slate-700 font-medium">
-                      {pharmacyFullAddress}
+                      {pharmacyFullAddress} · Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
                     </p>
-                    <p className="text-[10px] text-slate-600">
-                      SIA: {pharmacyProfile.sia} | APJ: {apjProfile.name} (SIPA: {apjProfile.sipa}) | Telp/WA: {pharmacyProfile.phone}
+                    <p className="text-[10px] text-slate-600 font-mono">
+                      {[
+                        pharmacyProfile.sia ? `SIA: ${pharmacyProfile.sia}` : '',
+                        pharmacyProfile.nib ? `NIB: ${pharmacyProfile.nib}` : '',
+                        pharmacyProfile.npwp ? `NPWP: ${pharmacyProfile.npwp}` : ''
+                      ].filter(Boolean).join(' · ')}
                     </p>
                   </div>
                   <div className="w-14 shrink-0" />
@@ -1658,6 +2212,85 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* MODAL 4: SKEMA SQL SUPABASE MANAJEMEN HUTANG & PIUTANG */}
+      {isOwnerAdmin && showSqlModal && (
+        <div className="fixed inset-0 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl w-full max-w-3xl max-h-[90vh] shadow-2xl overflow-hidden border border-slate-200 flex flex-col">
+            <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-indigo-500/20 text-indigo-300 rounded-xl border border-indigo-400/30">
+                  <Database className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-black text-sm">
+                    Skema SQL Supabase — Manajemen Hutang & Piutang
+                  </h3>
+                  <p className="text-[11px] text-slate-300">
+                    Tabel: faktur_pembelian, pembayaran_hutang, pelunasan_piutang, buku_kas_mutasi
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSqlModal(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 overflow-y-auto space-y-4 text-xs flex-1">
+              <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-3.5 text-indigo-950 flex items-center justify-between gap-3">
+                <div>
+                  <p className="font-bold">Petunjuk Integrasi Database:</p>
+                  <p className="text-[11px] text-indigo-800 mt-0.5">
+                    Salin skrip SQL di bawah ini, buka <strong>SQL Editor</strong> pada Dashboard Supabase Anda, lalu klik <strong>Run</strong>. Setelah selesai, klik tombol <strong>Sinkronkan Supabase</strong>.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(SUPABASE_DEBT_RECEIVABLE_SQL_SCHEMA);
+                    setCopiedSql(true);
+                    setTimeout(() => setCopiedSql(false), 2500);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold shrink-0 flex items-center gap-1.5 cursor-pointer"
+                >
+                  {copiedSql ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  <span>{copiedSql ? 'Tersalin!' : 'Salin Skrip SQL'}</span>
+                </button>
+              </div>
+
+              <pre className="bg-slate-950 text-emerald-300 p-4 rounded-2xl font-mono text-[11px] overflow-x-auto leading-relaxed border border-slate-800">
+                {SUPABASE_DEBT_RECEIVABLE_SQL_SCHEMA}
+              </pre>
+            </div>
+
+            <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowSqlModal(false)}
+                className="px-4 py-2 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold text-xs cursor-pointer"
+              >
+                Tutup
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowSqlModal(false);
+                  handleManualSyncSupabase();
+                }}
+                className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Cek & Sinkronkan Sekarang</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+

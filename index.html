@@ -2,7 +2,15 @@
 <html lang="id">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#059669" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="LatishaFarma" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <title>Latisha Farma - Apotek & Praktek Dokter Terpadu</title>
     <meta name="description" content="Sistem Manajemen Komprehensif Apotek & Praktek Dokter Latisha Farma: Rekam Medis Elektronik (RME SOAP & ICD-10), Kasir POS Farmasi Multi-Tier, Manajemen Stok Obat FEFO, Pendaftaran Pasien Online, Laporan Keuangan Otomatis, Sinkronisasi Multi-Cabang, Mobile Staf Medis, dan Live Monitor Antrean dengan Pemanggil Suara." />
     <meta property="og:title" content="Latisha Farma - Apotek & Praktek Dokter Terpadu" />
@@ -85,7 +93,7 @@
         window.addEventListener('unhandledrejection', function(event) {
           if (event && event.reason) {
             const msg = String(event.reason.message || event.reason);
-            if (msg.includes('WebSocket') || msg.includes('vite')) {
+            if (msg.includes('WebSocket') || msg.includes('vite') || msg.includes('esnext.disposable')) {
               event.preventDefault();
             }
           }
@@ -95,6 +103,6 @@
   </head>
   <body class="bg-slate-100 text-slate-800 antialiased font-sans">
     <div id="root"></div>
-    <script type="module" src="./src/main.tsx"></script>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

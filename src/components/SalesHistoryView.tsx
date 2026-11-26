@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
+import { demoSetItem } from '../utils/demoSandbox';
 import {
   Search,
   Calendar,
@@ -22,11 +23,30 @@ import {
   Phone,
   MapPin,
   CalendarDays,
-  ExternalLink
+  ExternalLink,
+  Database,
+  RefreshCw,
+  Code,
+  CheckCircle2,
+  Copy,
+  Check
 } from 'lucide-react';
-import { Transaction, Medicine, StockMutation, CartItem, Branch, Mitra } from '../types';
-import { getSavedPharmacyProfile, getSavedAPJProfile } from './PharmacySettingsModal';
+import { Transaction, Medicine, StockMutation, CartItem, Branch, Mitra, isOwnerAdminRole } from '../types';
+import { useFacilityProfiles, formatPharmacyAddress } from './PharmacySettingsModal';
 import { openPrintWindow } from '../utils/printHelper';
+import { PaginationControls } from './PaginationControls';
+import {
+  summarizeTransactionForDocument,
+  getDefaultKwitansiKeterangan,
+  isJasaCartItem
+} from '../utils/transactionPrintHelper';
+import { calculateFacilityShareForCartItem } from '../utils/serviceFeeHelper';
+import {
+  SUPABASE_TRANSACTIONS_SQL_SCHEMA,
+  DEFAULT_SALES_TABLE,
+  getSupabaseConfig,
+  setSupabaseConfig
+} from '../utils/supabaseClient';
 
 interface SalesHistoryViewProps {
   transactions: Transaction[];
@@ -38,7 +58,25 @@ interface SalesHistoryViewProps {
   userName: string;
   mitraList?: Mitra[];
   activeRole?: string;
-  onDeleteTransactions?: (ids: string[]) => void;
+  onDeleteTransactions?: (ids: string[]) =>
+    | void
+    | Promise<{
+        success?: boolean;
+        needsTableSetup?: boolean;
+        isDemo?: boolean;
+        error?: string;
+      }>;
+  onSyncSupabase?: () => Promise<{
+    success: boolean;
+    count?: number;
+    needsTableSetup?: boolean;
+    isDemo?: boolean;
+    error?: string;
+  }>;
+  needsTableSetup?: boolean;
+  isDemoSandbox?: boolean;
+  inspectTransactionId?: string | null;
+  onClearInspectTransaction?: () => void;
 }
 
 // Terbilang helper in Indonesian
@@ -89,12 +127,86 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
   currentBranch,
   userName,
   mitraList = [],
-  activeRole = 'Super Admin / APJ',
-  onDeleteTransactions
+  activeRole = 'APJ / Owner',
+  onDeleteTransactions,
+  onSyncSupabase,
+  needsTableSetup = false,
+  isDemoSandbox = false,
+  inspectTransactionId = null,
+  onClearInspectTransaction
 }) => {
-  const isSuperAdmin = activeRole === 'Super Admin / APJ';
+  const { pharmacyProfile, apjProfile } = useFacilityProfiles();
+  const pharmacyFullAddress = formatPharmacyAddress(pharmacyProfile);
+  const isSuperAdmin = isOwnerAdminRole(activeRole);
   const [selectedTrxIds, setSelectedTrxIds] = useState<string[]>([]);
   const [confirmDeleteModalOpen, setConfirmDeleteModalOpen] = useState(false);
+  const [isDeletingTrx, setIsDeletingTrx] = useState(false);
+
+  // Supabase sync & inline notification states
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncToast, setSyncToast] = useState<{
+    type: 'success' | 'warning' | 'error';
+    message: string;
+  } | null>(null);
+  const [showSchemaModal, setShowSchemaModal] = useState(false);
+  const [copiedSchema, setCopiedSchema] = useState(false);
+  const [salesTableInput, setSalesTableInput] = useState(
+    () => getSupabaseConfig().salesTable || DEFAULT_SALES_TABLE
+  );
+  const [invoiceErrorMsg, setInvoiceErrorMsg] = useState<string | null>(null);
+  const [cancelErrorMsg, setCancelErrorMsg] = useState<string | null>(null);
+
+  const handleRunSupabaseSync = async () => {
+    if (!onSyncSupabase) return;
+    setIsSyncing(true);
+    setSyncToast(null);
+    try {
+      const res = await onSyncSupabase();
+      if (res.isDemo) {
+        setSyncToast({
+          type: 'warning',
+          message: 'Mode Demo / Sandbox aktif. Sinkronisasi ke Supabase produksi dinonaktifkan otomatis.'
+        });
+      } else if (res.success) {
+        setSyncToast({
+          type: 'success',
+          message: `Sinkronisasi 2-arah berhasil! Total ${res.count ?? transactions.length} riwayat & faktur penjualan tersinkron dengan Supabase.`
+        });
+      } else if (res.needsTableSetup) {
+        setSyncToast({
+          type: 'warning',
+          message: `Tabel "${salesTableInput || DEFAULT_SALES_TABLE}" belum dibuat di Supabase. Salin skrip SQL pada modal Skema SQL.`
+        });
+        setShowSchemaModal(true);
+      } else {
+        setSyncToast({
+          type: 'error',
+          message: res.error || 'Gagal menyinkronkan data riwayat & faktur penjualan ke Supabase.'
+        });
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleSaveTableName = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isDemoSandbox) return;
+    const cleaned = salesTableInput.trim() || DEFAULT_SALES_TABLE;
+    setSalesTableInput(cleaned);
+    setSupabaseConfig({ salesTable: cleaned });
+    handleRunSupabaseSync();
+  };
+
+  const handleCopySchema = () => {
+    navigator.clipboard
+      ?.writeText(SUPABASE_TRANSACTIONS_SQL_SCHEMA)
+      .then(() => {
+        setCopiedSchema(true);
+        setTimeout(() => setCopiedSchema(false), 2500);
+      })
+      .catch(() => {});
+  };
   // Helper to format Date object to local YYYY-MM-DD
   const toLocalYMD = (d: Date): string => {
     const year = d.getFullYear();
@@ -162,11 +274,34 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
   const [showNewInvoiceModal, setShowNewInvoiceModal] = useState(false);
   const [selectedTrxForPrint, setSelectedTrxForPrint] = useState<Transaction | null>(null);
   const [printDocType, setPrintDocType] = useState<'faktur' | 'kwitansi'>('faktur');
+  const [kwitansiKeterangan, setKwitansiKeterangan] = useState('');
+  const [keteranganSavedToast, setKeteranganSavedToast] = useState(false);
   const [trxToCancel, setTrxToCancel] = useState<Transaction | null>(null);
   const [cancelReason, setCancelReason] = useState('');
   const [trxToReturn, setTrxToReturn] = useState<Transaction | null>(null);
   const [returnReason, setReturnReason] = useState('Barang Rusak / Cacat Kemasan');
   const [returnNotes, setReturnNotes] = useState('');
+
+  useEffect(() => {
+    if (selectedTrxForPrint) {
+      setKwitansiKeterangan(getDefaultKwitansiKeterangan(selectedTrxForPrint));
+      setKeteranganSavedToast(false);
+    }
+  }, [selectedTrxForPrint?.id]);
+
+  useEffect(() => {
+    if (!inspectTransactionId) return;
+    setDateFilterPreset('all');
+    setStatusFilter('all');
+    setTypeFilter('all');
+    setSearchTerm(inspectTransactionId);
+    const target = transactions.find((t) => t.id === inspectTransactionId);
+    if (target) {
+      setPrintDocType(target.type === 'FAKTUR_PENJUALAN' ? 'faktur' : 'kwitansi');
+      setSelectedTrxForPrint(target);
+    }
+    onClearInspectTransaction?.();
+  }, [inspectTransactionId, transactions, onClearInspectTransaction]);
 
   // Helper to calculate dueDate automatically based on invoice date and payment term
   const calculateDueDateFromTerm = (baseDateStr: string, termStr: string): string => {
@@ -190,8 +325,13 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
     customerLicense: '',
     paymentMethod: 'Transfer Bank',
     usePpn: false,
+    shippingFee: 0,
     description: ''
   });
+
+  const [manualTotalDiscountMode, setManualTotalDiscountMode] = useState(false);
+  const [manualDiscountType, setManualDiscountType] = useState<'nominal' | 'percent'>('nominal');
+  const [manualDiscountValue, setManualDiscountValue] = useState<number>(0);
 
   const [invoiceItems, setInvoiceItems] = useState<NewInvoiceItem[]>([]);
   const [selectedMedId, setSelectedMedId] = useState('');
@@ -220,28 +360,32 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
 
   const filteredMitraOptions = useMemo(() => {
     const q = mitraSearchQuery.trim().toLowerCase();
-    if (!q) return mitraList;
-    return mitraList.filter(
-      (m) =>
-        m.name.toLowerCase().includes(q) ||
-        (m.category || '').toLowerCase().includes(q) ||
-        (m.address || '').toLowerCase().includes(q) ||
-        (m.phone || '').toLowerCase().includes(q) ||
-        (m.licenseNo || '').toLowerCase().includes(q)
-    );
+    const matched = !q
+      ? mitraList
+      : mitraList.filter(
+          (m) =>
+            m.name.toLowerCase().includes(q) ||
+            (m.category || '').toLowerCase().includes(q) ||
+            (m.address || '').toLowerCase().includes(q) ||
+            (m.phone || '').toLowerCase().includes(q) ||
+            (m.licenseNo || '').toLowerCase().includes(q)
+        );
+    return matched.slice(0, 50);
   }, [mitraList, mitraSearchQuery]);
 
   const filteredMedicineOptions = useMemo(() => {
     const q = medSearchQuery.trim().toLowerCase();
-    if (!q) return medicines;
-    return medicines.filter(
-      (m) =>
-        m.name.toLowerCase().includes(q) ||
-        (m.kekuatan || '').toLowerCase().includes(q) ||
-        m.id.toLowerCase().includes(q) ||
-        (m.batchNo || '').toLowerCase().includes(q) ||
-        (m.category || '').toLowerCase().includes(q)
-    );
+    const matched = !q
+      ? medicines
+      : medicines.filter(
+          (m) =>
+            m.name.toLowerCase().includes(q) ||
+            (m.kekuatan || '').toLowerCase().includes(q) ||
+            m.id.toLowerCase().includes(q) ||
+            (m.batchNo || '').toLowerCase().includes(q) ||
+            (m.category || '').toLowerCase().includes(q)
+        );
+    return matched.slice(0, 50);
   }, [medicines, medSearchQuery]);
 
   // Filter Transactions logic
@@ -294,6 +438,20 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
     });
   }, [transactions, searchTerm, statusFilter, typeFilter, dateFilterPreset, startDate, endDate]);
 
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(25);
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchTerm, statusFilter, typeFilter, dateFilterPreset, startDate, endDate]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredTransactions.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const paginatedTransactions = useMemo(() => {
+    const start = (safePage - 1) * pageSize;
+    return filteredTransactions.slice(start, start + pageSize);
+  }, [filteredTransactions, safePage, pageSize]);
+
   // KPI Calculations
   const stats = useMemo(() => {
     let totalOmzet = 0;
@@ -318,7 +476,7 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
     return { totalOmzet, countSelesai, countBatal, countRetur, countFaktur };
   }, [filteredTransactions]);
 
-  // Selection & Bulk Delete Logic (Super Admin / APJ only)
+  // Selection & Bulk Delete Logic (APJ / Owner only)
   const allFilteredIds = useMemo(() => filteredTransactions.map((t) => t.id), [filteredTransactions]);
   const isAllSelected = allFilteredIds.length > 0 && allFilteredIds.every((id) => selectedTrxIds.includes(id));
 
@@ -337,13 +495,40 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
     );
   };
 
-  const handleConfirmDeleteSelected = () => {
-    if (selectedTrxIds.length === 0) return;
-    if (onDeleteTransactions) {
-      onDeleteTransactions(selectedTrxIds);
+  const handleConfirmDeleteSelected = async () => {
+    if (selectedTrxIds.length === 0 || isDeletingTrx) return;
+    const ids = [...selectedTrxIds];
+    setIsDeletingTrx(true);
+    try {
+      const res = onDeleteTransactions ? await onDeleteTransactions(ids) : undefined;
+      setSelectedTrxIds([]);
+      setConfirmDeleteModalOpen(false);
+      if (res && res.needsTableSetup) {
+        setSyncToast({
+          type: 'warning',
+          message:
+            res.error ||
+            'Data dihapus secara lokal, tetapi kebijakan DELETE Supabase belum aktif. Jalankan ulang Skema SQL.'
+        });
+      } else if (res && res.success === false && !res.isDemo) {
+        setSyncToast({
+          type: 'warning',
+          message:
+            res.error
+              ? `${ids.length} transaksi dihapus lokal. Sinkronisasi hapus Supabase tertunda (${res.error}) dan akan diulang otomatis.`
+              : `${ids.length} transaksi dihapus lokal. Sinkronisasi hapus ke Supabase akan diulang otomatis saat koneksi tersedia.`
+        });
+      } else {
+        setSyncToast({
+          type: 'success',
+          message: `${ids.length} transaksi penjualan berhasil dihapus secara permanen${
+            res?.isDemo ? ' (Mode Demo).' : ' dan disinkronkan dengan Supabase.'
+          }`
+        });
+      }
+    } finally {
+      setIsDeletingTrx(false);
     }
-    setSelectedTrxIds([]);
-    setConfirmDeleteModalOpen(false);
   };
 
   // Helper to get unit options from master Medicine record (Satuan Besar first, then Satuan Kecil)
@@ -373,8 +558,9 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
 
   // Handle Add Item to New Invoice
   const addMedicineObjectToInvoice = (med: Medicine) => {
+    setInvoiceErrorMsg(null);
     if (invoiceItems.some((it) => it.medicineId === med.id)) {
-      alert(`Obat "${med.name}" sudah ada di tabel faktur! Ubah jumlah Qty pada baris terkait.`);
+      setInvoiceErrorMsg(`Obat "${med.name}" sudah ada di tabel faktur! Ubah jumlah Qty pada baris terkait.`);
       return;
     }
 
@@ -394,8 +580,8 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
       medicineId: med.id,
       name: med.name,
       kekuatan: med.kekuatan || '-',
-      batchNo: med.batchNo || 'BATCH-' + Date.now().toString().slice(-4),
-      expDate: med.expDate || '2027-12-31',
+      batchNo: med.batchNo || '-',
+      expDate: med.expDate || '',
       unit: defaultUnit,
       unitOptions,
       availableStock: med.stock,
@@ -482,6 +668,7 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
   };
 
   const handleUpdateItemDiscount = (idx: number, discount: number) => {
+    setManualTotalDiscountMode(false);
     setInvoiceItems((prev) =>
       prev.map((item, i) => {
         if (i !== idx) return item;
@@ -500,6 +687,7 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
   };
 
   const handleUpdateItemDiscountType = (idx: number, newType: 'percent' | 'nominal') => {
+    setManualTotalDiscountMode(false);
     setInvoiceItems((prev) =>
       prev.map((item, i) => {
         if (i !== idx) return item;
@@ -519,27 +707,34 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
 
   // Invoice calculations
   const invoiceSubtotalGross = invoiceItems.reduce((acc, it) => acc + it.price * it.qty, 0);
-  const invoiceTotalDiscount = invoiceItems.reduce(
+  const computedItemDiscountsTotal = invoiceItems.reduce(
     (acc, it) => acc + computeItemDiscountNominal(it.price, it.qty, it.discount, it.discountType),
     0
   );
-  const invoiceDpp = invoiceSubtotalGross - invoiceTotalDiscount;
+  const invoiceTotalDiscount = manualTotalDiscountMode
+    ? manualDiscountType === 'percent'
+      ? Math.round((invoiceSubtotalGross * Math.max(0, Math.min(100, manualDiscountValue))) / 100)
+      : Math.max(0, Math.min(invoiceSubtotalGross, manualDiscountValue))
+    : computedItemDiscountsTotal;
+  const invoiceDpp = Math.max(0, invoiceSubtotalGross - invoiceTotalDiscount);
   const invoicePpn = invoiceForm.usePpn ? Math.round(invoiceDpp * 0.11) : 0;
-  const invoiceGrandTotal = invoiceDpp + invoicePpn;
+  const invoiceShippingFee = Math.max(0, Number(invoiceForm.shippingFee) || 0);
+  const invoiceGrandTotal = invoiceDpp + invoicePpn + invoiceShippingFee;
   const invoiceTotalHpp = invoiceItems.reduce((acc, it) => acc + it.hpp * it.qty, 0);
 
   // Submit New Invoice
   const handleSaveInvoice = (e: React.FormEvent) => {
     e.preventDefault();
+    setInvoiceErrorMsg(null);
     if (invoiceItems.length === 0) {
-      alert('Daftar obat dalam faktur tidak boleh kosong!');
+      setInvoiceErrorMsg('Daftar obat dalam faktur tidak boleh kosong!');
       return;
     }
 
     // Check stock
     for (const item of invoiceItems) {
       if (item.availableStock < item.qty) {
-        alert(`Stok obat "${item.name}" tidak mencukupi (Tersedia: ${item.availableStock}, Diminta: ${item.qty})!`);
+        setInvoiceErrorMsg(`Stok obat "${item.name}" tidak mencukupi (Tersedia: ${item.availableStock}, Diminta: ${item.qty})!`);
         return;
       }
     }
@@ -579,12 +774,13 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
       status: 'Selesai',
       subtotal: invoiceDpp,
       discount: invoiceTotalDiscount,
+      shippingFee: invoiceShippingFee,
       chargeCC: 0,
       total: invoiceGrandTotal,
       payAmount: invoiceGrandTotal,
       change: 0,
       hppTotal: invoiceTotalHpp,
-      profit: invoiceGrandTotal - invoicePpn - invoiceTotalHpp,
+      profit: invoiceDpp - invoiceTotalHpp,
       paymentMethod: resolvedPaymentMethod,
       description: invoiceForm.description || `Faktur Penjualan B2B/Mitra: ${resolvedCustomerName}`,
       items: cartItems,
@@ -605,7 +801,16 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
       balance: Math.max(0, it.availableStock - it.qty),
       ket: `Penjualan Faktur PBF/Mitra: ${resolvedCustomerName}`,
       petugas: userName,
-      branchId: currentBranch.id
+      branchId: currentBranch.id,
+      batchNo: it.batchNo || '-',
+      expDate: it.expDate || '',
+      batchDetails: [
+        {
+          batchNo: it.batchNo || '-',
+          expDate: it.expDate || '',
+          qty: it.qty
+        }
+      ]
     }));
 
     onAddTransaction(newTrx, mutations);
@@ -625,8 +830,12 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
       customerLicense: '',
       paymentMethod: 'Transfer Bank',
       usePpn: false,
+      shippingFee: 0,
       description: ''
     });
+    setManualTotalDiscountMode(false);
+    setManualDiscountType('nominal');
+    setManualDiscountValue(0);
     setInvoiceItems([]);
     setMitraSearchQuery('');
     setMedSearchQuery('');
@@ -636,9 +845,10 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
   const handleConfirmCancel = () => {
     if (!trxToCancel) return;
     if (!cancelReason.trim()) {
-      alert('Harap isi alasan pembatalan!');
+      setCancelErrorMsg('Harap isi alasan pembatalan terlebih dahulu!');
       return;
     }
+    setCancelErrorMsg(null);
 
     const updated: Transaction = {
       ...trxToCancel,
@@ -652,6 +862,10 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
 
     setTrxToCancel(null);
     setCancelReason('');
+    setSyncToast({
+      type: 'success',
+      message: `Transaksi #${updated.id} dibatalkan, stok dikembalikan & disinkronkan ke Supabase.`
+    });
   };
 
   // Confirm Return Transaction
@@ -675,6 +889,19 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
     setReturnNotes('');
   };
 
+  const handleSaveKwitansiKeterangan = () => {
+    if (!selectedTrxForPrint) return;
+    const trimmed = kwitansiKeterangan.trim();
+    const updatedTrx: Transaction = {
+      ...selectedTrxForPrint,
+      description: trimmed
+    };
+    onUpdateTransaction(updatedTrx);
+    setSelectedTrxForPrint(updatedTrx);
+    setKeteranganSavedToast(true);
+    setTimeout(() => setKeteranganSavedToast(false), 2500);
+  };
+
   // Execute Print with fallback and bypass iframe sandbox
   const handlePrintDocument = (docMode?: 'faktur-penjualan' | 'kwitansi-penjualan') => {
     if (!selectedTrxForPrint) return;
@@ -685,42 +912,154 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
     if (docMode === 'kwitansi-penjualan') setPrintDocType('kwitansi');
     if (docMode === 'faktur-penjualan') setPrintDocType('faktur');
 
+    const trimmedKeterangan = kwitansiKeterangan.trim();
+    const trxForPrint: Transaction =
+      trimmedKeterangan !== (selectedTrxForPrint.description || '').trim()
+        ? { ...selectedTrxForPrint, description: trimmedKeterangan }
+        : selectedTrxForPrint;
+
+    if (trxForPrint !== selectedTrxForPrint) {
+      onUpdateTransaction(trxForPrint);
+      setSelectedTrxForPrint(trxForPrint);
+    }
+
     // Save active transaction into localStorage for standalone print tab
     try {
-      localStorage.setItem('latisha_active_print_trx', JSON.stringify(selectedTrxForPrint));
+      demoSetItem('latisha_active_print_trx', JSON.stringify(trxForPrint));
     } catch (e) {
       console.warn('Storage save failed:', e);
     }
 
-    openPrintWindow(targetMode, { trxId: selectedTrxForPrint.id, petugas: userName });
+    openPrintWindow(targetMode, {
+      trxId: trxForPrint.id,
+      petugas: userName,
+      keterangan: trimmedKeterangan
+    });
   };
 
   return (
     <div className="space-y-6">
       {/* Top Header Card */}
-      <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="bg-white rounded-2xl p-4 sm:p-6 border border-slate-200 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
               <FileText className="w-5 h-5" />
             </span>
-            <h1 className="text-xl font-black text-slate-800 tracking-tight">
-              Riwayat & Faktur Penjualan
+            <h1 className="text-lg sm:text-xl font-black text-slate-800 tracking-tight">
+              Riwayat &amp; Faktur Penjualan
             </h1>
+            {isDemoSandbox ? (
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-amber-100 text-amber-800 text-[10px] font-bold">
+                <Database className="w-3 h-3" />
+                Mode Demo Sandbox
+              </span>
+            ) : needsTableSetup ? (
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-rose-100 text-rose-800 text-[10px] font-bold">
+                <AlertCircle className="w-3 h-3" />
+                Tabel Supabase Perlu Setup
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800 text-[10px] font-bold">
+                <CheckCircle2 className="w-3 h-3" />
+                Supabase Live: {salesTableInput}
+              </span>
+            )}
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            Monitoring rekapitulasi transaksi kasir POS, penerbitan Faktur Penjualan resmi standar PBF/Apotek, pembatalan, dan retur penjualan.
+            Monitoring rekapitulasi transaksi kasir POS, penerbitan Faktur Penjualan resmi standar PBF/Apotek, pembatalan, retur penjualan &amp; sinkronisasi 2-arah ke Supabase.
           </p>
         </div>
 
-        <button
-          onClick={() => setShowNewInvoiceModal(true)}
-          className="flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-xs shadow-md transition-all active:scale-95 shrink-0 cursor-pointer"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Faktur Penjualan</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {onSyncSupabase && (
+            <button
+              type="button"
+              onClick={handleRunSupabaseSync}
+              disabled={isSyncing}
+              className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white rounded-xl font-bold text-xs shadow-xs transition cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+              <span>{isSyncing ? 'Menyinkronkan...' : 'Sinkronkan Supabase'}</span>
+            </button>
+          )}
+
+          {isSuperAdmin && (
+            <button
+              type="button"
+              onClick={() => setShowSchemaModal(true)}
+              className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs transition cursor-pointer"
+            >
+              <Code className="w-3.5 h-3.5" />
+              <span>Skema SQL</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => {
+              setInvoiceErrorMsg(null);
+              setShowNewInvoiceModal(true);
+            }}
+            className="flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-xs shadow-md transition-all active:scale-95 cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Faktur Penjualan</span>
+          </button>
+        </div>
       </div>
+
+      {/* Warning banner when Supabase table needs setup (APJ / Owner Only) */}
+      {isSuperAdmin && needsTableSetup && !isDemoSandbox && (
+        <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-950">
+          <div className="flex items-start gap-2.5">
+            <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold">Tabel Supabase &ldquo;{salesTableInput}&rdquo; belum dibuat:</p>
+              <p className="text-[11px] text-amber-800 mt-0.5">
+                Salin dan jalankan skrip SQL di Dashboard Supabase agar seluruh transaksi POS &amp; Faktur Penjualan tersinkronisasi 2-arah tanpa error 404.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowSchemaModal(true)}
+            className="px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold text-xs shrink-0 cursor-pointer"
+          >
+            Buka Skema SQL Setup
+          </button>
+        </div>
+      )}
+
+      {/* Dismissible Inline Toast */}
+      {syncToast && (
+        <div
+          className={`p-3 rounded-2xl border text-xs font-semibold flex items-center justify-between gap-3 ${
+            syncToast.type === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+              : syncToast.type === 'warning'
+              ? 'bg-amber-50 border-amber-200 text-amber-900'
+              : 'bg-rose-50 border-rose-200 text-rose-900'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {syncToast.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : (
+              <AlertCircle className="w-4 h-4 shrink-0" />
+            )}
+            <span>{syncToast.message}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSyncToast(null)}
+            className="p-1 rounded-lg hover:bg-black/5 shrink-0 cursor-pointer"
+            aria-label="Tutup notifikasi"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* KPI Stats Grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -953,7 +1292,7 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filteredTransactions.length === 0 ? (
+              {paginatedTransactions.length === 0 ? (
                 <tr>
                   <td colSpan={isSuperAdmin ? 9 : 8} className="p-8 text-center text-slate-400">
                     <Receipt className="w-8 h-8 mx-auto mb-2 opacity-40 text-slate-400" />
@@ -962,7 +1301,7 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                   </td>
                 </tr>
               ) : (
-                filteredTransactions.map((t) => {
+                paginatedTransactions.map((t) => {
                   const status = t.status || 'Selesai';
                   const isFaktur = t.type === 'FAKTUR_PENJUALAN';
 
@@ -1034,14 +1373,27 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                       <td className="p-3 max-w-[220px]">
                         <div className="space-y-0.5">
                           {t.items.slice(0, 2).map((it, idx) => (
-                            <div key={idx} className="text-[11px] text-slate-700 truncate">
-                              • <span className="font-semibold">{it.name}</span>{' '}
-                              <span className="text-slate-400">({it.qty} {it.unit})</span>
+                            <div key={idx} className="text-[11px] text-slate-700">
+                              <div className="truncate">
+                                • <span className="font-semibold">{it.name}</span>{' '}
+                                <span className="text-slate-400">({it.qty} {it.unit})</span>
+                              </div>
+                              {it.nama_petugas && (
+                                <div className="text-[9px] text-indigo-700 font-semibold truncate pl-2">
+                                  Petugas: {it.nama_petugas}
+                                  {it.total_fee_item && it.total_fee_item > 0
+                                    ? ` · Fee Rp ${it.total_fee_item.toLocaleString('id-ID')}`
+                                    : ''}
+                                  {isJasaCartItem(it) && (it.total_fee_item || 0) > 0
+                                    ? ` · Faskes Rp ${calculateFacilityShareForCartItem(it).facilityShare.toLocaleString('id-ID')}`
+                                    : ''}
+                                </div>
+                              )}
                             </div>
                           ))}
                           {t.items.length > 2 && (
                             <div className="text-[10px] text-indigo-600 font-bold">
-                              +{t.items.length - 2} item obat lainnya...
+                              +{t.items.length - 2} item lainnya...
                             </div>
                           )}
                         </div>
@@ -1144,6 +1496,18 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
             </tbody>
           </table>
         </div>
+        <PaginationControls
+          currentPage={safePage}
+          totalPages={totalPages}
+          totalCount={filteredTransactions.length}
+          pageSize={pageSize}
+          onPageChange={setPage}
+          onPageSizeChange={(sz) => {
+            setPageSize(sz);
+            setPage(1);
+          }}
+          itemLabel="transaksi"
+        />
       </div>
 
       {/* MODAL 1: + Faktur Penjualan (PBF / Mitra) */}
@@ -1166,7 +1530,22 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleSaveInvoice} className="p-6 space-y-6 text-xs max-h-[82vh] overflow-y-auto custom-scrollbar">
+            <form onSubmit={handleSaveInvoice} className="p-4 sm:p-6 space-y-6 text-xs max-h-[82vh] overflow-y-auto custom-scrollbar">
+              {invoiceErrorMsg && (
+                <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 font-semibold flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                    <span>{invoiceErrorMsg}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setInvoiceErrorMsg(null)}
+                    className="p-1 hover:bg-rose-100 rounded-lg cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
               {/* Header Info Grid */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200">
                 <div>
@@ -1494,7 +1873,7 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                       <tr>
                         <th className="p-2.5 text-center w-10">No</th>
                         <th className="p-2.5 min-w-[190px]">Nama Obat / Sediaan</th>
-                        <th className="p-2.5 whitespace-nowrap">Kekuatan</th>
+                        <th className="p-2.5 whitespace-nowrap">Zat Aktif &amp; Kekuatan</th>
                         <th className="p-2.5 whitespace-nowrap">No. Batch & ED</th>
                         <th className="p-2.5 text-center whitespace-nowrap">Qty</th>
                         <th className="p-2.5 whitespace-nowrap min-w-[115px]">Satuan</th>
@@ -1660,9 +2039,77 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                     <span>Subtotal Bruto:</span>
                     <span>Rp {invoiceSubtotalGross.toLocaleString('id-ID')}</span>
                   </div>
-                  <div className="flex justify-between text-slate-600">
-                    <span>Total Diskon Item:</span>
-                    <span className="text-rose-600 font-bold">- Rp {invoiceTotalDiscount.toLocaleString('id-ID')}</span>
+                  <div className="flex items-center justify-between gap-2 text-slate-600">
+                    <div className="flex flex-col min-w-0">
+                      <span>Total Diskon Item:</span>
+                      {manualTotalDiscountMode && manualDiscountType === 'percent' && invoiceSubtotalGross > 0 && (
+                        <span className="text-[10px] font-bold text-rose-600">
+                          (- Rp {invoiceTotalDiscount.toLocaleString('id-ID')})
+                        </span>
+                      )}
+                      {manualTotalDiscountMode && computedItemDiscountsTotal > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setManualTotalDiscountMode(false);
+                            setManualDiscountType('nominal');
+                            setManualDiscountValue(0);
+                          }}
+                          className="text-[9px] text-indigo-600 hover:underline text-left font-bold cursor-pointer"
+                        >
+                          Reset ke diskon item
+                        </button>
+                      )}
+                    </div>
+                    <div className="inline-flex items-center border border-slate-300 rounded-lg overflow-hidden bg-white shrink-0">
+                      <select
+                        value={manualDiscountType}
+                        onChange={(e) => {
+                          const nextType = e.target.value as 'nominal' | 'percent';
+                          setManualDiscountType(nextType);
+                          setManualTotalDiscountMode(true);
+                          setManualDiscountValue(0);
+                        }}
+                        className="px-1.5 py-1 bg-slate-100 text-[10px] font-black text-slate-700 border-r border-slate-300 focus:outline-none cursor-pointer"
+                        title="Pilih jenis diskon manual (Rp atau %)"
+                      >
+                        <option value="nominal">Rp</option>
+                        <option value="percent">%</option>
+                      </select>
+                      {manualDiscountType === 'nominal' ? (
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          value={
+                            (manualTotalDiscountMode ? manualDiscountValue : computedItemDiscountsTotal) > 0
+                              ? Math.round(manualTotalDiscountMode ? manualDiscountValue : computedItemDiscountsTotal).toLocaleString('id-ID')
+                              : ''
+                          }
+                          placeholder="0"
+                          onChange={(e) => {
+                            const rawVal = parseInt(e.target.value.replace(/\D/g, ''), 10) || 0;
+                            setManualTotalDiscountMode(true);
+                            setManualDiscountValue(Math.max(0, Math.min(invoiceSubtotalGross, rawVal)));
+                          }}
+                          className="w-24 px-2 py-1 text-right font-mono font-bold text-xs text-rose-600 focus:outline-none"
+                        />
+                      ) : (
+                        <input
+                          type="number"
+                          min={0}
+                          max={100}
+                          step="0.1"
+                          value={manualTotalDiscountMode ? (manualDiscountValue || '') : ''}
+                          placeholder="0"
+                          onChange={(e) => {
+                            const rawVal = parseFloat(e.target.value);
+                            setManualTotalDiscountMode(true);
+                            setManualDiscountValue(Number.isFinite(rawVal) ? Math.max(0, Math.min(100, rawVal)) : 0);
+                          }}
+                          className="w-20 px-2 py-1 text-right font-mono font-bold text-xs text-rose-600 focus:outline-none"
+                        />
+                      )}
+                    </div>
                   </div>
                   <div className="flex justify-between text-slate-700 font-bold border-t border-slate-200 pt-1">
                     <span>Dasar Pengenaan Pajak (DPP):</span>
@@ -1671,6 +2118,25 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                   <div className="flex justify-between text-slate-600">
                     <span>PPN 11%:</span>
                     <span>{invoiceForm.usePpn ? `Rp ${invoicePpn.toLocaleString('id-ID')}` : 'Rp 0 (Non-PPN)'}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-slate-600">
+                    <span>Est. Ongkir:</span>
+                    <div className="inline-flex items-center border border-slate-300 rounded-lg overflow-hidden bg-white shrink-0">
+                      <span className="px-2 py-1 bg-slate-100 text-[10px] font-black text-slate-700 border-r border-slate-300">
+                        Rp
+                      </span>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={invoiceShippingFee > 0 ? Math.round(invoiceShippingFee).toLocaleString('id-ID') : ''}
+                        placeholder="0"
+                        onChange={(e) => {
+                          const rawVal = parseInt(e.target.value.replace(/\D/g, ''), 10) || 0;
+                          setInvoiceForm((prev) => ({ ...prev, shippingFee: rawVal }));
+                        }}
+                        className="w-24 px-2 py-1 text-right font-mono font-bold text-xs text-slate-900 focus:outline-none"
+                      />
+                    </div>
                   </div>
                   <div className="flex justify-between text-slate-900 font-black text-sm border-t border-slate-300 pt-2">
                     <span>Total Netto (Faktur):</span>
@@ -1778,12 +2244,11 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                   className="bg-white p-8 rounded-lg shadow-sm border-2 border-slate-800 w-full max-w-2xl text-slate-900 text-xs leading-relaxed"
                 >
                   {(() => {
-                    const pharmacyProfile = getSavedPharmacyProfile();
-                    const apjProfile = getSavedAPJProfile();
                     const resolvedCust =
                       !selectedTrxForPrint.customerName || selectedTrxForPrint.customerName === 'Pelanggan Umum'
                         ? 'Reguler'
                         : selectedTrxForPrint.customerName;
+                    const docSummary = summarizeTransactionForDocument(selectedTrxForPrint);
                     return (
                       <>
                         {/* KOP KWITANSI */}
@@ -1803,14 +2268,15 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                                 {pharmacyProfile.name}
                               </h2>
                               <p className="text-[11px] text-slate-700 font-medium">
-                                {pharmacyProfile.address}, {pharmacyProfile.city}
+                                {pharmacyFullAddress}
                               </p>
                               <p className="text-[11px] text-slate-600">
-                                Telp / WhatsApp: {pharmacyProfile.phone} | Email: {pharmacyProfile.email}
+                                Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
                               </p>
-                              <div className="text-[10px] text-slate-600 font-medium mt-0.5">
-                                <span>SIA: <strong>{pharmacyProfile.sia}</strong></span> |{' '}
-                                <span>APJ: <strong>{apjProfile.name}</strong></span>
+                              <div className="text-[10px] text-slate-600 font-mono font-medium mt-0.5 flex flex-wrap gap-x-2">
+                                {pharmacyProfile.sia && <span>SIA: <strong>{pharmacyProfile.sia}</strong></span>}
+                                {pharmacyProfile.nib && <span>· NIB: <strong>{pharmacyProfile.nib}</strong></span>}
+                                {pharmacyProfile.npwp && <span>· NPWP: <strong>{pharmacyProfile.npwp}</strong></span>}
                               </div>
                             </div>
                           </div>
@@ -1841,6 +2307,67 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                             </div>
                           </div>
 
+                          {docSummary.totalJasaPelayanan > 0 && (
+                            <div className="grid grid-cols-12 items-start border-b border-dashed border-slate-300 pb-2.5">
+                              <div className="col-span-4 font-bold text-slate-600 uppercase tracking-wider">
+                                Jasa Pelayanan
+                              </div>
+                              <div className="col-span-8">
+                                <div className="font-mono font-black text-slate-900 text-sm">
+                                  : Rp {docSummary.totalJasaPelayanan.toLocaleString('id-ID')}
+                                </div>
+                                {docSummary.jasaItems.length > 0 && (
+                                  <div className="text-[10px] text-slate-600 mt-0.5 space-y-0.5 pl-2">
+                                    {docSummary.jasaItems.map((ji, jIdx) => (
+                                      <div key={jIdx}>
+                                        • {ji.name} ({ji.qty} {ji.unit || 'Layanan'} · Rp {ji.subtotal.toLocaleString('id-ID')})
+                                        {ji.nama_petugas ? ` — Petugas: ${ji.nama_petugas}` : ''}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="grid grid-cols-12 items-start border-b border-dashed border-slate-300 pb-3">
+                            <div className="col-span-4 font-bold text-slate-600 uppercase tracking-wider pt-1">
+                              Keterangan
+                            </div>
+                            <div className="col-span-8">
+                              <div className="no-print space-y-1.5">
+                                <div className="flex items-start gap-1.5">
+                                  <span className="font-bold text-slate-900 pt-1.5">:</span>
+                                  <textarea
+                                    rows={2}
+                                    value={kwitansiKeterangan}
+                                    onChange={(e) => {
+                                      setKwitansiKeterangan(e.target.value);
+                                      if (keteranganSavedToast) setKeteranganSavedToast(false);
+                                    }}
+                                    placeholder="Ketik keterangan pembayaran sesuai kebutuhan..."
+                                    className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-medium text-slate-900 focus:bg-white focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none resize-y"
+                                  />
+                                </div>
+                                <div className="flex items-center justify-between gap-2 pl-3">
+                                  <span className="text-[10px] text-slate-400 italic">
+                                    Keterangan dinamis dapat diedit sebelum mencetak kwitansi.
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={handleSaveKwitansiKeterangan}
+                                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-[10px] font-bold transition shrink-0 cursor-pointer"
+                                  >
+                                    {keteranganSavedToast ? 'Tersimpan ✓' : 'Simpan Keterangan'}
+                                  </button>
+                                </div>
+                              </div>
+                              <div className="hidden print:block font-semibold text-slate-900 whitespace-pre-wrap leading-relaxed">
+                                : {kwitansiKeterangan.trim() || '-'}
+                              </div>
+                            </div>
+                          </div>
+
                           <div className="grid grid-cols-12 items-center border-b border-dashed border-slate-300 pb-2.5">
                             <div className="col-span-4 font-bold text-slate-600 uppercase tracking-wider">
                               Nilai Tagihan
@@ -1863,18 +2390,21 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                         </div>
 
                         {/* TANGGAL & TANDA TANGAN PETUGAS SESUAI AKUN */}
-                        <div className="mt-8 pt-4 flex justify-end">
-                          <div className="w-64 text-center space-y-1">
+                        <div className="mt-10 pt-4 flex justify-end">
+                          <div className="w-72 text-center">
                             <p className="text-[11px] font-semibold text-slate-700">
                               {pharmacyProfile.city || 'Tangerang'}, {selectedTrxForPrint.date}
                             </p>
-                            <p className="text-[11px] font-bold text-slate-800">
+                            <p className="text-[11px] font-bold text-slate-800 mt-1">
                               Petugas Penerima,
                             </p>
-                            <div className="h-20 flex items-end justify-center">
+                            <div
+                              className="min-h-[130px] pt-24 pb-2 flex items-end justify-center"
+                              style={{ minHeight: '130px', paddingTop: '96px' }}
+                            >
                               <span className="text-[9px] text-slate-400 italic">(Tanda Tangan & Stempel)</span>
                             </div>
-                            <p className="font-black text-slate-900 border-t border-slate-800 pt-1 text-xs">
+                            <p className="font-black text-slate-900 border-t border-slate-800 pt-1.5 text-xs">
                               {userName || selectedTrxForPrint.kasir}
                             </p>
                           </div>
@@ -1889,196 +2419,283 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                   className="bg-white p-8 rounded-lg shadow-sm border border-slate-200 w-full max-w-3xl text-slate-900 text-xs leading-relaxed"
                   style={{ minHeight: '800px' }}
                 >
-                  {/* KOP APOTEK RESMI TERINTEGRASI PROFIL APOTEK & APJ */}
                   {(() => {
-                    const pharmacyProfile = getSavedPharmacyProfile();
-                    const apjProfile = getSavedAPJProfile();
+                    const docSummary = summarizeTransactionForDocument(selectedTrxForPrint);
                     return (
-                      <div className="border-b-2 border-slate-900 pb-4 mb-4 flex justify-between items-center gap-4">
-                        <div className="flex items-center gap-3.5">
-                          {pharmacyProfile.logoUrl && (
-                            <div className="w-14 h-14 shrink-0 flex items-center justify-center">
-                              <img
-                                src={pharmacyProfile.logoUrl}
-                                alt="Logo Faskes"
-                                className="w-14 h-14 object-contain"
-                              />
+                      <>
+                        {/* KOP APOTEK RESMI TERINTEGRASI PROFIL APOTEK */}
+                        <div className="border-b-2 border-slate-900 pb-4 mb-4 flex justify-between items-center gap-4">
+                          <div className="flex items-center gap-3.5">
+                            {pharmacyProfile.logoUrl && (
+                              <div className="w-14 h-14 shrink-0 flex items-center justify-center">
+                                <img
+                                  src={pharmacyProfile.logoUrl}
+                                  alt="Logo Faskes"
+                                  className="w-14 h-14 object-contain"
+                                />
+                              </div>
+                            )}
+                            <div>
+                              <h2 className="text-lg font-black tracking-wider text-slate-900 uppercase">
+                                {pharmacyProfile.name}
+                              </h2>
+                              <p className="text-[11px] text-slate-700 font-medium">
+                                {pharmacyFullAddress}
+                              </p>
+                              <p className="text-[11px] text-slate-600">
+                                Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
+                              </p>
+                              <div className="text-[10px] text-slate-600 font-mono font-medium mt-1 flex flex-wrap gap-x-2">
+                                {pharmacyProfile.sia && <span>SIA: <strong>{pharmacyProfile.sia}</strong></span>}
+                                {pharmacyProfile.nib && <span>· NIB: <strong>{pharmacyProfile.nib}</strong></span>}
+                                {pharmacyProfile.npwp && <span>· NPWP: <strong>{pharmacyProfile.npwp}</strong></span>}
+                              </div>
                             </div>
-                          )}
+                          </div>
+                          <div className="text-right shrink-0">
+                            <div className="inline-block px-3 py-1 bg-slate-900 text-white font-mono font-black text-xs rounded">
+                              FAKTUR PENJUALAN
+                            </div>
+                            <div className="text-[10px] font-mono text-slate-600 mt-1">
+                              No: <strong>{selectedTrxForPrint.id}</strong>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Info Header: Pemesan & Transaksi */}
+                        <div className="grid grid-cols-2 gap-4 mb-6 bg-slate-50 p-3 rounded-lg border border-slate-200 text-[11px]">
                           <div>
-                            <h2 className="text-lg font-black tracking-wider text-slate-900 uppercase">
-                              {pharmacyProfile.name}
-                            </h2>
-                            <p className="text-[11px] text-slate-700 font-medium">
-                              {pharmacyProfile.address}, {pharmacyProfile.city}
+                            <p className="text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1">
+                              KEPADA YTH. (PEMESAN / FASKES):
                             </p>
-                            <p className="text-[11px] text-slate-600">
-                              Telp / WhatsApp: {pharmacyProfile.phone} | Email: {pharmacyProfile.email}
+                            <p className="font-bold text-slate-900 text-sm">
+                              {!selectedTrxForPrint.customerName || selectedTrxForPrint.customerName === 'Pelanggan Umum'
+                                ? 'Reguler'
+                                : selectedTrxForPrint.customerName}
                             </p>
-                            <div className="text-[10px] text-slate-600 font-medium mt-1">
-                              <span>SIA: <strong>{pharmacyProfile.sia}</strong></span> |{' '}
-                              <span>NPWP: <strong>{pharmacyProfile.npwp}</strong></span> |{' '}
-                              <span>APJ: <strong>{apjProfile.name}</strong> (SIPA: {apjProfile.sipa})</span>
+                            {selectedTrxForPrint.customerAddress && (
+                              <p className="text-slate-600 mt-0.5">{selectedTrxForPrint.customerAddress}</p>
+                            )}
+                            {selectedTrxForPrint.customerPhone && (
+                              <p className="text-slate-600">Telp: {selectedTrxForPrint.customerPhone}</p>
+                            )}
+                          </div>
+
+                          <div className="space-y-1 text-right">
+                            <div className="flex justify-between">
+                              <span className="text-slate-500">Tanggal Faktur:</span>
+                              <strong className="text-slate-800">{selectedTrxForPrint.date}</strong>
+                            </div>
+                            {selectedTrxForPrint.dueDate && (
+                              <div className="flex justify-between">
+                                <span className="text-slate-500">Jatuh Tempo:</span>
+                                <strong className="text-amber-700">{selectedTrxForPrint.dueDate}</strong>
+                              </div>
+                            )}
+                            <div className="flex justify-between">
+                              <span className="text-slate-500">Syarat Pembayaran:</span>
+                              <strong>{selectedTrxForPrint.term || 'Tunai / COD'}</strong>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-500">Petugas / Kasir:</span>
+                              <strong>{selectedTrxForPrint.kasir}</strong>
                             </div>
                           </div>
                         </div>
-                        <div className="text-right shrink-0">
-                          <div className="inline-block px-3 py-1 bg-slate-900 text-white font-mono font-black text-xs rounded">
-                            FAKTUR PENJUALAN
+
+                        {/* Tabel Rincian Obat */}
+                        <table className="w-full border-collapse border border-slate-300 text-[11px] mb-4">
+                          <thead>
+                            <tr className="bg-slate-100 text-slate-800 font-bold">
+                              <th className="border border-slate-300 p-2 text-center w-8">No</th>
+                              <th className="border border-slate-300 p-2 text-left">Nama Obat / Alat Kesehatan</th>
+                              <th className="border border-slate-300 p-2 text-left">Zat Aktif &amp; Kekuatan</th>
+                              <th className="border border-slate-300 p-2 text-left">No. Batch</th>
+                              <th className="border border-slate-300 p-2 text-center">Exp Date</th>
+                              <th className="border border-slate-300 p-2 text-center">Qty</th>
+                              <th className="border border-slate-300 p-2 text-center">Satuan</th>
+                              <th className="border border-slate-300 p-2 text-right">Harga</th>
+                              <th className="border border-slate-300 p-2 text-center">Diskon</th>
+                              <th className="border border-slate-300 p-2 text-right">Total (Rp)</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {docSummary.productItems.map((it, idx) => (
+                              <tr key={idx} className="hover:bg-slate-50">
+                                <td className="border border-slate-300 p-1.5 text-center">{idx + 1}</td>
+                                <td className="border border-slate-300 p-1.5 font-bold text-slate-800">{it.name}</td>
+                                <td className="border border-slate-300 p-1.5">{it.kekuatan || '-'}</td>
+                                <td className="border border-slate-300 p-1.5 font-mono">{it.batchNo || '-'}</td>
+                                <td className="border border-slate-300 p-1.5 text-center font-mono">{it.expDate || '-'}</td>
+                                <td className="border border-slate-300 p-1.5 text-center font-bold">{it.qty}</td>
+                                <td className="border border-slate-300 p-1.5 text-center">{it.unit}</td>
+                                <td className="border border-slate-300 p-1.5 text-right">{it.price.toLocaleString('id-ID')}</td>
+                                <td className="border border-slate-300 p-1.5 text-center">
+                                  {it.discount && it.discount > 100
+                                    ? `Rp ${it.discount.toLocaleString('id-ID')}`
+                                    : `${it.discount || 0}%`}
+                                </td>
+                                <td className="border border-slate-300 p-1.5 text-right font-bold">
+                                  {it.subtotal.toLocaleString('id-ID')}
+                                </td>
+                              </tr>
+                            ))}
+                            {docSummary.jasaItems.length > 0 ? (
+                              <>
+                                {docSummary.jasaItems.map((it, jIdx) => (
+                                  <tr key={`jasa-${jIdx}`} className="hover:bg-slate-50">
+                                    <td className="border border-slate-300 p-1.5 text-center">
+                                      {docSummary.productItems.length + jIdx + 1}
+                                    </td>
+                                    <td className="border border-slate-300 p-1.5 font-bold text-slate-800">
+                                      <div>{it.name}</div>
+                                      {it.nama_petugas && (
+                                        <div className="text-[10px] font-medium text-indigo-700">
+                                          Petugas: {it.nama_petugas}
+                                          {it.role_petugas ? ` (${it.role_petugas})` : ''}
+                                        </div>
+                                      )}
+                                    </td>
+                                    <td className="border border-slate-300 p-1.5">Pelayanan Medis &amp; Kefarmasian</td>
+                                    <td className="border border-slate-300 p-1.5 font-mono">-</td>
+                                    <td className="border border-slate-300 p-1.5 text-center font-mono">-</td>
+                                    <td className="border border-slate-300 p-1.5 text-center font-bold">{it.qty || 1}</td>
+                                    <td className="border border-slate-300 p-1.5 text-center">{it.unit || 'Layanan'}</td>
+                                    <td className="border border-slate-300 p-1.5 text-right">
+                                      {it.price.toLocaleString('id-ID')}
+                                    </td>
+                                    <td className="border border-slate-300 p-1.5 text-center">
+                                      {it.discount && it.discount > 100
+                                        ? `Rp ${it.discount.toLocaleString('id-ID')}`
+                                        : `${it.discount || 0}%`}
+                                    </td>
+                                    <td className="border border-slate-300 p-1.5 text-right font-bold">
+                                      {it.subtotal.toLocaleString('id-ID')}
+                                    </td>
+                                  </tr>
+                                ))}
+                                {docSummary.serviceChargeAmount > 0 && (
+                                  <tr className="hover:bg-slate-50">
+                                    <td className="border border-slate-300 p-1.5 text-center">
+                                      {docSummary.productItems.length + docSummary.jasaItems.length + 1}
+                                    </td>
+                                    <td className="border border-slate-300 p-1.5 font-bold text-slate-800">
+                                      Biaya Layanan / Service Charge
+                                    </td>
+                                    <td className="border border-slate-300 p-1.5">Layanan Tambahan POS</td>
+                                    <td className="border border-slate-300 p-1.5 font-mono">-</td>
+                                    <td className="border border-slate-300 p-1.5 text-center font-mono">-</td>
+                                    <td className="border border-slate-300 p-1.5 text-center font-bold">1</td>
+                                    <td className="border border-slate-300 p-1.5 text-center">Layanan</td>
+                                    <td className="border border-slate-300 p-1.5 text-right">
+                                      {docSummary.serviceChargeAmount.toLocaleString('id-ID')}
+                                    </td>
+                                    <td className="border border-slate-300 p-1.5 text-center">0%</td>
+                                    <td className="border border-slate-300 p-1.5 text-right font-bold">
+                                      {docSummary.serviceChargeAmount.toLocaleString('id-ID')}
+                                    </td>
+                                  </tr>
+                                )}
+                              </>
+                            ) : (
+                              docSummary.totalJasaPelayanan > 0 && (
+                                <tr className="hover:bg-slate-50">
+                                  <td className="border border-slate-300 p-1.5 text-center">
+                                    {docSummary.productItems.length + 1}
+                                  </td>
+                                  <td className="border border-slate-300 p-1.5 font-bold text-slate-800">
+                                    Jasa Pelayanan
+                                  </td>
+                                  <td className="border border-slate-300 p-1.5">Pelayanan Medis &amp; Kefarmasian</td>
+                                  <td className="border border-slate-300 p-1.5 font-mono">-</td>
+                                  <td className="border border-slate-300 p-1.5 text-center font-mono">-</td>
+                                  <td className="border border-slate-300 p-1.5 text-center font-bold">1</td>
+                                  <td className="border border-slate-300 p-1.5 text-center">Layanan</td>
+                                  <td className="border border-slate-300 p-1.5 text-right">
+                                    {docSummary.totalJasaPelayanan.toLocaleString('id-ID')}
+                                  </td>
+                                  <td className="border border-slate-300 p-1.5 text-center">0%</td>
+                                  <td className="border border-slate-300 p-1.5 text-right font-bold">
+                                    {docSummary.totalJasaPelayanan.toLocaleString('id-ID')}
+                                  </td>
+                                </tr>
+                              )
+                            )}
+                          </tbody>
+                        </table>
+
+                        {/* Ringkasan Perhitungan */}
+                        <div className="flex justify-between items-start gap-6 mb-8 text-[11px]">
+                          <div className="flex-1 space-y-2">
+                            <div className="p-2.5 bg-slate-50 border border-slate-200 rounded">
+                              <p className="font-bold text-slate-700">Terbilang:</p>
+                              <p className="italic font-semibold text-slate-900 mt-0.5">
+                                # {terbilangRupiah(selectedTrxForPrint.total)} #
+                              </p>
+                            </div>
+
+                            <div className="text-[10px] text-slate-500 space-y-0.5">
+                              <p><strong>Ketentuan Faktur:</strong></p>
+                              <p>1. Barang yang sudah diterima dalam kondisi baik tidak dapat dikembalikan tanpa persetujuan.</p>
+                              <p>2. Pembayaran via transfer harap ke Rekening Resmi: <strong>SEABANK 9015-5031-5849 a/n Mardin, BRI 7704-0101-3765-531 a/n Mardin</strong>.</p>
+                            </div>
                           </div>
-                          <div className="text-[10px] font-mono text-slate-600 mt-1">
-                            No: <strong>{selectedTrxForPrint.id}</strong>
+
+                          <div className="w-64 space-y-1 text-slate-700 border border-slate-300 p-3 rounded bg-slate-50">
+                            {selectedTrxForPrint.discount ? (
+                              <div className="flex justify-between text-rose-700">
+                                <span>Total Diskon:</span>
+                                <span className="font-mono">- Rp {selectedTrxForPrint.discount.toLocaleString('id-ID')}</span>
+                              </div>
+                            ) : null}
+                            <div className="flex justify-between">
+                              <span>Dasar Pengenaan Pajak (DPP):</span>
+                              <span className="font-mono">Rp {(selectedTrxForPrint.dpp || (selectedTrxForPrint.total - (selectedTrxForPrint.ppn || 0) - (selectedTrxForPrint.shippingFee || 0))).toLocaleString('id-ID')}</span>
+                            </div>
+                            {selectedTrxForPrint.ppn ? (
+                              <div className="flex justify-between">
+                                <span>PPN 11%:</span>
+                                <span className="font-mono">Rp {selectedTrxForPrint.ppn.toLocaleString('id-ID')}</span>
+                              </div>
+                            ) : null}
+                            {selectedTrxForPrint.shippingFee ? (
+                              <div className="flex justify-between">
+                                <span>Est. Ongkir:</span>
+                                <span className="font-mono">Rp {selectedTrxForPrint.shippingFee.toLocaleString('id-ID')}</span>
+                              </div>
+                            ) : null}
+                            <div className="flex justify-between font-black text-slate-900 border-t border-slate-300 pt-1 text-xs">
+                              <span>TOTAL FAKTUR:</span>
+                              <span className="font-mono">Rp {selectedTrxForPrint.total.toLocaleString('id-ID')}</span>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    );
-                  })()}
 
-                  {/* Info Header: Pemesan & Transaksi */}
-                  <div className="grid grid-cols-2 gap-4 mb-6 bg-slate-50 p-3 rounded-lg border border-slate-200 text-[11px]">
-                    <div>
-                      <p className="text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1">
-                        KEPADA YTH. (PEMESAN / FASKES):
-                      </p>
-                      <p className="font-bold text-slate-900 text-sm">
-                        {!selectedTrxForPrint.customerName || selectedTrxForPrint.customerName === 'Pelanggan Umum'
-                          ? 'Reguler'
-                          : selectedTrxForPrint.customerName}
-                      </p>
-                      {selectedTrxForPrint.customerAddress && (
-                        <p className="text-slate-600 mt-0.5">{selectedTrxForPrint.customerAddress}</p>
-                      )}
-                      {selectedTrxForPrint.customerPhone && (
-                        <p className="text-slate-600">Telp: {selectedTrxForPrint.customerPhone}</p>
-                      )}
-                    </div>
+                        {/* 3 KOLOM TANDA TANGAN RESMI */}
+                        <div className="grid grid-cols-3 gap-4 text-center text-[10px] pt-4 border-t border-slate-300">
+                          <div>
+                            <p className="font-bold text-slate-700">Yang Menerima / Faskes Pemesan,</p>
+                            <div className="h-20 flex items-end justify-center">
+                              <p className="text-slate-400 italic text-[9px]">(Stempel & Tanda Tangan)</p>
+                            </div>
+                            <p className="font-bold text-slate-900 border-t border-slate-400 pt-1">
+                              {!selectedTrxForPrint.customerName || selectedTrxForPrint.customerName === 'Pelanggan Umum'
+                                ? 'Reguler'
+                                : selectedTrxForPrint.customerName}
+                            </p>
+                          </div>
 
-                    <div className="space-y-1 text-right">
-                      <div className="flex justify-between">
-                        <span className="text-slate-500">Tanggal Faktur:</span>
-                        <strong className="text-slate-800">{selectedTrxForPrint.date}</strong>
-                      </div>
-                      {selectedTrxForPrint.dueDate && (
-                        <div className="flex justify-between">
-                          <span className="text-slate-500">Jatuh Tempo:</span>
-                          <strong className="text-amber-700">{selectedTrxForPrint.dueDate}</strong>
-                        </div>
-                      )}
-                      <div className="flex justify-between">
-                        <span className="text-slate-500">Syarat Pembayaran:</span>
-                        <strong>{selectedTrxForPrint.term || 'Tunai / COD'}</strong>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-slate-500">Petugas / Kasir:</span>
-                        <strong>{selectedTrxForPrint.kasir}</strong>
-                      </div>
-                    </div>
-                  </div>
+                          <div>
+                            <p className="font-bold text-slate-700">Petugas Gudang / Kasir,</p>
+                            <div className="h-20 flex items-end justify-center">
+                              <p className="text-slate-400 italic text-[9px]">(Tanda Tangan)</p>
+                            </div>
+                            <p className="font-bold text-slate-900 border-t border-slate-400 pt-1">
+                              {selectedTrxForPrint.kasir || userName}
+                            </p>
+                          </div>
 
-                  {/* Tabel Rincian Obat */}
-                  <table className="w-full border-collapse border border-slate-300 text-[11px] mb-4">
-                    <thead>
-                      <tr className="bg-slate-100 text-slate-800 font-bold">
-                        <th className="border border-slate-300 p-2 text-center w-8">No</th>
-                        <th className="border border-slate-300 p-2 text-left">Nama Obat / Alat Kesehatan</th>
-                        <th className="border border-slate-300 p-2 text-left">Kekuatan</th>
-                        <th className="border border-slate-300 p-2 text-left">No. Batch</th>
-                        <th className="border border-slate-300 p-2 text-center">Exp Date</th>
-                        <th className="border border-slate-300 p-2 text-center">Qty</th>
-                        <th className="border border-slate-300 p-2 text-center">Satuan</th>
-                        <th className="border border-slate-300 p-2 text-right">Harga</th>
-                        <th className="border border-slate-300 p-2 text-center">Diskon</th>
-                        <th className="border border-slate-300 p-2 text-right">Total (Rp)</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {selectedTrxForPrint.items.map((it, idx) => (
-                        <tr key={idx} className="hover:bg-slate-50">
-                          <td className="border border-slate-300 p-1.5 text-center">{idx + 1}</td>
-                          <td className="border border-slate-300 p-1.5 font-bold text-slate-800">{it.name}</td>
-                          <td className="border border-slate-300 p-1.5">{it.kekuatan || '-'}</td>
-                          <td className="border border-slate-300 p-1.5 font-mono">{it.batchNo || '-'}</td>
-                          <td className="border border-slate-300 p-1.5 text-center font-mono">{it.expDate || '-'}</td>
-                          <td className="border border-slate-300 p-1.5 text-center font-bold">{it.qty}</td>
-                          <td className="border border-slate-300 p-1.5 text-center">{it.unit}</td>
-                          <td className="border border-slate-300 p-1.5 text-right">{it.price.toLocaleString('id-ID')}</td>
-                          <td className="border border-slate-300 p-1.5 text-center">
-                            {it.discount && it.discount > 100
-                              ? `Rp ${it.discount.toLocaleString('id-ID')}`
-                              : `${it.discount || 0}%`}
-                          </td>
-                          <td className="border border-slate-300 p-1.5 text-right font-bold">
-                            {it.subtotal.toLocaleString('id-ID')}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-
-                  {/* Ringkasan Perhitungan */}
-                  <div className="flex justify-between items-start gap-6 mb-8 text-[11px]">
-                    <div className="flex-1 space-y-2">
-                      <div className="p-2.5 bg-slate-50 border border-slate-200 rounded">
-                        <p className="font-bold text-slate-700">Terbilang:</p>
-                        <p className="italic font-semibold text-slate-900 mt-0.5">
-                          # {terbilangRupiah(selectedTrxForPrint.total)} #
-                        </p>
-                      </div>
-
-                      <div className="text-[10px] text-slate-500 space-y-0.5">
-                        <p><strong>Ketentuan Faktur:</strong></p>
-                        <p>1. Barang yang sudah diterima dalam kondisi baik tidak dapat dikembalikan tanpa persetujuan.</p>
-                        <p>2. Pembayaran via transfer harap ke Rekening Resmi: <strong>SEABANK 9015-5031-5849 a/n Mardin, BRI 7704-0101-3765-531 a/n Mardin</strong>.</p>
-                      </div>
-                    </div>
-
-                    <div className="w-64 space-y-1 text-slate-700 border border-slate-300 p-3 rounded bg-slate-50">
-                      <div className="flex justify-between">
-                        <span>Dasar Pengenaan Pajak (DPP):</span>
-                        <span className="font-mono">Rp {(selectedTrxForPrint.dpp || (selectedTrxForPrint.total - (selectedTrxForPrint.ppn || 0))).toLocaleString('id-ID')}</span>
-                      </div>
-                      {selectedTrxForPrint.ppn ? (
-                        <div className="flex justify-between">
-                          <span>PPN 11%:</span>
-                          <span className="font-mono">Rp {selectedTrxForPrint.ppn.toLocaleString('id-ID')}</span>
-                        </div>
-                      ) : null}
-                      <div className="flex justify-between font-black text-slate-900 border-t border-slate-300 pt-1 text-xs">
-                        <span>TOTAL FAKTUR:</span>
-                        <span className="font-mono">Rp {selectedTrxForPrint.total.toLocaleString('id-ID')}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 3 KOLOM TANDA TANGAN RESMI */}
-                  <div className="grid grid-cols-3 gap-4 text-center text-[10px] pt-4 border-t border-slate-300">
-                    <div>
-                      <p className="font-bold text-slate-700">Yang Menerima / Faskes Pemesan,</p>
-                      <div className="h-20 flex items-end justify-center">
-                        <p className="text-slate-400 italic text-[9px]">(Stempel & Tanda Tangan)</p>
-                      </div>
-                      <p className="font-bold text-slate-900 border-t border-slate-400 pt-1">
-                        {!selectedTrxForPrint.customerName || selectedTrxForPrint.customerName === 'Pelanggan Umum'
-                          ? 'Reguler'
-                          : selectedTrxForPrint.customerName}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="font-bold text-slate-700">Petugas Gudang / Kasir,</p>
-                      <div className="h-20 flex items-end justify-center">
-                        <p className="text-slate-400 italic text-[9px]">(Tanda Tangan)</p>
-                      </div>
-                      <p className="font-bold text-slate-900 border-t border-slate-400 pt-1">
-                        {selectedTrxForPrint.kasir || userName}
-                      </p>
-                    </div>
-
-                    <div>
-                      {(() => {
-                        const apjProfile = getSavedAPJProfile();
-                        return (
-                          <>
+                          <div>
                             <p className="font-bold text-slate-700">Apoteker Pengelola Apotek (APJ),</p>
                             <div className="h-20 flex items-end justify-center">
                               <p className="text-indigo-600 font-mono font-bold text-[9px]">Latisha Farma APJ Seal</p>
@@ -2088,11 +2705,11 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                             </p>
                             <p className="text-[9px] text-slate-600 font-mono">SIPA: {apjProfile.sipa}</p>
                             <p className="text-[9px] text-slate-500 font-mono">STRA: {apjProfile.stra}</p>
-                          </>
-                        );
-                      })()}
-                    </div>
-                  </div>
+                          </div>
+                        </div>
+                      </>
+                    );
+                  })()}
                 </div>
               )}
             </div>
@@ -2126,10 +2743,19 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                 rows={3}
                 required
                 value={cancelReason}
-                onChange={(e) => setCancelReason(e.target.value)}
+                onChange={(e) => {
+                  setCancelReason(e.target.value);
+                  if (cancelErrorMsg) setCancelErrorMsg(null);
+                }}
                 placeholder="Contoh: Salah input pesanan kasir, transaksi dibatalkan oleh pembeli..."
                 className="w-full p-2.5 border rounded-xl text-xs font-medium focus:ring-2 focus:ring-rose-500 focus:outline-none"
               />
+              {cancelErrorMsg && (
+                <p className="text-[11px] font-bold text-rose-600 mt-1 flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{cancelErrorMsg}</span>
+                </p>
+              )}
             </div>
 
             <div className="flex justify-end gap-2 pt-2">
@@ -2138,6 +2764,7 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
                 onClick={() => {
                   setTrxToCancel(null);
                   setCancelReason('');
+                  setCancelErrorMsg(null);
                 }}
                 className="px-4 py-2 border rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 transition"
               >
@@ -2248,18 +2875,92 @@ export const SalesHistoryView: React.FC<SalesHistoryViewProps> = ({
             <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
               <button
                 type="button"
+                disabled={isDeletingTrx}
                 onClick={() => setConfirmDeleteModalOpen(false)}
-                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition cursor-pointer"
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition cursor-pointer disabled:opacity-50"
               >
                 Batal
               </button>
               <button
                 type="button"
+                disabled={isDeletingTrx}
                 onClick={handleConfirmDeleteSelected}
-                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-extrabold rounded-xl text-xs shadow-md transition cursor-pointer"
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-extrabold rounded-xl text-xs shadow-md transition cursor-pointer disabled:opacity-50"
               >
-                Hapus {selectedTrxIds.length} Transaksi
+                {isDeletingTrx ? 'Menghapus...' : `Hapus ${selectedTrxIds.length} Transaksi`}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 5: Skema SQL Supabase Riwayat & Faktur Penjualan (APJ / Owner Only) */}
+      {isSuperAdmin && showSchemaModal && (
+        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl w-full max-w-3xl max-h-[90vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="p-5 border-b border-slate-200 flex items-center justify-between">
+              <div>
+                <h3 className="font-black text-base text-slate-900 flex items-center gap-2">
+                  <Database className="w-4 h-4 text-indigo-600" />
+                  Skema SQL Supabase — Riwayat &amp; Faktur Penjualan
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Tabel <strong className="font-mono">{salesTableInput}</strong> untuk sinkronisasi transaksi kasir POS, Faktur PBF/Mitra, piutang, batal, dan retur secara 2-arah &amp; real-time.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSchemaModal(false)}
+                className="p-1.5 rounded-xl hover:bg-slate-100 text-slate-500 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 overflow-y-auto space-y-4 text-xs">
+              <form
+                onSubmit={handleSaveTableName}
+                className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-end bg-slate-50 p-3 rounded-2xl border border-slate-200"
+              >
+                <div className="flex-1">
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Nama Tabel Penjualan di Supabase
+                  </label>
+                  <input
+                    type="text"
+                    value={salesTableInput}
+                    onChange={(e) => setSalesTableInput(e.target.value)}
+                    disabled={isDemoSandbox}
+                    className="w-full p-2 border rounded-xl font-mono font-bold bg-white"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={isDemoSandbox || isSyncing}
+                  className="px-4 py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white rounded-xl font-bold cursor-pointer"
+                >
+                  Simpan &amp; Tes Koneksi
+                </button>
+              </form>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-slate-700">
+                    Salin &amp; jalankan pada Supabase Dashboard &rarr; SQL Editor:
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCopySchema}
+                    className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {copiedSchema ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedSchema ? 'SQL Tersalin!' : 'Salin SQL'}</span>
+                  </button>
+                </div>
+                <pre className="p-4 rounded-2xl bg-slate-950 text-emerald-300 font-mono text-[11px] overflow-x-auto max-h-80 leading-relaxed">
+                  {SUPABASE_TRANSACTIONS_SQL_SCHEMA}
+                </pre>
+              </div>
             </div>
           </div>
         </div>

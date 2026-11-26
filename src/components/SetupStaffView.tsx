@@ -18,13 +18,20 @@ import {
 import {
   Staff,
   StaffRole,
+  PtkpStatus,
+  StaffTaxCategory,
   Branch,
   SYSTEM_PERMISSIONS,
-  DEFAULT_ROLE_PERMISSIONS
+  DEFAULT_ROLE_PERMISSIONS,
+  isOwnerAdminRole,
+  normalizeStaffRole,
+  getStaffActiveRoles,
+  isPrimaryOwnerStaffRecord
 } from '../types';
+import { PTKP_OPTIONS } from '../utils/taxService';
 
 const AVAILABLE_ROLES: StaffRole[] = [
-  'Super Admin / APJ',
+  'APJ / Owner',
   'Dokter',
   'Apoteker',
   'Perawat / Bidan',
@@ -55,7 +62,10 @@ export const SetupStaffView: React.FC<SetupStaffViewProps> = ({
     role: 'Apoteker' as StaffRole,
     roles: ['Apoteker'] as StaffRole[],
     phone: '',
-    branchId: branches[0]?.id || 'BR-01'
+    branchId: branches[0]?.id || 'BR-01',
+    npwpNik: '',
+    ptkpStatus: 'TK/0' as PtkpStatus,
+    taxCategory: 'pegawai_tetap' as StaffTaxCategory
   });
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -63,13 +73,12 @@ export const SetupStaffView: React.FC<SetupStaffViewProps> = ({
   const [expandedStaffId, setExpandedStaffId] = useState<string | null>(null);
 
   const getStaffRoles = (st: Staff): StaffRole[] => {
-    if (st.roles && st.roles.length > 0) return st.roles;
-    return [st.role];
+    return getStaffActiveRoles(st, st.role);
   };
 
   const getStaffPermissions = (st: Staff): string[] => {
     const roles = getStaffRoles(st);
-    if (roles.includes('Super Admin / APJ')) {
+    if (roles.some((r) => isOwnerAdminRole(r))) {
       return SYSTEM_PERMISSIONS.map((p) => p.id);
     }
     if (st.permissions && st.permissions.length > 0) {
@@ -90,20 +99,21 @@ export const SetupStaffView: React.FC<SetupStaffViewProps> = ({
     const exists = currentRoles.includes(targetRole);
     let nextRoles: StaffRole[];
     if (exists) {
+      if (isPrimaryOwnerStaffRecord(st) && isOwnerAdminRole(targetRole)) return;
       if (currentRoles.length <= 1) return;
       nextRoles = currentRoles.filter((r) => r !== targetRole);
     } else {
       nextRoles = [...currentRoles, targetRole];
     }
-    const primaryRole = nextRoles.includes('Super Admin / APJ')
-      ? 'Super Admin / APJ'
+    const primaryRole = nextRoles.some((r) => isOwnerAdminRole(r))
+      ? 'APJ / Owner'
       : nextRoles[0];
 
     const mergedPerms = new Set<string>(st.permissions || []);
     (rolePermissions[targetRole] || DEFAULT_ROLE_PERMISSIONS[targetRole] || []).forEach((p) => {
       if (!exists) mergedPerms.add(p);
     });
-    if (!nextRoles.includes('Super Admin / APJ')) {
+    if (!nextRoles.some((r) => isOwnerAdminRole(r))) {
       mergedPerms.delete('sys-profil-fasilitas');
     } else {
       SYSTEM_PERMISSIONS.forEach((p) => mergedPerms.add(p.id));
@@ -120,7 +130,7 @@ export const SetupStaffView: React.FC<SetupStaffViewProps> = ({
   const handleToggleStaffPerm = (st: Staff, permId: string) => {
     if (!onUpdateStaff) return;
     const roles = getStaffRoles(st);
-    const hasSuperAdmin = roles.includes('Super Admin / APJ');
+    const hasSuperAdmin = roles.some((r) => isOwnerAdminRole(r));
     if (permId === 'sys-profil-fasilitas' && !hasSuperAdmin) return;
     const currentPerms = getStaffPermissions(st);
     const exists = currentPerms.includes(permId);
@@ -137,9 +147,11 @@ export const SetupStaffView: React.FC<SetupStaffViewProps> = ({
     e.preventDefault();
     if (!form.name || !form.phone) return;
 
-    const roles: StaffRole[] = form.roles.length > 0 ? form.roles : [form.role];
-    const primaryRole: StaffRole = roles.includes('Super Admin / APJ')
-      ? 'Super Admin / APJ'
+    const roles: StaffRole[] = (form.roles.length > 0 ? form.roles : [form.role]).map((r) =>
+      normalizeStaffRole(r)
+    );
+    const primaryRole: StaffRole = roles.some((r) => isOwnerAdminRole(r))
+      ? 'APJ / Owner'
       : roles[0];
 
     const defaultPerms = new Set<string>();
@@ -148,7 +160,7 @@ export const SetupStaffView: React.FC<SetupStaffViewProps> = ({
         defaultPerms.add(id)
       );
     });
-    if (!roles.includes('Super Admin / APJ')) {
+    if (!roles.some((r) => isOwnerAdminRole(r))) {
       defaultPerms.delete('sys-profil-fasilitas');
     }
 
@@ -160,7 +172,10 @@ export const SetupStaffView: React.FC<SetupStaffViewProps> = ({
       permissions: Array.from(defaultPerms),
       phone: form.phone,
       branchId: form.branchId,
-      status: 'Aktif'
+      status: 'Aktif',
+      npwpNik: form.npwpNik.trim() || undefined,
+      ptkpStatus: form.ptkpStatus,
+      taxCategory: form.taxCategory
     };
 
     onAddStaff(newStaff);
@@ -169,13 +184,23 @@ export const SetupStaffView: React.FC<SetupStaffViewProps> = ({
       role: 'Apoteker',
       roles: ['Apoteker'],
       phone: '',
-      branchId: branches[0]?.id || 'BR-01'
+      branchId: branches[0]?.id || 'BR-01',
+      npwpNik: '',
+      ptkpStatus: 'TK/0',
+      taxCategory: 'pegawai_tetap'
     });
   };
 
   const handleOpenEdit = (staff: Staff) => {
     const role = (staff.role === 'Perawat / Nakes Lapangan' ? 'Perawat / Bidan' : staff.role) as Staff['role'];
-    setEditingStaff({ ...staff, role, roles: getStaffRoles(staff) });
+    setEditingStaff({
+      ...staff,
+      role,
+      roles: getStaffRoles(staff),
+      npwpNik: staff.npwpNik || '',
+      ptkpStatus: staff.ptkpStatus || 'TK/0',
+      taxCategory: staff.taxCategory || (role === 'Dokter' ? 'bukan_pegawai' : 'pegawai_tetap')
+    });
   };
 
   const handleSaveEdit = (e: React.FormEvent) => {
@@ -216,7 +241,7 @@ export const SetupStaffView: React.FC<SetupStaffViewProps> = ({
             Registrasi Pegawai (User) &amp; Hak Akses Peran
           </h3>
           <span className="px-2.5 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 font-bold text-[10px] flex items-center gap-1">
-            <Lock className="w-3 h-3 text-amber-700" /> Catatan: Halaman Pengaturan Sistem &amp; Profil Fasilitas hanya boleh diakses oleh Super Admin / APJ
+            <Lock className="w-3 h-3 text-amber-700" /> Catatan: Halaman Pengaturan Sistem &amp; Profil Fasilitas hanya boleh diakses oleh APJ / Owner
           </span>
         </div>
         <form onSubmit={handleSubmit} className="space-y-3">
@@ -273,6 +298,50 @@ export const SetupStaffView: React.FC<SetupStaffViewProps> = ({
               <Plus className="w-4 h-4" />
               <span>Simpan Pegawai</span>
             </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-slate-50/80 p-3 rounded-xl border border-slate-200">
+            <div>
+              <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">
+                NPWP / NIK (Untuk PPh 21)
+              </label>
+              <input
+                type="text"
+                placeholder="16 digit NIK atau NPWP"
+                value={form.npwpNik}
+                onChange={(e) => setForm({ ...form, npwpNik: e.target.value })}
+                className="w-full p-2 border border-slate-300 rounded-xl font-mono text-xs bg-white outline-none focus:ring-2 focus:ring-sky-500"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">
+                Status PTKP (TER PP 58/2023)
+              </label>
+              <select
+                value={form.ptkpStatus}
+                onChange={(e) => setForm({ ...form, ptkpStatus: e.target.value as PtkpStatus })}
+                className="w-full p-2 border border-slate-300 rounded-xl font-bold text-xs bg-white outline-none focus:ring-2 focus:ring-sky-500"
+              >
+                {PTKP_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.value} (Kat. TER {opt.terCategory})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">
+                Kategori Penerima Pajak PPh 21
+              </label>
+              <select
+                value={form.taxCategory}
+                onChange={(e) => setForm({ ...form, taxCategory: e.target.value as StaffTaxCategory })}
+                className="w-full p-2 border border-slate-300 rounded-xl font-bold text-xs bg-white outline-none focus:ring-2 focus:ring-sky-500"
+              >
+                <option value="pegawai_tetap">Pegawai Tetap (Skema TER)</option>
+                <option value="bukan_pegawai">Bukan Pegawai / Tenaga Medis &amp; Nakes (DPP 50%)</option>
+              </select>
+            </div>
           </div>
 
           <div>
@@ -359,7 +428,7 @@ export const SetupStaffView: React.FC<SetupStaffViewProps> = ({
                 const activeRoles = getStaffRoles(st);
                 const activePerms = getStaffPermissions(st);
                 const isExpanded = expandedStaffId === st.id;
-                const hasSuperAdmin = activeRoles.includes('Super Admin / APJ');
+                const hasSuperAdmin = activeRoles.some((r) => isOwnerAdminRole(r));
 
                 return (
                   <React.Fragment key={st.id}>
@@ -443,7 +512,7 @@ export const SetupStaffView: React.FC<SetupStaffViewProps> = ({
                                 Daftar Checkbox Hak Akses Modul — {st.name} ({st.id})
                               </span>
                               <span className="text-[10px] text-amber-800 font-bold bg-amber-50 px-2.5 py-1 rounded-lg border border-amber-200">
-                                Catatan: Halaman Pengaturan Sistem &amp; Profil Fasilitas hanya boleh diakses oleh Super Admin / APJ
+                                Catatan: Halaman Pengaturan Sistem &amp; Profil Fasilitas hanya boleh diakses oleh APJ / Owner
                               </span>
                             </div>
                             <div className="grid grid-cols-1 sm:grid-cols-3 md:grid-cols-4 gap-2">
@@ -536,7 +605,7 @@ export const SetupStaffView: React.FC<SetupStaffViewProps> = ({
                     onChange={(e) => setEditingStaff({ ...editingStaff, role: e.target.value as Staff['role'] })}
                     className="w-full p-2.5 border border-slate-300 rounded-xl font-bold bg-white outline-none focus:ring-2 focus:ring-sky-500"
                   >
-                    <option value="Super Admin / APJ">Super Admin / APJ</option>
+                    <option value="APJ / Owner">APJ / Owner</option>
                     <option value="Dokter">Dokter Pemeriksa</option>
                     <option value="Apoteker">Apoteker / Farmasi</option>
                     <option value="Perawat / Bidan">Perawat / Bidan</option>
@@ -587,6 +656,57 @@ export const SetupStaffView: React.FC<SetupStaffViewProps> = ({
                         {b.name}
                       </option>
                     ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3 bg-slate-50 rounded-xl border border-slate-200">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">
+                    NPWP / NIK
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="16 digit NIK/NPWP"
+                    value={editingStaff.npwpNik || ''}
+                    onChange={(e) => setEditingStaff({ ...editingStaff, npwpNik: e.target.value })}
+                    className="w-full p-2 border border-slate-300 rounded-xl font-mono text-xs bg-white outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">
+                    Status PTKP
+                  </label>
+                  <select
+                    value={editingStaff.ptkpStatus || 'TK/0'}
+                    onChange={(e) =>
+                      setEditingStaff({ ...editingStaff, ptkpStatus: e.target.value as PtkpStatus })
+                    }
+                    className="w-full p-2 border border-slate-300 rounded-xl font-bold text-xs bg-white outline-none focus:ring-2 focus:ring-sky-500"
+                  >
+                    {PTKP_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.value} (TER {opt.terCategory})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">
+                    Kategori PPh 21
+                  </label>
+                  <select
+                    value={editingStaff.taxCategory || 'pegawai_tetap'}
+                    onChange={(e) =>
+                      setEditingStaff({
+                        ...editingStaff,
+                        taxCategory: e.target.value as StaffTaxCategory
+                      })
+                    }
+                    className="w-full p-2 border border-slate-300 rounded-xl font-bold text-xs bg-white outline-none focus:ring-2 focus:ring-sky-500"
+                  >
+                    <option value="pegawai_tetap">Pegawai Tetap (TER)</option>
+                    <option value="bukan_pegawai">Bukan Pegawai / Nakes</option>
                   </select>
                 </div>
               </div>

@@ -1,0 +1,3361 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Portal Pendaftaran Pasien Online - Apotek & Layanan Medis Latisha Farma</title>
+  <meta name="description" content="Pendaftaran Mandiri Pasien Berobat Online - Apotek & Praktek Dokter Latisha Farma. Praktis, cepat, tanpa antre panjang di lokasi." />
+  <meta name="theme-color" content="#0284c7" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+
+  <!-- Fonts & Tailwind CSS CDN -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"Plus Jakarta Sans"', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'monospace'],
+          },
+          colors: {
+            brand: {
+              50: '#f0f9ff',
+              100: '#e0f2fe',
+              500: '#0ea5e9',
+              600: '#0284c7',
+              700: '#0369a1',
+              800: '#075985',
+              900: '#0c4a6e',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Supabase JS Client v2 CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <style>
+    /* Custom mobile scrollbar & touch styling */
+    body {
+      -webkit-tap-highlight-color: transparent;
+    }
+    .custom-scrollbar::-webkit-scrollbar {
+      width: 4px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 4px;
+    }
+    @media print {
+      body {
+        background: white !important;
+        padding: 0 !important;
+      }
+      .no-print {
+        display: none !important;
+      }
+      .print-only {
+        display: block !important;
+      }
+      #ticketModal {
+        position: static !important;
+        box-shadow: none !important;
+        padding: 0 !important;
+      }
+    }
+  </style>
+</head>
+<body class="bg-gradient-to-b from-sky-50 via-slate-50 to-slate-100 min-h-screen text-slate-800 font-sans antialiased flex flex-col justify-between">
+
+  <!-- TOP HEADER / BRANDING -->
+  <header class="bg-white/90 backdrop-blur-md sticky top-0 z-30 border-b border-slate-200/80 shadow-xs">
+    <div class="max-w-xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
+      <div class="flex items-center gap-3">
+        <!-- Logo Emblem -->
+        <div class="w-11 h-11 rounded-2xl bg-white p-1 border border-slate-200 flex items-center justify-center shadow-sm shrink-0 overflow-hidden">
+          <img src="/assets/aistudio/logo_resmi_apotek_673c56f0.png" alt="Logo Apotek Latisha Farma" class="w-full h-full object-contain" />
+        </div>
+        <div>
+          <div class="flex items-center gap-1.5">
+            <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
+            <span class="text-[10px] font-black uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+              Pendaftaran Online Aktif
+            </span>
+          </div>
+          <h1 class="font-extrabold text-sm sm:text-base text-slate-900 tracking-tight leading-tight mt-0.5">
+            Apotek & Layanan Medis LATISHA FARMA
+          </h1>
+          <p class="text-[11px] text-slate-500 line-clamp-1">
+            Praktek Dokter Umum & Konseling Obat Terpadu
+          </p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-1.5 no-print">
+        <button
+          type="button"
+          id="portalHeaderChatBtn"
+          class="w-9 h-9 inline-flex items-center justify-center rounded-full bg-gradient-to-r from-sky-700 to-emerald-600 hover:from-sky-800 hover:to-emerald-700 text-white shadow-sm transition cursor-pointer relative"
+          title="Obrolan Pasien"
+          aria-label="Buka obrolan real-time dengan petugas apotek"
+        >
+          <span class="relative flex items-center justify-center">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+            </svg>
+            <span id="portalHeaderChatDot" class="w-2 h-2 rounded-full bg-amber-300 border border-sky-800 animate-pulse absolute -bottom-0.5 -right-0.5"></span>
+          </span>
+          <span
+            id="portalHeaderUnreadBadge"
+            class="hidden absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-rose-500 text-white text-[9px] font-black items-center justify-center border border-white/80"
+          >0</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- MAIN CONTAINER (Mobile Centered) -->
+  <main class="max-w-xl mx-auto px-4 py-5 w-full flex-1">
+
+    <!-- HERO PROMO CARD -->
+    <div class="bg-gradient-to-r from-sky-600 via-indigo-600 to-indigo-700 rounded-3xl p-5 text-white shadow-xl shadow-sky-600/15 mb-6 relative overflow-hidden">
+      <div class="absolute -right-6 -bottom-8 w-32 h-32 bg-white/10 rounded-full blur-xl pointer-events-none"></div>
+      <div class="relative z-10">
+        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-white/20 text-white backdrop-blur-xs mb-2">
+          <span>📱</span> Pendaftaran Mandiri Pasien dari Smartphone
+        </span>
+        <h2 class="text-xl sm:text-2xl font-black tracking-tight leading-snug">
+          Daftar Berobat Sekarang, Ambil Nomor Antrean Praktis
+        </h2>
+        <p class="text-xs text-sky-100 mt-1.5 leading-relaxed">
+          Silakan isi formulir di bawah ini dengan data yang valid. Anda akan langsung menerima <strong>Kode Booking & Nomor Antrean Virtual</strong> untuk ditunjukkan saat tiba di klinik.
+        </p>
+
+        <!-- Clinic Quick Info -->
+        <div class="mt-4 pt-3 border-t border-white/20 grid grid-cols-2 gap-2 text-[11px]">
+          <div>
+            <span class="text-sky-200 block text-[10px]">Dokter Pemeriksa:</span>
+            <strong class="text-white font-semibold">dr. Anis Prima Dewi</strong>
+            <span class="text-[10px] text-sky-200 block">SIP: SIP/2024/001-KNA</span>
+          </div>
+          <div>
+            <span class="text-sky-200 block text-[10px]">Apoteker PJ:</span>
+            <strong class="text-white font-semibold">apt. Mardin, S.Farm</strong>
+            <span class="text-[10px] text-sky-200 block">SIPA: 400.7.5.4/256...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- INTERACTIVE REAL-TIME CHAT BANNER CARD (PROMINENT ON PORTAL) -->
+    <div id="portalChatBannerCard" class="no-print bg-white rounded-3xl border border-emerald-200 shadow-sm p-4 sm:p-5 mb-6">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div class="flex items-start gap-3">
+          <div class="w-11 h-11 rounded-2xl bg-gradient-to-br from-sky-700 to-emerald-600 text-white flex items-center justify-center shrink-0 shadow-sm relative">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+            </svg>
+            <span id="portalBannerChatDot" class="w-3 h-3 rounded-full bg-amber-300 border-2 border-white absolute -bottom-0.5 -right-0.5"></span>
+          </div>
+          <div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <h3 class="font-extrabold text-sm text-slate-900">Obrolan Interaktif Petugas Apotek</h3>
+              <span id="portalBannerPresenceBadge" class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
+                Menghubungkan...
+              </span>
+            </div>
+            <p class="text-[11px] text-slate-600 mt-0.5 leading-relaxed">
+              Ada pertanyaan seputar pendaftaran, jadwal dokter, atau ketersediaan obat? Hubungi petugas Apotek Latisha Farma secara <strong>real-time</strong> di sini.
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          id="portalBannerOpenChatBtn"
+          title="Obrolan Pasien"
+          aria-label="Buka obrolan interaktif petugas apotek"
+          class="w-11 h-11 rounded-full bg-gradient-to-r from-sky-700 to-emerald-600 hover:from-sky-800 hover:to-emerald-700 text-white shadow-sm transition cursor-pointer shrink-0 flex items-center justify-center self-end sm:self-center"
+        >
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- REGISTRATION FORM CARD -->
+    <div id="formContainer" class="bg-white rounded-3xl border border-slate-200 shadow-sm p-5 sm:p-6 mb-6">
+
+      <div class="flex items-center justify-between border-b border-slate-100 pb-3 mb-5">
+        <div>
+          <h3 class="font-extrabold text-base text-slate-900">Formulir Pendaftaran Online</h3>
+          <p class="text-xs text-slate-500">Tanda bintang (<span class="text-rose-500 font-bold">*</span>) wajib diisi</p>
+        </div>
+        <span class="text-xs font-mono font-bold px-2.5 py-1 bg-sky-50 text-sky-700 rounded-xl border border-sky-200">
+          Layanan Rawat Jalan
+        </span>
+      </div>
+
+      <form id="onlineRegForm" onsubmit="handleRegistrationSubmit(event)" class="space-y-4">
+
+        <!-- SECTION 1: DATA IDENTITAS PASIEN -->
+        <div class="space-y-3">
+          <div class="flex items-center gap-2 text-xs font-extrabold text-slate-800 uppercase tracking-wider">
+            <span class="w-5 h-5 rounded-full bg-sky-600 text-white flex items-center justify-center text-[10px]">1</span>
+            <span>Identitas Diri Pasien</span>
+          </div>
+
+          <!-- NIK -->
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1" for="nik">
+              Nomor Induk Kependudukan (NIK KTP / KK) <span class="text-rose-500">*</span>
+            </label>
+            <div class="relative">
+              <input
+                type="tel"
+                id="nik"
+                name="nik"
+                required
+                maxlength="16"
+                pattern="[0-9]{16}"
+                placeholder="Contoh: 1801xxxxxxxxxxxx (16 Digit)"
+                class="w-full px-3.5 py-2.5 pr-9 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none text-xs font-mono font-bold transition"
+                oninput="this.value = this.value.replace(/[^0-9]/g, '').slice(0, 16); if (typeof scheduleNikAutoLookup === 'function') scheduleNikAutoLookup(this.value);"
+                onblur="if (typeof triggerImmediateNikAutoLookup === 'function') triggerImmediateNikAutoLookup(this.value);"
+              />
+              <span id="nikLookupSpinner" class="hidden absolute right-3 top-1/2 -translate-y-1/2 text-sky-600">
+                <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+                </svg>
+              </span>
+              <span id="nikLookupFoundIcon" class="hidden absolute right-3 top-1/2 -translate-y-1/2 text-emerald-600">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"></path>
+                </svg>
+              </span>
+            </div>
+            <div id="nikLookupStatusBox" class="mt-1">
+              <span class="text-[10px] text-slate-400 block">Pastikan 16 digit sesuai KTP/KK — jika NIK sudah terdaftar, data pasien terisi otomatis</span>
+            </div>
+          </div>
+
+          <!-- NAMA LENGKAP -->
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1" for="name">
+              Nama Lengkap Pasien <span class="text-rose-500">*</span>
+            </label>
+            <input
+              type="text"
+              id="name"
+              name="name"
+              required
+              placeholder="Masukkan nama lengkap pasien..."
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none text-xs font-bold text-slate-900 transition capitalize"
+            />
+          </div>
+
+          <!-- TANGGAL LAHIR & JENIS KELAMIN -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1" for="birthDate">
+                Tanggal Lahir <span class="text-rose-500">*</span>
+              </label>
+              <input
+                type="date"
+                id="birthDate"
+                name="birthDate"
+                required
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none text-xs font-bold text-slate-800 transition"
+              />
+            </div>
+
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1" for="gender">
+                Jenis Kelamin <span class="text-rose-500">*</span>
+              </label>
+              <select
+                id="gender"
+                name="gender"
+                required
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none text-xs font-bold text-slate-800 transition"
+              >
+                <option value="Laki-laki">Laki-laki</option>
+                <option value="Perempuan">Perempuan</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- NO WHATSAPP AKTIF -->
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1" for="phone">
+              Nomor WhatsApp Aktif <span class="text-rose-500">*</span>
+            </label>
+            <div class="relative">
+              <span class="absolute left-3 top-2.5 text-xs font-bold text-emerald-600 font-mono">📱 WA</span>
+              <input
+                type="tel"
+                id="phone"
+                name="phone"
+                required
+                placeholder="0812xxxxxxxx atau 628xxxxxxxx"
+                class="w-full pl-16 pr-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none text-xs font-mono font-bold text-slate-900 transition"
+                oninput="this.value = this.value.replace(/[^0-9]/g, '')"
+              />
+            </div>
+            <span class="text-[10px] text-slate-400 mt-1 block">Kode booking dan konfirmasi antrean akan dikirimkan ke nomor ini</span>
+          </div>
+
+          <!-- ALAMAT DOMISILI -->
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1" for="address">
+              Alamat Domisili Pasien
+            </label>
+            <input
+              type="text"
+              id="address"
+              name="address"
+              placeholder="Contoh: Jl. Poros KTM Tanjung Mas Makmur, RT 004/002"
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none text-xs text-slate-800 transition"
+            />
+          </div>
+        </div>
+
+        <!-- SECTION 2: JADWAL KUNJUNGAN & POLI -->
+        <div class="space-y-3 pt-3 border-t border-slate-100">
+          <div class="flex items-center gap-2 text-xs font-extrabold text-slate-800 uppercase tracking-wider">
+            <span class="w-5 h-5 rounded-full bg-sky-600 text-white flex items-center justify-center text-[10px]">2</span>
+            <span>Jadwal & Layanan Medis</span>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <!-- TANGGAL KUNJUNGAN -->
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1" for="appointmentDate">
+                Tanggal Kunjungan Berobat <span class="text-rose-500">*</span>
+              </label>
+              <input
+                type="date"
+                id="appointmentDate"
+                name="appointmentDate"
+                required
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none text-xs font-bold text-sky-950 transition"
+              />
+            </div>
+
+            <!-- PILIHAN JAM PRAKTEK -->
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1" for="appointmentSession">
+                Pilihan Sesi / Jam Praktek Dokter & Petugas <span class="text-rose-500">*</span>
+              </label>
+              <select
+                id="appointmentSession"
+                name="appointmentSession"
+                required
+                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none text-xs font-bold text-slate-800 transition"
+              >
+                <!-- Opsi diisi otomatis via JavaScript terintegrasi jadwal klinik -->
+                <option value="Full Day (Fleksibel) — 08:00 - 20:00 WIB">Full Day (Fleksibel) — 08:00 - 20:00 WIB</option>
+              </select>
+              <div id="dutyScheduleNotice" class="mt-1.5 p-2 rounded-xl bg-sky-50 border border-sky-200 text-[10px] text-sky-950 flex items-start gap-1.5">
+                <span class="text-sky-600 font-bold shrink-0">🕒</span>
+                <span id="dutyScheduleNoticeText">Memuat jadwal dokter & petugas bertugas...</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- LAYANAN POLI TUJUAN -->
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1" for="serviceType">
+              Layanan Poli Tujuan <span class="text-rose-500">*</span>
+            </label>
+            <select
+              id="serviceType"
+              name="serviceType"
+              required
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none text-xs font-bold text-indigo-900 transition"
+            >
+              <option value="Poli Umum (Pemeriksaan Dokter & Pengobatan)">Poli Umum (Pemeriksaan Dokter & Pengobatan)</option>
+              <option value="Konseling Farmasi (Pelayanan Informasi Obat & Terapi)">Konseling Farmasi (Pelayanan Informasi Obat & Terapi)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- SECTION 3: KELUHAN & ALERGI -->
+        <div class="space-y-3 pt-3 border-t border-slate-100">
+          <div class="flex items-center gap-2 text-xs font-extrabold text-slate-800 uppercase tracking-wider">
+            <span class="w-5 h-5 rounded-full bg-sky-600 text-white flex items-center justify-center text-[10px]">3</span>
+            <span>Keluhan & Catatan Khusus</span>
+          </div>
+
+          <!-- KELUHAN UTAMA -->
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1" for="complaint">
+              Keluhan / Gejala Utama yang Dirasakan <span class="text-rose-500">*</span>
+            </label>
+            <textarea
+              id="complaint"
+              name="complaint"
+              rows="3"
+              required
+              placeholder="Contoh: Demam tinggi 2 hari, batuk berdahak, sakit kepala, dan mual..."
+              class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-sky-500 focus:border-sky-500 outline-none text-xs text-slate-800 transition"
+            ></textarea>
+          </div>
+
+          <!-- RIWAYAT ALERGI OBAT -->
+          <div class="bg-rose-50/70 border border-rose-200 rounded-2xl p-3.5">
+            <label class="block text-xs font-bold text-rose-900 mb-1 flex items-center gap-1.5" for="allergy">
+              <span class="text-rose-600">⚠️</span>
+              Riwayat Alergi Obat (Sangat Penting untuk Keselamatan Pasien)
+            </label>
+            <input
+              type="text"
+              id="allergy"
+              name="allergy"
+              placeholder="Tulis nama obat yang menyebabkan alergi, atau ketik 'Tidak Ada'"
+              value="Tidak Ada"
+              class="w-full px-3 py-2 rounded-xl border border-rose-300 bg-white focus:ring-2 focus:ring-rose-500 focus:border-rose-500 outline-none text-xs font-bold text-rose-900 transition"
+            />
+            <span class="text-[10px] text-rose-700 mt-1 block">
+              Contoh: Alergi Amoxicillin, Alergi Penisilin, Alergi Paracetamol, atau 'Tidak Ada'.
+            </span>
+          </div>
+        </div>
+
+        <!-- SUBMIT BUTTON -->
+        <div class="pt-2">
+          <button
+            type="submit"
+            id="submitBtn"
+            class="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-sky-600 via-indigo-600 to-indigo-700 hover:from-sky-500 hover:to-indigo-600 text-white font-extrabold text-sm shadow-xl shadow-sky-600/25 active:scale-[0.99] transition-all flex items-center justify-center gap-2 cursor-pointer"
+          >
+            <svg class="w-5 h-5 text-sky-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
+            </svg>
+            <span>Kirim Pendaftaran Berobat Online</span>
+          </button>
+        </div>
+
+      </form>
+    </div>
+
+    <!-- BENEFIT CARDS -->
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs mb-8">
+      <div class="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs flex items-center gap-3">
+        <span class="text-2xl">⚡</span>
+        <div>
+          <strong class="text-slate-800 block font-bold">Tanpa Antre Lama</strong>
+          <span class="text-[11px] text-slate-500">Nomor antrean siap saat tiba di klinik</span>
+        </div>
+      </div>
+      <div class="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs flex items-center gap-3">
+        <span class="text-2xl">📋</span>
+        <div>
+          <strong class="text-slate-800 block font-bold">Rekam Medis Siap</strong>
+          <span class="text-[11px] text-slate-500">Dokter langsung dapat memelajari keluhan</span>
+        </div>
+      </div>
+      <div class="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs flex items-center gap-3">
+        <span class="text-2xl">🔒</span>
+        <div>
+          <strong class="text-slate-800 block font-bold">Privasi Terjaga</strong>
+          <span class="text-[11px] text-slate-500">Kerahasiaan data medis terjamin</span>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- SUCCESS MODAL / E-TICKET -->
+  <div id="successModal" class="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-50 flex items-center justify-center p-4 hidden overflow-y-auto">
+    <div id="ticketModal" class="bg-white rounded-3xl w-full max-w-md shadow-2xl border border-slate-200 overflow-hidden my-4 transform transition-all">
+
+      <!-- Ticket Header -->
+      <div class="bg-gradient-to-r from-emerald-600 to-teal-700 p-5 text-white text-center relative">
+        <div class="w-14 h-14 bg-white/20 rounded-full mx-auto flex items-center justify-center mb-2 text-2xl">
+          ✓
+        </div>
+        <span class="text-[10px] font-black uppercase tracking-wider bg-white/20 px-3 py-0.5 rounded-full inline-block">
+          Pendaftaran Berhasil Terkirim
+        </span>
+        <h3 class="text-lg font-black mt-1">E-TIKET PENDAFTARAN PASIEN</h3>
+        <p class="text-xs text-emerald-100">Apotek & Layanan Medis Latisha Farma</p>
+      </div>
+
+      <!-- Ticket Body -->
+      <div class="p-5 space-y-4">
+
+        <!-- Toast / Status Alert -->
+        <div id="modalPatientStatusAlert" class="p-3.5 rounded-2xl border text-xs font-bold flex items-start gap-2.5 bg-emerald-50 text-emerald-900 border-emerald-300">
+          <span class="text-base">📋</span>
+          <div class="space-y-0.5">
+            <span id="modalPatientStatusTitle" class="block font-black uppercase tracking-wider text-[10px]">
+              Pasien Berhasil Divalidasi
+            </span>
+            <p id="modalPatientStatusText" class="text-[11px] font-medium leading-relaxed">
+              Data pasien terintegrasi dengan database Master Pasien Latisha Farma.
+            </p>
+          </div>
+        </div>
+
+        <!-- Booking Code & Queue -->
+        <div class="bg-emerald-50/70 border-2 border-emerald-500 rounded-2xl p-4 text-center">
+          <span class="text-[10px] font-black text-slate-500 uppercase tracking-widest block">KODE BOOKING ANDA</span>
+          <div id="modalBookingCode" class="text-2xl sm:text-3xl font-black font-mono text-emerald-800 tracking-wider my-1">
+            LTF-2026-00000
+          </div>
+          <div class="inline-flex items-center gap-2 mt-1 px-3 py-1 bg-white rounded-xl border border-emerald-300 shadow-xs">
+            <span class="text-[10px] font-bold text-slate-500">Nomor Antrean Virtual:</span>
+            <strong id="modalQueueNumber" class="text-base font-mono font-black text-emerald-700">A-001</strong>
+          </div>
+        </div>
+
+        <!-- Patient Details Summary -->
+        <div class="bg-slate-50 p-3.5 rounded-2xl border border-slate-200 text-xs space-y-2">
+          <div class="flex justify-between border-b border-slate-200 pb-1.5">
+            <span class="text-slate-500">Nomor Rekam Medis (No. RM):</span>
+            <strong id="modalPatientNoRm" class="text-sky-800 font-mono font-black text-sm">-</strong>
+          </div>
+          <div class="flex justify-between border-b border-slate-200 pb-1.5">
+            <span class="text-slate-500">Status Rekam Medis:</span>
+            <span id="modalPatientStatusBadge" class="px-2 py-0.5 rounded-md font-bold text-[10px] bg-emerald-100 text-emerald-800">
+              Pasien Baru
+            </span>
+          </div>
+          <div class="flex justify-between border-b border-slate-200 pb-1.5">
+            <span class="text-slate-500">Nama Pasien:</span>
+            <strong id="modalPatientName" class="text-slate-900 font-bold">-</strong>
+          </div>
+          <div class="flex justify-between border-b border-slate-200 pb-1.5">
+            <span class="text-slate-500">NIK:</span>
+            <strong id="modalPatientNik" class="text-slate-800 font-mono">-</strong>
+          </div>
+          <div class="flex justify-between border-b border-slate-200 pb-1.5">
+            <span class="text-slate-500">Tanggal Kunjungan:</span>
+            <strong id="modalDate" class="text-slate-900 font-bold">-</strong>
+          </div>
+          <div class="flex justify-between border-b border-slate-200 pb-1.5">
+            <span class="text-slate-500">Sesi Jam Praktek:</span>
+            <strong id="modalSession" class="text-indigo-800 font-bold">-</strong>
+          </div>
+          <div class="flex justify-between border-b border-slate-200 pb-1.5">
+            <span class="text-slate-500">Layanan Poli:</span>
+            <strong id="modalService" class="text-slate-800 font-bold">-</strong>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-slate-500">Riwayat Alergi:</span>
+            <strong id="modalAllergy" class="text-rose-700 font-bold">-</strong>
+          </div>
+        </div>
+
+        <!-- Instructions -->
+        <div class="bg-amber-50 border border-amber-200 rounded-xl p-3 text-[11px] text-amber-900 space-y-1">
+          <strong class="font-bold block">Petunjuk Kunjungan di Klinik:</strong>
+          <p>1. Datang 10-15 menit sebelum sesi dimulai.</p>
+          <p>2. Tunjukkan kode booking ini kepada petugas pendaftaran/kasir.</p>
+          <p>3. Jika berhalangan hadir, harap konfirmasi melalui WhatsApp.</p>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="space-y-2 no-print pt-1">
+          <!-- WhatsApp Share Button -->
+          <button
+            type="button"
+            id="waShareBtn"
+            class="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-md transition cursor-pointer"
+          >
+            <span>💬</span>
+            <span>Simpan / Kirim Bukti ke WhatsApp</span>
+          </button>
+
+          <!-- Print / Download Button -->
+          <div class="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onclick="window.print()"
+              class="py-2.5 px-3 rounded-xl border border-slate-300 hover:bg-slate-50 text-slate-700 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
+            >
+              <span>🖨️</span> Cetak Tiket
+            </button>
+            <button
+              type="button"
+              onclick="resetAndCloseModal()"
+              class="py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs transition cursor-pointer"
+            >
+              Selesai / Tutup
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+  </div>
+
+
+
+  <!-- FOOTER -->
+  <footer class="bg-white border-t border-slate-200 py-4 text-center text-xs text-slate-500 no-print">
+    <div class="max-w-xl mx-auto px-4 space-y-1">
+      <p class="font-bold text-slate-700">Apotek & Layanan Medis LATISHA FARMA</p>
+      <p class="text-[11px] text-slate-500">
+        Jl. Poros KTM Tanjung Mas Makmur Mesuji Timur, Kab. Mesuji - Lampung
+      </p>
+      <p class="text-[10px] text-slate-400 font-mono">
+        SIA: 23082300357340002 · Layanan Pasien WhatsApp: 0895-3262-72957
+      </p>
+    </div>
+  </footer>
+
+  <!-- LOGIKA APLIKASI & INTEGRASI SUPABASE -->
+  <script>
+    // 1. SUPABASE CLIENT INITIALIZATION & CONFIGURATION
+    const DEFAULT_CONFIG = {
+      url: (localStorage.getItem('latisha_supabase_url') || '').trim() || 'https://aolhizbzrggatxizvenj.supabase.co',
+      key: (localStorage.getItem('latisha_supabase_key') || '').trim() || 'sb_publishable_-UprGGbf8Q05TuCZzRfPhA_q0eWamkW',
+      table: (localStorage.getItem('latisha_supabase_table') || '').trim() || 'pendaftaran_online',
+      patientTable: (localStorage.getItem('latisha_supabase_patient_table') || '').trim() || 'pasien'
+    };
+
+    let supabaseClient = null;
+
+    function initSupabase() {
+      const url = DEFAULT_CONFIG.url;
+      const key = DEFAULT_CONFIG.key;
+
+      if (url && key && window.supabase) {
+        try {
+          supabaseClient = window.supabase.createClient(url, key);
+          console.info('[Supabase] Berhasil terhubung ke Supabase:', url);
+        } catch (e) {
+          console.warn('[Supabase] Gagal inisialisasi Supabase client:', e);
+          supabaseClient = null;
+        }
+      } else {
+        supabaseClient = null;
+      }
+    }
+
+    // Initialize on load
+    initSupabase();
+
+    // Set Default Tanggal Hari Ini pada Form & Integrasi Jadwal Dokter
+    const DEFAULT_DUTY_SCHEDULES = [
+      { id: 'SCH-001', staffName: 'dr. Anis Prima Dewi', staffRole: 'Dokter', day: 'Senin', startTime: '08:00', endTime: '20:00', serviceUnit: 'Poli Umum', sessionLabel: 'Full Day (Fleksibel)', status: 'Aktif' },
+      { id: 'SCH-002', staffName: 'dr. Anis Prima Dewi', staffRole: 'Dokter', day: 'Selasa', startTime: '08:00', endTime: '20:00', serviceUnit: 'Poli Umum', sessionLabel: 'Full Day (Fleksibel)', status: 'Aktif' },
+      { id: 'SCH-003', staffName: 'dr. Anis Prima Dewi', staffRole: 'Dokter', day: 'Rabu', startTime: '08:00', endTime: '20:00', serviceUnit: 'Poli Umum', sessionLabel: 'Full Day (Fleksibel)', status: 'Aktif' },
+      { id: 'SCH-004', staffName: 'dr. Anis Prima Dewi', staffRole: 'Dokter', day: 'Kamis', startTime: '08:00', endTime: '20:00', serviceUnit: 'Poli Umum', sessionLabel: 'Full Day (Fleksibel)', status: 'Aktif' },
+      { id: 'SCH-005', staffName: 'dr. Anis Prima Dewi', staffRole: 'Dokter', day: 'Jumat', startTime: '08:00', endTime: '20:00', serviceUnit: 'Poli Umum', sessionLabel: 'Full Day (Fleksibel)', status: 'Aktif' },
+      { id: 'SCH-006', staffName: 'dr. Anis Prima Dewi', staffRole: 'Dokter', day: 'Sabtu', startTime: '08:00', endTime: '17:00', serviceUnit: 'Poli Umum', sessionLabel: 'Shift Weekend', status: 'Aktif' },
+      { id: 'SCH-007', staffName: 'dr. Anis Prima Dewi', staffRole: 'Dokter', day: 'Minggu', startTime: '09:00', endTime: '14:00', serviceUnit: 'Poli Umum', sessionLabel: 'On-Call / Perjanjian', status: 'On-Call' },
+      { id: 'SCH-008', staffName: 'apt. Mardin, S.Farm', staffRole: 'Super Admin / APJ', day: 'Senin', startTime: '08:00', endTime: '20:00', serviceUnit: 'Konseling Farmasi', sessionLabel: 'Pagi - Malam (Full Day)', status: 'Aktif' },
+      { id: 'SCH-009', staffName: 'apt. Mardin, S.Farm', staffRole: 'Super Admin / APJ', day: 'Selasa', startTime: '08:00', endTime: '20:00', serviceUnit: 'Konseling Farmasi', sessionLabel: 'Pagi - Malam (Full Day)', status: 'Aktif' },
+      { id: 'SCH-010', staffName: 'apt. Mardin, S.Farm', staffRole: 'Super Admin / APJ', day: 'Rabu', startTime: '08:00', endTime: '20:00', serviceUnit: 'Konseling Farmasi', sessionLabel: 'Pagi - Malam (Full Day)', status: 'Aktif' },
+      { id: 'SCH-011', staffName: 'apt. Mardin, S.Farm', staffRole: 'Super Admin / APJ', day: 'Kamis', startTime: '08:00', endTime: '20:00', serviceUnit: 'Konseling Farmasi', sessionLabel: 'Pagi - Malam (Full Day)', status: 'Aktif' },
+      { id: 'SCH-012', staffName: 'apt. Mardin, S.Farm', staffRole: 'Super Admin / APJ', day: 'Jumat', startTime: '08:00', endTime: '20:00', serviceUnit: 'Konseling Farmasi', sessionLabel: 'Pagi - Malam (Full Day)', status: 'Aktif' },
+      { id: 'SCH-013', staffName: 'apt. Mardin, S.Farm', staffRole: 'Super Admin / APJ', day: 'Sabtu', startTime: '08:00', endTime: '20:00', serviceUnit: 'Konseling Farmasi', sessionLabel: 'Pagi - Malam (Full Day)', status: 'Aktif' }
+    ];
+
+    let clinicSchedulesCache = DEFAULT_DUTY_SCHEDULES;
+
+    async function loadClinicSchedules() {
+      if (supabaseClient) {
+        try {
+          const scheduleTable = localStorage.getItem('latisha_supabase_schedule_table') || 'schedules';
+          const { data, error } = await supabaseClient.from(scheduleTable).select('*');
+          if (!error && data && data.length > 0) {
+            clinicSchedulesCache = data.map(function(row) {
+              return {
+                id: row.id,
+                staffId: row.staff_id || '',
+                staffName: row.staff_name || '',
+                staffRole: row.staff_role || 'Dokter',
+                day: row.day || 'Senin',
+                startTime: row.start_time || '08:00',
+                endTime: row.end_time || '20:00',
+                serviceUnit: row.service_unit || 'Poli Umum',
+                sessionLabel: row.session_label || 'Full Day',
+                quotaPerDay: row.quota_per_day || 50,
+                status: row.status || 'Aktif',
+                notes: row.notes || '',
+                phone: row.phone || ''
+              };
+            });
+            localStorage.setItem('latisha_schedules', JSON.stringify(clinicSchedulesCache));
+            refreshDutyScheduleOptions();
+            return;
+          }
+        } catch (e) {
+          console.warn('Supabase schedules fetch warning:', e);
+        }
+      }
+
+      try {
+        const saved = localStorage.getItem('latisha_schedules');
+        if (saved) {
+          clinicSchedulesCache = JSON.parse(saved);
+        }
+      } catch (e) {}
+    }
+
+    function getClinicSchedules() {
+      return clinicSchedulesCache;
+    }
+
+    function getDayNameFromDate(dateStr) {
+      if (!dateStr) return 'Senin';
+      const parts = dateStr.split('-');
+      if (parts.length !== 3) return 'Senin';
+      const date = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+      const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+      return days[date.getDay()] || 'Senin';
+    }
+
+    function refreshDutyScheduleOptions() {
+      const dateInput = document.getElementById('appointmentDate');
+      const serviceSelect = document.getElementById('serviceType');
+      const sessionSelect = document.getElementById('appointmentSession');
+      const noticeText = document.getElementById('dutyScheduleNoticeText');
+
+      if (!dateInput || !sessionSelect || !serviceSelect) return;
+
+      const dateStr = dateInput.value;
+      const dayName = getDayNameFromDate(dateStr);
+      const serviceType = serviceSelect.value || '';
+      const allSchedules = getClinicSchedules();
+
+      // Check if doctor is on leave or off for this day
+      const doctorSchedules = allSchedules.filter(function(sch) {
+        return sch.day === dayName && sch.staffRole === 'Dokter';
+      });
+
+      const isLeaveOrOff = doctorSchedules.length === 0 || doctorSchedules.every(function(sch) {
+        return sch.status === 'Cuti / Libur';
+      });
+
+      const formContainer = document.getElementById('formContainer');
+      let stampDiv = document.getElementById('noDoctorStamp');
+      if (!stampDiv && formContainer) {
+        stampDiv = document.createElement('div');
+        stampDiv.id = 'noDoctorStamp';
+        formContainer.insertBefore(stampDiv, formContainer.firstChild);
+      }
+
+      const submitBtn = document.getElementById('submitBtn');
+      const formInputs = document.querySelectorAll('#onlineRegForm input, #onlineRegForm select, #onlineRegForm textarea');
+
+      if (isLeaveOrOff) {
+        if (stampDiv) {
+          stampDiv.innerHTML = `
+            <div class="bg-rose-600 text-white p-4 rounded-2xl shadow-lg border-2 border-rose-700 text-center space-y-2 mb-4 animate-pulse">
+              <div class="inline-flex items-center gap-1.5 px-3 py-1 bg-white/20 rounded-full font-black text-xs uppercase tracking-widest">
+                <span>🚫</span> PENDAFTARAN TUTUP & TERKUNCI
+              </div>
+              <h3 class="text-lg sm:text-xl font-black tracking-wide">
+                SAAT INI TIDAK ADA DOKTER
+              </h3>
+              <p class="text-xs text-rose-100">
+                Jadwal praktik dokter pada hari <strong>${dayName}</strong> sedang Cuti / Libur atau tidak tersedia. Pendaftaran mandiri online ditutup sementara waktu.
+              </p>
+            </div>
+          `;
+        }
+        if (submitBtn) {
+          submitBtn.disabled = true;
+          submitBtn.classList.add('opacity-50', 'cursor-not-allowed');
+          submitBtn.innerHTML = '<span>Pendaftaran Ditutup (Tidak Ada Dokter)</span>';
+        }
+        formInputs.forEach(function(el) {
+          if (el.id !== 'appointmentDate') el.disabled = true;
+        });
+      } else {
+        if (stampDiv) stampDiv.innerHTML = '';
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+          submitBtn.innerHTML = `
+            <svg class="w-5 h-5 text-sky-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
+            </svg>
+            <span>Kirim Pendaftaran Berobat Online</span>
+          `;
+        }
+        formInputs.forEach(function(el) {
+          el.disabled = false;
+        });
+      }
+
+      // Filter matching
+      const matching = allSchedules.filter(function(sch) {
+        if (sch.day !== dayName) return false;
+        if (sch.status === 'Cuti / Libur') return false;
+        if (serviceType.indexOf('Poli Umum') !== -1) {
+          return (sch.serviceUnit && sch.serviceUnit.indexOf('Poli Umum') !== -1) || sch.staffRole === 'Dokter';
+        }
+        if (serviceType.indexOf('Konseling Farmasi') !== -1) {
+          return (sch.serviceUnit && sch.serviceUnit.indexOf('Konseling Farmasi') !== -1) || sch.staffRole === 'Super Admin / APJ' || sch.staffRole === 'Apoteker';
+        }
+        return true;
+      });
+
+      // Rebuild options
+      sessionSelect.innerHTML = '';
+
+      if (matching.length > 0) {
+        const dutyGroup = document.createElement('optgroup');
+        dutyGroup.label = 'Jadwal Dokter & Petugas Aktif (Hari ' + dayName + ')';
+        matching.forEach(function(sch) {
+          const opt = document.createElement('option');
+          opt.value = sch.staffName + ' (' + sch.staffRole + ') — ' + sch.startTime + ' - ' + sch.endTime + ' WIB [' + sch.sessionLabel + ']';
+          opt.textContent = '👨‍⚕️ ' + sch.staffName + ' — ' + sch.startTime + ' - ' + sch.endTime + ' WIB (' + sch.sessionLabel + ')';
+          dutyGroup.appendChild(opt);
+        });
+        sessionSelect.appendChild(dutyGroup);
+      }
+
+      const altGroup = document.createElement('optgroup');
+      altGroup.label = 'Pilihan Sesi / Jam Lainnya';
+      const defaultAlts = [
+        'Full Day (Fleksibel) — 08:00 - 20:00 WIB',
+        'Pagi (08:00 - 12:00 WIB)',
+        'Siang (13:00 - 17:00 WIB)',
+        'Malam (18:00 - 21:00 WIB)',
+        'Sesuai Perjanjian / On-Call'
+      ];
+      defaultAlts.forEach(function(alt) {
+        const opt = document.createElement('option');
+        opt.value = alt;
+        opt.textContent = alt;
+        altGroup.appendChild(opt);
+      });
+      sessionSelect.appendChild(altGroup);
+
+      // Update notice text
+      if (noticeText) {
+        if (matching.length > 0) {
+          const names = matching.map(function(s) { return s.staffName + ' (' + s.startTime + ' - ' + s.endTime + ' WIB)'; }).join(', ');
+          noticeText.innerHTML = 'Hari <strong>' + dayName + '</strong>: Petugas bertugas: <strong>' + names + '</strong>';
+        } else {
+          noticeText.innerHTML = 'Hari <strong>' + dayName + '</strong>: Layanan buka fleksibel pukul <strong>08.00 - 20.00 WIB</strong>';
+        }
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      const todayStr = new Date().toISOString().split('T')[0];
+      const dateInput = document.getElementById('appointmentDate');
+      const serviceSelect = document.getElementById('serviceType');
+
+      if (dateInput) {
+        dateInput.value = todayStr;
+        dateInput.min = todayStr; // Tidak bisa pilih tanggal lampau
+        dateInput.addEventListener('change', refreshDutyScheduleOptions);
+      }
+
+      if (serviceSelect) {
+        serviceSelect.addEventListener('change', refreshDutyScheduleOptions);
+      }
+
+      await loadClinicSchedules();
+      refreshDutyScheduleOptions();
+    });
+
+    // 1B. PENCARIAN OTOMATIS MASTER PASIEN BERDASARKAN NIK (16 DIGIT)
+    let nikLookupDebounceTimer = null;
+    let lastLookedUpNik = '';
+    let wasAutoFilledFromNik = false;
+    let nikLookupSeq = 0;
+
+    function normalizeHtmlDateValue(raw) {
+      const str = String(raw || '').trim();
+      if (!str) return '';
+      const iso = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (iso) return iso[1] + '-' + iso[2] + '-' + iso[3];
+      const dmy = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+      if (dmy) return dmy[3] + '-' + dmy[2].padStart(2, '0') + '-' + dmy[1].padStart(2, '0');
+      return '';
+    }
+
+    function setNikLookupUiState(state, info) {
+      const nikInput = document.getElementById('nik');
+      const spinner = document.getElementById('nikLookupSpinner');
+      const foundIcon = document.getElementById('nikLookupFoundIcon');
+      const box = document.getElementById('nikLookupStatusBox');
+      if (!box) return;
+
+      if (spinner) spinner.classList.toggle('hidden', state !== 'searching');
+      if (foundIcon) foundIcon.classList.toggle('hidden', state !== 'found');
+      if (nikInput) {
+        nikInput.classList.toggle('border-emerald-400', state === 'found');
+        nikInput.classList.toggle('border-slate-300', state !== 'found');
+      }
+
+      if (state === 'searching') {
+        box.innerHTML = '<span class="text-[11px] text-sky-700 font-bold block">Membaca Master Data Pasien berdasarkan NIK...</span>';
+      } else if (state === 'found' && info) {
+        const safeRm = String(info.noRm || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        box.innerHTML =
+          '<div class="mt-1 p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-[11px] text-emerald-900">' +
+          '<div class="font-extrabold">Data Pasien Terdaftar Ditemukan (No. RM: ' + safeRm + ')</div>' +
+          '<p class="text-[10.5px] text-emerald-800 leading-snug mt-0.5">Kolom identitas dan riwayat alergi di bawah otomatis terisi dari Master Data Pasien. Anda tetap dapat memperbarui data bila ada perubahan.</p>' +
+          '</div>';
+      } else if (state === 'not_found') {
+        box.innerHTML = '<span class="text-[10.5px] text-sky-700 font-semibold block">NIK belum terdaftar di Master Data Pasien. Silakan lengkapi data diri di bawah untuk pendaftaran pasien baru.</span>';
+      } else {
+        box.innerHTML = '<span class="text-[10px] text-slate-400 block">Pastikan 16 digit sesuai KTP/KK — jika NIK sudah terdaftar, data pasien terisi otomatis</span>';
+      }
+    }
+
+    function clearAutoFilledIdentityFields() {
+      if (!wasAutoFilledFromNik) return;
+      wasAutoFilledFromNik = false;
+      const nameEl = document.getElementById('name');
+      const birthEl = document.getElementById('birthDate');
+      const genderEl = document.getElementById('gender');
+      const phoneEl = document.getElementById('phone');
+      const addressEl = document.getElementById('address');
+      const allergyEl = document.getElementById('allergy');
+      if (nameEl) nameEl.value = '';
+      if (birthEl) birthEl.value = '';
+      if (genderEl) genderEl.value = 'Laki-laki';
+      if (phoneEl) phoneEl.value = '';
+      if (addressEl) addressEl.value = '';
+      if (allergyEl) allergyEl.value = 'Tidak Ada';
+    }
+
+    function applyMasterPatientRowToForm(row) {
+      if (!row) return;
+      const nameEl = document.getElementById('name');
+      const birthEl = document.getElementById('birthDate');
+      const genderEl = document.getElementById('gender');
+      const phoneEl = document.getElementById('phone');
+      const addressEl = document.getElementById('address');
+      const allergyEl = document.getElementById('allergy');
+
+      const resolvedName = String(row.nama_lengkap || row.nama || row.name || '').trim();
+      const resolvedBirth = normalizeHtmlDateValue(row.tanggal_lahir || row.tgl_lahir || row.birth_date || row.birthdate || row.birthDate);
+      const rawGender = String(row.jenis_kelamin || row.gender || row.jk || '').toLowerCase();
+      const resolvedGender = rawGender.indexOf('p') !== -1 || rawGender.indexOf('fem') !== -1 ? 'Perempuan' : 'Laki-laki';
+      const resolvedPhone = String(row.kontak || row.phone || row.no_hp || row.no_telepon || row.hp || row.whatsapp || '').replace(/\D/g, '');
+      const rawAddr = String(row.alamat || row.address || '').trim();
+      const resolvedAddr = rawAddr && rawAddr !== '-' ? rawAddr : '';
+      const resolvedAllergy = String(row.flag_alergi || row.allergy || row.alergi || '').trim() || 'Tidak Ada';
+      const resolvedNoRm = String(row.no_rm || row.noRm || row.id || '-').trim();
+
+      if (nameEl && resolvedName && resolvedName !== 'Tanpa Nama') nameEl.value = resolvedName;
+      if (birthEl && resolvedBirth) birthEl.value = resolvedBirth;
+      if (genderEl) genderEl.value = resolvedGender;
+      if (phoneEl && resolvedPhone) phoneEl.value = resolvedPhone;
+      if (addressEl) addressEl.value = resolvedAddr;
+      if (allergyEl) allergyEl.value = resolvedAllergy;
+
+      wasAutoFilledFromNik = true;
+      setNikLookupUiState('found', { noRm: resolvedNoRm });
+    }
+
+    function findLocalMasterPatientByNik(cleanNik) {
+      const isDemo = window.location.search.indexOf('mode=demo') !== -1;
+      const keys = isDemo ? ['latisha_demo_patients', 'latisha_patients'] : ['latisha_patients'];
+      for (let i = 0; i < keys.length; i++) {
+        try {
+          const raw = localStorage.getItem(keys[i]);
+          if (!raw) continue;
+          const list = JSON.parse(raw);
+          if (!Array.isArray(list)) continue;
+          const matched = list.find(function(p) {
+            return String((p && p.nik) || '').replace(/\D/g, '') === cleanNik;
+          });
+          if (matched) return matched;
+        } catch (e) {}
+      }
+      return null;
+    }
+
+    async function performHtmlNikLookup(rawNik) {
+      const cleanNik = String(rawNik || '').replace(/\D/g, '').slice(0, 16);
+      if (cleanNik.length < 16) {
+        nikLookupSeq += 1;
+        lastLookedUpNik = '';
+        setNikLookupUiState('idle');
+        if (cleanNik.length === 0) clearAutoFilledIdentityFields();
+        return;
+      }
+
+      if (lastLookedUpNik === cleanNik) return;
+      lastLookedUpNik = cleanNik;
+      const seq = ++nikLookupSeq;
+      setNikLookupUiState('searching');
+
+      const isDemo = window.location.search.indexOf('mode=demo') !== -1;
+      const localFound = findLocalMasterPatientByNik(cleanNik);
+
+      if (!isDemo && supabaseClient) {
+        try {
+          const patientTable = DEFAULT_CONFIG.patientTable || 'pasien';
+          const { data, error } = await supabaseClient
+            .from(patientTable)
+            .select('*')
+            .eq('nik', cleanNik)
+            .limit(1);
+
+          if (seq !== nikLookupSeq) return;
+          if (!error && Array.isArray(data) && data.length > 0) {
+            applyMasterPatientRowToForm(data[0]);
+            return;
+          }
+        } catch (err) {
+          console.warn('[Portal Pasien NIK Auto-Lookup Warning]:', err);
+        }
+      }
+
+      if (seq !== nikLookupSeq) return;
+      if (localFound) {
+        applyMasterPatientRowToForm(localFound);
+      } else {
+        clearAutoFilledIdentityFields();
+        setNikLookupUiState('not_found');
+      }
+    }
+
+    function scheduleNikAutoLookup(rawNik) {
+      if (nikLookupDebounceTimer) {
+        clearTimeout(nikLookupDebounceTimer);
+        nikLookupDebounceTimer = null;
+      }
+      const cleanNik = String(rawNik || '').replace(/\D/g, '').slice(0, 16);
+      if (cleanNik.length < 16) {
+        nikLookupSeq += 1;
+        lastLookedUpNik = '';
+        setNikLookupUiState('idle');
+        if (cleanNik.length === 0) clearAutoFilledIdentityFields();
+        return;
+      }
+      nikLookupDebounceTimer = setTimeout(function() {
+        performHtmlNikLookup(cleanNik);
+      }, 150);
+    }
+
+    function triggerImmediateNikAutoLookup(rawNik) {
+      const cleanNik = String(rawNik || '').replace(/\D/g, '').slice(0, 16);
+      if (cleanNik.length === 16) {
+        performHtmlNikLookup(cleanNik);
+      }
+    }
+
+    // 2. LOGIKA SUBMIT PENDAFTARAN PASIEN
+    async function handleRegistrationSubmit(event) {
+      event.preventDefault();
+
+      const submitBtn = document.getElementById('submitBtn');
+      submitBtn.disabled = true;
+      submitBtn.innerHTML = `
+        <svg class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+        </svg>
+        <span>Mengirim Pendaftaran ke Database...</span>
+      `;
+
+      // Ambil Nilai Form
+      const nik = document.getElementById('nik').value.trim();
+      const name = document.getElementById('name').value.trim();
+      const birthDate = document.getElementById('birthDate').value;
+      const gender = document.getElementById('gender').value;
+      const phone = document.getElementById('phone').value.trim();
+      const address = document.getElementById('address').value.trim();
+      const appointmentDate = document.getElementById('appointmentDate').value;
+      const appointmentSession = document.getElementById('appointmentSession').value;
+      const serviceType = document.getElementById('serviceType').value;
+      const complaint = document.getElementById('complaint').value.trim();
+      const allergy = document.getElementById('allergy').value.trim() || 'Tidak Ada';
+
+      // Generate Kode Booking Unik & Nomor Antrean Virtual
+      const randomNum = Math.floor(10000 + Math.random() * 90000);
+      const bookingCode = `LTF-${new Date().getFullYear().toString().slice(-2)}${String(new Date().getMonth() + 1).padStart(2, '0')}-${randomNum}`;
+      const queueNumber = `A-${String(Math.floor(1 + Math.random() * 35)).padStart(3, '0')}`;
+      const createdAt = new Date().toISOString();
+
+      const registrationData = {
+        booking_code: bookingCode,
+        queue_number: queueNumber,
+        nik,
+        name,
+        birth_date: birthDate || null,
+        gender,
+        phone,
+        address: address || '-',
+        appointment_date: appointmentDate,
+        appointment_session: appointmentSession,
+        service_type: serviceType,
+        complaint,
+        allergy,
+        status: 'Menunggu Verifikasi',
+        created_at: createdAt
+      };
+
+      let savedToSupabase = false;
+      let supabaseErrorMsg = '';
+      let assignedNoRm = '';
+      let isNewPatient = true;
+      let syncStatusNotice = '';
+
+      // 1. PENGECEKAN OTOMATIS (DUPLICATE CHECK) & AUTO-INSERT KE TABEL_PASIEN SUPABASE
+      if (supabaseClient) {
+        try {
+          const patientTable = localStorage.getItem('latisha_supabase_patient_table') || 'pasien';
+
+          // Query duplicate check apakah NIK sudah terdaftar di Supabase
+          const { data: existingPatients, error: checkErr } = await supabaseClient
+            .from(patientTable)
+            .select('*')
+            .eq('nik', nik)
+            .limit(1);
+
+          if (!checkErr && existingPatients && existingPatients.length > 0) {
+            // Pasien Lama
+            const found = existingPatients[0];
+            assignedNoRm = found.no_rm || found.id;
+            isNewPatient = false;
+            syncStatusNotice = `Pasien lama teridentifikasi: ${found.nama_lengkap || found.name} (No. RM: ${assignedNoRm}). Langsung dialokasikan antrean poli.`;
+          } else {
+            // Pasien Baru: Generate No. RM & INSERT otomatis ke tabel_pasien
+            isNewPatient = true;
+            let nextNoRmNum = 1;
+            try {
+              const { data: rmList } = await supabaseClient
+                .from(patientTable)
+                .select('id, no_rm')
+                .order('created_at', { ascending: false })
+                .limit(50);
+
+              if (rmList && rmList.length > 0) {
+                rmList.forEach(r => {
+                  const m = (r.no_rm || r.id || '').match(/RM-(\d+)/i);
+                  if (m && m[1]) {
+                    const n = parseInt(m[1], 10);
+                    if (n >= nextNoRmNum) nextNoRmNum = n + 1;
+                  }
+                });
+              }
+            } catch (cErr) {}
+
+            assignedNoRm = `RM-${String(nextNoRmNum).padStart(3, '0')}`;
+
+            const newPatientRow = {
+              id: assignedNoRm,
+              no_rm: assignedNoRm,
+              nik: nik,
+              nama_lengkap: name,
+              jenis_kelamin: gender,
+              tanggal_lahir: birthDate || null,
+              kategori: 'Pasien Praktik',
+              kontak: phone,
+              alamat: address || '-',
+              flag_alergi: allergy || 'Tidak Ada',
+              bpjs_no: '',
+              registered_online: true,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            };
+
+            const { error: insertErr } = await supabaseClient
+              .from(patientTable)
+              .upsert(newPatientRow, { onConflict: 'id' });
+
+            if (!insertErr) {
+              savedToSupabase = true;
+              syncStatusNotice = `Pasien baru berhasil didaftarkan dan tersimpan otomatis ke Master Pasien Supabase (No. RM: ${assignedNoRm}).`;
+            } else {
+              syncStatusNotice = `Pendaftaran tercatat (No. RM: ${assignedNoRm}). Catatan: ${insertErr.message}`;
+            }
+          }
+        } catch (supErr) {
+          console.warn('[Supabase Duplicate Check Exception]:', supErr);
+        }
+      }
+
+      if (!assignedNoRm) {
+        assignedNoRm = `RM-${Date.now().toString().slice(-4)}`;
+        syncStatusNotice = `Pendaftaran berhasil diproses dengan No. RM: ${assignedNoRm}`;
+      }
+
+      // SIMPAN KE SUPABASE JIKA TERSEDIA
+      if (supabaseClient) {
+        try {
+          const tableName = localStorage.getItem('latisha_supabase_table') || 'pendaftaran_online';
+          registrationData.no_rm = assignedNoRm;
+          const { data, error } = await supabaseClient
+            .from(tableName)
+            .insert([registrationData]);
+
+          if (error) {
+            console.warn('[Supabase Insert Error]:', error);
+            supabaseErrorMsg = error.message;
+          } else {
+            savedToSupabase = true;
+            console.info('[Supabase Insert Success]:', data);
+          }
+        } catch (err) {
+          console.warn('[Supabase Connection Exception]:', err);
+          supabaseErrorMsg = err?.message || String(err);
+        }
+      }
+
+      // SIMPAN JUGA KE LOCALSTORAGE & BROADCASTCHANNEL (Agar Dashboard Klinik Latisha Farma langsung menerima secara real-time)
+      try {
+        const existingRaw = localStorage.getItem('latisha_online_registrations') || '[]';
+        const existingList = JSON.parse(existingRaw);
+
+        // Format yang kompatibel dengan state aplikasi klinik
+        const appRegistrationObject = {
+          id: `REG-${Date.now().toString().slice(-6)}`,
+          bookingCode: bookingCode,
+          queueNumber: queueNumber,
+          nik: nik,
+          name: name,
+          phone: phone,
+          birthDate: birthDate,
+          gender: gender,
+          address: address,
+          appointmentDate: appointmentDate,
+          appointmentTime: appointmentSession.includes('08:30') ? '08:30' : appointmentSession.includes('14:00') ? '14:00' : '18:30',
+          appointmentSession: appointmentSession,
+          doctorId: 'DOC-001',
+          doctorName: 'dr. Anis Prima Dewi',
+          serviceType: serviceType,
+          paymentType: 'Umum / Mandiri',
+          complaint: complaint,
+          allergy: allergy,
+          status: 'Menunggu Verifikasi',
+          createdAt: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
+          branchId: 'BR-01'
+        };
+
+        existingList.unshift(appRegistrationObject);
+        localStorage.setItem('latisha_online_registrations', JSON.stringify(existingList));
+
+        // Kirim event broadcast agar tab dashboard klinik ter-update otomatis
+        if ('BroadcastChannel' in window) {
+          const bc = new BroadcastChannel('latisha_online_registration_channel');
+          bc.postMessage({ type: 'NEW_REGISTRATION', payload: appRegistrationObject });
+        }
+      } catch (storageErr) {
+        console.warn('LocalStorage save error:', storageErr);
+      }
+
+      // TAMPILKAN E-TIKET SUKSES
+      showSuccessModal({
+        bookingCode,
+        queueNumber,
+        name,
+        nik,
+        noRm: assignedNoRm,
+        isNewPatient,
+        syncStatusNotice,
+        appointmentDate,
+        appointmentSession,
+        serviceType,
+        allergy,
+        savedToSupabase,
+        supabaseErrorMsg
+      });
+
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = `
+        <svg class="w-5 h-5 text-sky-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
+        </svg>
+        <span>Kirim Pendaftaran Berobat Online</span>
+      `;
+    }
+
+    // 4. MODAL E-TIKET TAMPILAN
+    function showSuccessModal(data) {
+      document.getElementById('modalBookingCode').innerText = data.bookingCode;
+      document.getElementById('modalQueueNumber').innerText = data.queueNumber;
+      document.getElementById('modalPatientNoRm').innerText = data.noRm || '-';
+      document.getElementById('modalPatientName').innerText = data.name;
+      document.getElementById('modalPatientNik').innerText = data.nik;
+      document.getElementById('modalDate').innerText = data.appointmentDate;
+      document.getElementById('modalSession').innerText = data.appointmentSession;
+      document.getElementById('modalService').innerText = data.serviceType;
+      document.getElementById('modalAllergy').innerText = data.allergy || 'Tidak Ada';
+
+      // Update status badge & text
+      const statusTitle = document.getElementById('modalPatientStatusTitle');
+      const statusText = document.getElementById('modalPatientStatusText');
+      const statusBadge = document.getElementById('modalPatientStatusBadge');
+      const statusAlert = document.getElementById('modalPatientStatusAlert');
+
+      if (data.isNewPatient) {
+        statusTitle.innerText = '🎉 Pasien Baru Otomatis Terdaftar di Supabase';
+        statusText.innerText = data.syncStatusNotice || 'Data pasien baru berhasil disimpan ke Master Pasien Supabase.';
+        statusBadge.innerText = 'Pasien Baru (Auto-Insert)';
+        statusBadge.className = 'px-2 py-0.5 rounded-md font-bold text-[10px] bg-emerald-100 text-emerald-800';
+        statusAlert.className = 'p-3.5 rounded-2xl border text-xs font-bold flex items-start gap-2.5 bg-emerald-50 text-emerald-900 border-emerald-300';
+      } else {
+        statusTitle.innerText = '📋 Pasien Lama Teridentifikasi';
+        statusText.innerText = data.syncStatusNotice || 'Data pasien sudah ada di Master Pasien. Langsung dialokasikan antrean poli.';
+        statusBadge.innerText = 'Pasien Lama (Checked)';
+        statusBadge.className = 'px-2 py-0.5 rounded-md font-bold text-[10px] bg-sky-100 text-sky-800';
+        statusAlert.className = 'p-3.5 rounded-2xl border text-xs font-bold flex items-start gap-2.5 bg-sky-50 text-sky-900 border-sky-300';
+      }
+
+      // Set WhatsApp Message Action
+      const waBtn = document.getElementById('waShareBtn');
+      const waMessage = encodeURIComponent(
+        `Halo Latisha Farma, saya telah mendaftar online.\n\n` +
+        `*KODE BOOKING*: ${data.bookingCode}\n` +
+        `*NO. ANTREAN*: ${data.queueNumber}\n` +
+        `*Nama Pasien*: ${data.name}\n` +
+        `*NIK*: ${data.nik}\n` +
+        `*Jadwal Kunjungan*: ${data.appointmentDate} (${data.appointmentSession})\n` +
+        `*Poli*: ${data.serviceType}\n` +
+        `*Alergi*: ${data.allergy}\n\n` +
+        `Mohon konfirmasi kedatangan saya. Terima kasih.`
+      );
+      waBtn.onclick = () => {
+        window.open(`https://wa.me/62895326272957?text=${waMessage}`, '_blank');
+      };
+
+      const modal = document.getElementById('successModal');
+      modal.classList.remove('hidden');
+
+      // Scroll to top of modal
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function resetAndCloseModal() {
+      document.getElementById('successModal').classList.add('hidden');
+      document.getElementById('onlineRegForm').reset();
+      nikLookupSeq += 1;
+      lastLookedUpNik = '';
+      wasAutoFilledFromNik = false;
+      setNikLookupUiState('idle');
+      // Reset appointment date to today
+      document.getElementById('appointmentDate').value = new Date().toISOString().split('T')[0];
+      document.getElementById('allergy').value = 'Tidak Ada';
+    }
+  </script>
+
+  <!-- ============================================================ -->
+  <!-- FITUR OBROLAN INTERAKTIF PASIEN <-> PETUGAS LATISHA FARMA    -->
+  <!-- ============================================================ -->
+  <div id="portalLiveChatRoot" class="no-print fixed bottom-4 right-4 sm:bottom-5 sm:right-5 z-50 flex flex-col items-end pointer-events-none">
+    <!-- Chat Panel -->
+    <div
+      id="portalLiveChatPanel"
+      role="dialog"
+      aria-label="Layanan Pelanggan dan Pasien Latisha Farma"
+      class="hidden pointer-events-auto mb-3 w-[calc(100vw-2rem)] sm:w-[440px] h-[550px] max-h-[calc(100vh-6.5rem)] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden"
+    >
+      <!-- Header -->
+      <div class="bg-gradient-to-r from-sky-700 via-sky-800 to-emerald-700 text-white px-4 py-3 flex items-center justify-between gap-2 shrink-0">
+        <div class="flex items-center gap-2.5 min-w-0">
+          <div class="w-9 h-9 rounded-xl bg-white/15 border border-white/25 flex items-center justify-center shrink-0 relative">
+            <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+            </svg>
+            <span id="portalChatHeaderDot" class="w-2.5 h-2.5 rounded-full bg-amber-300 border-2 border-sky-800 absolute -bottom-0.5 -right-0.5"></span>
+          </div>
+          <div class="min-w-0">
+            <h3 class="font-extrabold text-sm leading-tight truncate">Layanan Pelanggan &amp; Pasien</h3>
+            <p id="portalChatPresenceText" class="text-[11px] text-sky-100/95 truncate">
+              Menghubungkan ke petugas klinik...
+            </p>
+          </div>
+        </div>
+        <div class="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            id="portalChatResetBtn"
+            title="Mulai obrolan baru"
+            aria-label="Mulai obrolan baru"
+            class="p-1.5 rounded-lg text-sky-100 hover:text-white hover:bg-white/15 transition cursor-pointer"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+            </svg>
+          </button>
+          <button
+            type="button"
+            id="portalChatMinimizeBtn"
+            aria-label="Perkecil obrolan"
+            class="p-1.5 rounded-lg text-sky-100 hover:text-white hover:bg-white/15 transition cursor-pointer"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Sub-navigation Strip: Obrolan, Pasien, Cek Obat, Kontak (Matches Staff Chat Widget) -->
+      <div class="bg-slate-50 border-b border-slate-200 px-2.5 py-2 flex items-center justify-between gap-1.5 shrink-0">
+        <div class="flex items-center bg-slate-200/75 p-0.5 rounded-xl text-[10.5px] font-bold">
+          <button
+            type="button"
+            id="portalTabObrolan"
+            class="px-2 py-1 rounded-lg flex items-center gap-1 transition cursor-pointer relative bg-white text-sky-800 shadow-xs"
+          >
+            <svg class="w-3 h-3 text-emerald-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"></path>
+            </svg>
+            <span>Obrolan</span>
+            <span
+              id="portalTabObrolanBadge"
+              class="hidden min-w-[16px] h-4 px-1 rounded-full bg-rose-500 text-white text-[9px] font-black items-center justify-center"
+            >0</span>
+          </button>
+          <button
+            type="button"
+            id="portalTabPasien"
+            class="px-2 py-1 rounded-lg flex items-center gap-1 transition cursor-pointer relative text-slate-600 hover:text-slate-800"
+          >
+            <svg class="w-3 h-3 text-sky-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"></path>
+            </svg>
+            <span>Pasien</span>
+            <span
+              id="portalTabPasienBadge"
+              class="hidden min-w-[16px] h-4 px-1 rounded-full bg-rose-500 text-white text-[9px] font-black items-center justify-center"
+            >0</span>
+          </button>
+          <button
+            type="button"
+            id="portalTabCekObat"
+            class="px-2 py-1 rounded-lg flex items-center gap-1 transition cursor-pointer text-slate-600 hover:text-slate-800"
+          >
+            <svg class="w-3 h-3 text-sky-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+            </svg>
+            <span>Cek Obat</span>
+          </button>
+        </div>
+
+        <div class="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            id="portalChatKontakBtn"
+            title="Salin nomor telepon apotek"
+            class="px-2 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10px] font-bold flex items-center gap-1 transition cursor-pointer"
+          >
+            <svg id="portalKontakPhoneIcon" class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"></path>
+            </svg>
+            <svg id="portalKontakCheckIcon" class="w-3 h-3 text-emerald-600 shrink-0 hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"></path>
+            </svg>
+            <span id="portalKontakLabel">Kontak</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Shared Mandatory Patient Identity Section (Nama & No. Telepon / WhatsApp) -->
+      <div id="portalIdentitySummaryBar" class="hidden bg-emerald-50/80 border-b border-emerald-200/80 px-3 py-1.5 items-center justify-between gap-2 shrink-0">
+        <div class="flex items-center gap-1.5 min-w-0 text-[11px]">
+          <svg class="w-3.5 h-3.5 text-emerald-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"></path>
+          </svg>
+          <span id="portalIdentitySummaryName" class="font-extrabold text-slate-800 truncate">-</span>
+          <span class="text-slate-400">·</span>
+          <span id="portalIdentitySummaryPhone" class="font-mono font-bold text-emerald-800 truncate">-</span>
+        </div>
+        <button
+          type="button"
+          id="portalIdentityEditBtn"
+          class="px-2 py-0.5 rounded-md bg-white hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10px] font-extrabold flex items-center gap-1 shrink-0 cursor-pointer transition"
+        >
+          <span>Ubah</span>
+        </button>
+      </div>
+
+      <div id="portalChatProfileBar" class="bg-sky-50/90 border-b border-sky-200 px-3 py-2.5 space-y-2 shrink-0">
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-[10.5px] font-extrabold text-sky-900 flex items-center gap-1">
+            <svg class="w-3 h-3 text-sky-700 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+            </svg>
+            <span>Data Pelanggan / Pasien (Wajib Diisi Sebelum Memulai Obrolan)</span>
+          </span>
+          <button
+            type="button"
+            id="portalChatProfileSaveBtn"
+            class="px-2.5 py-0.5 rounded-md bg-sky-700 hover:bg-sky-800 text-white text-[10px] font-extrabold cursor-pointer transition shrink-0"
+          >
+            Simpan
+          </button>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+          <input
+            type="text"
+            id="portalChatNameInput"
+            required
+            placeholder="Nama Lengkap *"
+            aria-label="Nama Lengkap Pelanggan atau Pasien"
+            class="w-full px-2.5 py-1.5 text-xs font-bold bg-white border border-sky-200 rounded-lg focus:ring-2 focus:ring-sky-500 outline-none text-slate-800"
+          />
+          <input
+            type="tel"
+            id="portalChatPhoneInput"
+            required
+            placeholder="No. Telepon / WA *"
+            aria-label="Nomor Telepon atau WhatsApp"
+            class="w-full px-2.5 py-1.5 text-xs font-mono font-bold bg-white border border-sky-200 rounded-lg focus:ring-2 focus:ring-sky-500 outline-none text-slate-800"
+          />
+        </div>
+        <div
+          id="portalChatIdentityError"
+          class="hidden items-center gap-1.5 text-[10.5px] font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1"
+        >
+          <span>Harap isi Nama Lengkap dan Nomor Telepon / WhatsApp terlebih dahulu sebelum memulai obrolan.</span>
+        </div>
+        <p id="portalChatIdentityHint" class="text-[10px] text-sky-800 font-semibold leading-snug">
+          Isi <strong>Nama</strong> &amp; <strong>No. Telepon/WA</strong> di atas untuk membuka tombol topik cepat dan memulai obrolan.
+        </p>
+      </div>
+
+      <!-- ======================================================== -->
+      <!-- VIEW 1: OBROLAN (AUTOMATED INTERACTIVE ASSISTANT)        -->
+      <!-- ======================================================== -->
+      <div id="portalViewObrolan" class="flex-1 flex flex-col min-h-0">
+        <div id="portalAssistantMessages" class="flex-1 overflow-y-auto p-3.5 space-y-3 bg-slate-50/70 custom-scrollbar"></div>
+
+        <!-- Quick Topic Buttons for Obrolan -->
+        <div class="px-3 py-2 bg-white border-t border-slate-100 flex items-center gap-1.5 overflow-x-auto shrink-0">
+          <button
+            type="button"
+            data-starter="Halo, kapan jadwal praktek dokter hari ini?"
+            class="portal-assistant-starter px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-sky-50 hover:text-sky-800 border border-slate-200 hover:border-sky-200 text-[10px] font-bold text-slate-700 inline-flex items-center gap-1 whitespace-nowrap shrink-0 transition cursor-pointer disabled:opacity-50"
+          >
+            <svg class="w-3 h-3 text-sky-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+            </svg>
+            <span>Jadwal Dokter</span>
+          </button>
+          <button
+            type="button"
+            data-starter="Bantu saya cek ketersediaan stok dan harga obat yang tersedia di apotek."
+            class="portal-assistant-starter px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-sky-50 hover:text-sky-800 border border-slate-200 hover:border-sky-200 text-[10px] font-bold text-slate-700 inline-flex items-center gap-1 whitespace-nowrap shrink-0 transition cursor-pointer disabled:opacity-50"
+          >
+            <svg class="w-3 h-3 text-sky-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path>
+            </svg>
+            <span>Cek Harga &amp; Stok</span>
+          </button>
+          <button
+            type="button"
+            data-starter="Berikan panduan singkat cara minum obat yang benar (sebelum/sesudah makan dan penyimpanan obat)."
+            class="portal-assistant-starter px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-sky-50 hover:text-sky-800 border border-slate-200 hover:border-sky-200 text-[10px] font-bold text-slate-700 inline-flex items-center gap-1 whitespace-nowrap shrink-0 transition cursor-pointer disabled:opacity-50"
+          >
+            <svg class="w-3 h-3 text-sky-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
+            </svg>
+            <span>Cara Pakai / KIE</span>
+          </button>
+          <button
+            type="button"
+            data-starter="Bagaimana alur pendaftaran pasien baru dan berapa antrean yang sedang menunggu saat ini?"
+            class="portal-assistant-starter px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-sky-50 hover:text-sky-800 border border-slate-200 hover:border-sky-200 text-[10px] font-bold text-slate-700 inline-flex items-center gap-1 whitespace-nowrap shrink-0 transition cursor-pointer disabled:opacity-50"
+          >
+            <svg class="w-3 h-3 text-sky-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+            </svg>
+            <span>Antrean &amp; Daftar</span>
+          </button>
+          <button
+            type="button"
+            data-starter="Apa saja promo aktif dan biaya layanan cek kesehatan (gula darah, asam urat, kolesterol)?"
+            class="portal-assistant-starter px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-sky-50 hover:text-sky-800 border border-slate-200 hover:border-sky-200 text-[10px] font-bold text-slate-700 inline-flex items-center gap-1 whitespace-nowrap shrink-0 transition cursor-pointer disabled:opacity-50"
+          >
+            <svg class="w-3 h-3 text-sky-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"></path>
+            </svg>
+            <span>Promo &amp; Cek Lab</span>
+          </button>
+        </div>
+
+        <!-- Obrolan Composer Form -->
+        <form id="portalAssistantForm" class="p-2.5 bg-white border-t border-slate-200 flex items-center gap-2 shrink-0">
+          <input
+            type="text"
+            id="portalAssistantInput"
+            autocomplete="off"
+            placeholder="Tanya jadwal dokter, stok obat, cara minum obat..."
+            class="flex-1 min-w-0 px-3 py-2 text-xs font-semibold bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-sky-500 outline-none text-slate-800 placeholder:text-slate-400"
+          />
+          <button
+            type="submit"
+            id="portalAssistantSendBtn"
+            aria-label="Kirim pertanyaan"
+            class="p-2.5 rounded-xl bg-sky-700 hover:bg-sky-800 text-white transition cursor-pointer shrink-0 disabled:opacity-45"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
+            </svg>
+          </button>
+        </form>
+      </div>
+
+      <!-- ======================================================== -->
+      <!-- VIEW 2: PASIEN (REAL-TIME TWO-WAY LIVE CHAT WITH STAFF)  -->
+      <!-- ======================================================== -->
+      <div id="portalViewPasien" class="hidden flex-1 flex-col min-h-0">
+        <!-- Live Connection Sub-Bar -->
+        <div class="px-3 py-1.5 bg-white border-b border-slate-200 flex items-center justify-between gap-2 shrink-0">
+          <span id="portalLiveSubStatus" class="text-[10.5px] font-bold text-slate-700 truncate">
+            Menghubungkan ke petugas apotek...
+          </span>
+        </div>
+
+        <!-- Live Messages Container -->
+        <div id="portalChatMessages" class="flex-1 overflow-y-auto p-3.5 space-y-3 bg-slate-50/80 custom-scrollbar">
+          <div class="bg-white border border-sky-100 rounded-2xl p-3 text-xs text-slate-700 shadow-sm">
+            <p class="font-extrabold text-sky-800 mb-1">Chat Langsung Petugas Apotek Latisha Farma</p>
+            <p class="leading-relaxed text-[11px] text-slate-600">
+              Halo! Pastikan <strong>Nama</strong> dan <strong>No. Telepon</strong> di atas telah diisi, lalu ketik pesan Anda untuk terhubung langsung dengan Petugas Apotek secara real-time.
+            </p>
+          </div>
+        </div>
+
+        <!-- Quick Topic Buttons for Live Tab -->
+        <div id="portalChatQuickStarters" class="px-3 py-2 bg-white border-t border-slate-100 flex items-center gap-1.5 overflow-x-auto shrink-0">
+          <button
+            type="button"
+            data-starter="Halo, kapan jadwal praktek dokter hari ini?"
+            class="portal-chat-starter px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-sky-50 hover:text-sky-800 border border-slate-200 hover:border-sky-200 text-[10px] font-bold text-slate-700 inline-flex items-center gap-1 whitespace-nowrap shrink-0 transition cursor-pointer disabled:opacity-50"
+          >
+            <svg class="w-3 h-3 text-sky-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+            </svg>
+            <span>Jadwal Dokter</span>
+          </button>
+          <button
+            type="button"
+            data-starter="Bantu saya cek ketersediaan stok dan harga obat yang tersedia di apotek."
+            class="portal-chat-starter px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-sky-50 hover:text-sky-800 border border-slate-200 hover:border-sky-200 text-[10px] font-bold text-slate-700 inline-flex items-center gap-1 whitespace-nowrap shrink-0 transition cursor-pointer disabled:opacity-50"
+          >
+            <svg class="w-3 h-3 text-sky-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path>
+            </svg>
+            <span>Cek Harga &amp; Stok</span>
+          </button>
+          <button
+            type="button"
+            data-starter="Berikan panduan singkat cara minum obat yang benar (sebelum/sesudah makan dan penyimpanan obat)."
+            class="portal-chat-starter px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-sky-50 hover:text-sky-800 border border-slate-200 hover:border-sky-200 text-[10px] font-bold text-slate-700 inline-flex items-center gap-1 whitespace-nowrap shrink-0 transition cursor-pointer disabled:opacity-50"
+          >
+            <svg class="w-3 h-3 text-sky-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
+            </svg>
+            <span>Cara Pakai / KIE</span>
+          </button>
+          <button
+            type="button"
+            data-starter="Bagaimana alur pendaftaran pasien baru dan berapa antrean yang sedang menunggu saat ini?"
+            class="portal-chat-starter px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-sky-50 hover:text-sky-800 border border-slate-200 hover:border-sky-200 text-[10px] font-bold text-slate-700 inline-flex items-center gap-1 whitespace-nowrap shrink-0 transition cursor-pointer disabled:opacity-50"
+          >
+            <svg class="w-3 h-3 text-sky-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+            </svg>
+            <span>Antrean &amp; Daftar</span>
+          </button>
+          <button
+            type="button"
+            data-starter="Apa saja promo aktif dan biaya layanan cek kesehatan (gula darah, asam urat, kolesterol)?"
+            class="portal-chat-starter px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-sky-50 hover:text-sky-800 border border-slate-200 hover:border-sky-200 text-[10px] font-bold text-slate-700 inline-flex items-center gap-1 whitespace-nowrap shrink-0 transition cursor-pointer disabled:opacity-50"
+          >
+            <svg class="w-3 h-3 text-sky-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"></path>
+            </svg>
+            <span>Promo &amp; Cek Lab</span>
+          </button>
+        </div>
+
+        <!-- Live Composer Form -->
+        <form id="portalChatForm" class="p-2.5 bg-white border-t border-slate-200 flex items-center gap-2 shrink-0">
+          <input
+            type="text"
+            id="portalChatInput"
+            autocomplete="off"
+            placeholder="Tulis pesan real-time ke petugas Latisha Farma..."
+            class="flex-1 min-w-0 px-3 py-2 text-xs font-semibold bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-sky-500 outline-none text-slate-800 placeholder:text-slate-400"
+          />
+          <button
+            type="submit"
+            id="portalChatSendBtn"
+            aria-label="Kirim pesan ke petugas"
+            class="p-2.5 rounded-xl bg-sky-700 hover:bg-sky-800 text-white transition cursor-pointer shrink-0 disabled:opacity-45"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
+            </svg>
+          </button>
+        </form>
+      </div>
+
+      <!-- ======================================================== -->
+      <!-- VIEW 3: CEK OBAT (LIVE CATALOG LOOKUP + TANYA OBAT)      -->
+      <!-- ======================================================== -->
+      <div id="portalViewCatalog" class="hidden flex-1 flex-col min-h-0 bg-slate-50/50">
+        <div class="p-3 bg-white border-b border-slate-200 shrink-0">
+          <div class="relative">
+            <svg class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+            </svg>
+            <input
+              type="text"
+              id="portalCatalogSearchInput"
+              autocomplete="off"
+              placeholder="Cari nama obat, vitamin, atau golongan..."
+              class="w-full pl-9 pr-8 py-2 text-xs font-semibold bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-sky-500 outline-none text-slate-800 placeholder:text-slate-400"
+            />
+            <button
+              type="button"
+              id="portalCatalogClearBtn"
+              aria-label="Hapus pencarian obat"
+              class="hidden absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+            >
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div id="portalCatalogList" class="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar">
+          <div class="text-center py-8 text-xs text-slate-400">Memuat katalog obat...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Floating Trigger Button (Icon Only) -->
+    <button
+      type="button"
+      id="portalLiveChatToggleBtn"
+      aria-expanded="false"
+      title="Obrolan Pasien"
+      aria-label="Buka obrolan interaktif layanan pelanggan dan pasien"
+      class="pointer-events-auto w-11 h-11 flex items-center justify-center rounded-full bg-gradient-to-r from-sky-700 to-emerald-600 hover:from-sky-800 hover:to-emerald-700 text-white shadow-lg hover:shadow-xl border border-white/25 transition-all duration-200 cursor-pointer relative"
+    >
+      <span class="relative flex items-center justify-center">
+        <svg id="portalChatFabOpenIcon" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+        </svg>
+        <svg id="portalChatFabCloseIcon" class="w-5 h-5 hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"></path>
+        </svg>
+        <span id="portalChatFabDot" class="w-2.5 h-2.5 rounded-full bg-amber-300 border-2 border-sky-800 absolute -bottom-0.5 -right-0.5"></span>
+      </span>
+      <span
+        id="portalChatUnreadBadge"
+        class="hidden absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-black items-center justify-center shadow-xs border border-white/80"
+      >0</span>
+    </button>
+  </div>
+
+  <script>
+    (function initPortalLiveChat() {
+      const SESSION_KEY = 'latisha_portal_live_chat_session_id_v1';
+      const PROFILE_KEY = 'latisha_portal_live_chat_profile_v1';
+      const ASSISTANT_STORAGE_KEY = 'latisha_portal_assistant_chat_v1';
+      const LIVE_CHAT_BC_NAME = 'latisha_live_chat_sync_v1';
+      const INDONESIAN_DAYS = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+
+      function getOrCreateSessionId() {
+        try {
+          const existing = localStorage.getItem(SESSION_KEY);
+          if (existing && existing.trim().length >= 8) return existing.trim();
+          const created = 'pt-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+          localStorage.setItem(SESSION_KEY, created);
+          return created;
+        } catch (e) {
+          return 'pt-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        }
+      }
+
+      const baseSessionId = getOrCreateSessionId().replace(/__(obrolan|pasien)$/, '');
+      const obrolanSessionId = baseSessionId + '__obrolan';
+      const pasienSessionId = baseSessionId + '__pasien';
+      let isOpen = false;
+      let activeMode = 'chat'; // 'chat' | 'live' | 'catalog'
+      let isConnected = false;
+      let staffOnlineCount = 0;
+      let unreadObrolanCount = 0;
+      let unreadPasienCount = 0;
+      let pharmacyPhone = '0895326272957';
+      let pharmacyName = 'Apotek & Layanan Medis Latisha Farma';
+      let isEditingIdentity = false;
+      let ws = null;
+      let reconnectAttempt = 0;
+      let reconnectTimer = null;
+      let heartbeatTimer = null;
+      let bc = null;
+      let isAutoReplyingObrolan = false;
+      let isAutoReplyingLive = false;
+      let catalogDebounceTimer = null;
+      const renderedObrolanIds = new Set();
+      const obrolanMessagesCache = [];
+      const renderedMessageIds = new Set();
+      const sessionMessagesCache = [];
+
+      // DOM refs
+      const panel = document.getElementById('portalLiveChatPanel');
+      const toggleBtn = document.getElementById('portalLiveChatToggleBtn');
+      const headerChatBtn = document.getElementById('portalHeaderChatBtn');
+      const bannerOpenChatBtn = document.getElementById('portalBannerOpenChatBtn');
+      const minimizeBtn = document.getElementById('portalChatMinimizeBtn');
+      const resetBtn = document.getElementById('portalChatResetBtn');
+      const presenceText = document.getElementById('portalChatPresenceText');
+      const liveSubStatus = document.getElementById('portalLiveSubStatus');
+      const headerDot = document.getElementById('portalChatHeaderDot');
+      const topHeaderDot = document.getElementById('portalHeaderChatDot');
+      const topHeaderUnread = document.getElementById('portalHeaderUnreadBadge');
+      const bannerDot = document.getElementById('portalBannerChatDot');
+      const bannerBadge = document.getElementById('portalBannerPresenceBadge');
+      const fabDot = document.getElementById('portalChatFabDot');
+      const fabOpenIcon = document.getElementById('portalChatFabOpenIcon');
+      const fabCloseIcon = document.getElementById('portalChatFabCloseIcon');
+      const fabLabel = document.getElementById('portalChatFabLabel');
+      const unreadBadge = document.getElementById('portalChatUnreadBadge');
+
+      // Sub-nav tabs + Kontak
+      const tabObrolan = document.getElementById('portalTabObrolan');
+      const tabObrolanBadge = document.getElementById('portalTabObrolanBadge');
+      const tabPasien = document.getElementById('portalTabPasien');
+      const tabPasienBadge = document.getElementById('portalTabPasienBadge');
+      const tabCekObat = document.getElementById('portalTabCekObat');
+      const kontakBtn = document.getElementById('portalChatKontakBtn');
+      const kontakPhoneIcon = document.getElementById('portalKontakPhoneIcon');
+      const kontakCheckIcon = document.getElementById('portalKontakCheckIcon');
+      const kontakLabel = document.getElementById('portalKontakLabel');
+
+      // Shared Mandatory Patient Identity DOM
+      const identitySummaryBar = document.getElementById('portalIdentitySummaryBar');
+      const identitySummaryName = document.getElementById('portalIdentitySummaryName');
+      const identitySummaryPhone = document.getElementById('portalIdentitySummaryPhone');
+      const identityEditBtn = document.getElementById('portalIdentityEditBtn');
+      const profileBar = document.getElementById('portalChatProfileBar');
+      const profileSaveBtn = document.getElementById('portalChatProfileSaveBtn');
+      const nameInput = document.getElementById('portalChatNameInput');
+      const phoneInput = document.getElementById('portalChatPhoneInput');
+      const identityErrorEl = document.getElementById('portalChatIdentityError');
+      const identityHintEl = document.getElementById('portalChatIdentityHint');
+
+      // Views
+      const viewObrolan = document.getElementById('portalViewObrolan');
+      const viewPasien = document.getElementById('portalViewPasien');
+      const viewCatalog = document.getElementById('portalViewCatalog');
+
+      // Obrolan (Assistant) DOM
+      const assistantMessagesEl = document.getElementById('portalAssistantMessages');
+      const assistantForm = document.getElementById('portalAssistantForm');
+      const assistantInput = document.getElementById('portalAssistantInput');
+
+      // Pasien (Live) DOM
+      const messagesEl = document.getElementById('portalChatMessages');
+      const chatForm = document.getElementById('portalChatForm');
+      const chatInput = document.getElementById('portalChatInput');
+
+      // Cek Obat (Catalog) DOM
+      const catalogSearchInput = document.getElementById('portalCatalogSearchInput');
+      const catalogClearBtn = document.getElementById('portalCatalogClearBtn');
+      const catalogListEl = document.getElementById('portalCatalogList');
+
+      if (!panel || !toggleBtn || !messagesEl || !assistantMessagesEl) return;
+
+      async function copyTextSafe(text) {
+        if (!text) return false;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+            return true;
+          }
+        } catch (e) {}
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          const ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          return ok;
+        } catch (e) {
+          return false;
+        }
+      }
+
+      // =====================================================================
+      // MANDATORY PATIENT IDENTITY (NAMA & NO. TELEPON / WHATSAPP)
+      // =====================================================================
+      function getRawChatName() {
+        const fromChat = (nameInput && nameInput.value ? nameInput.value : '').trim();
+        if (fromChat) return fromChat;
+        const formNameEl = document.getElementById('name');
+        const fromForm = (formNameEl && formNameEl.value ? formNameEl.value : '').trim();
+        return fromForm;
+      }
+
+      function getRawChatPhone() {
+        const fromChat = (phoneInput && phoneInput.value ? phoneInput.value : '').trim();
+        if (fromChat) return fromChat;
+        const formPhoneEl = document.getElementById('phone');
+        const fromForm = (formPhoneEl && formPhoneEl.value ? formPhoneEl.value : '').trim();
+        return fromForm;
+      }
+
+      function isIdentityValid() {
+        const cleanName = getRawChatName();
+        const digitsOnly = getRawChatPhone().replace(/\D/g, '');
+        return cleanName.length >= 2 && digitsOnly.length >= 8;
+      }
+
+      function updateIdentityBarUI(showError) {
+        const valid = isIdentityValid();
+        if (nameInput && !nameInput.value.trim()) {
+          const formNameEl = document.getElementById('name');
+          if (formNameEl && formNameEl.value.trim()) nameInput.value = formNameEl.value.trim();
+        }
+        if (phoneInput && !phoneInput.value.trim()) {
+          const formPhoneEl = document.getElementById('phone');
+          if (formPhoneEl && formPhoneEl.value.trim()) phoneInput.value = formPhoneEl.value.trim();
+        }
+
+        const resolvedName = getRawChatName();
+        const resolvedPhone = getRawChatPhone();
+
+        if (identitySummaryName) identitySummaryName.textContent = resolvedName || '-';
+        if (identitySummaryPhone) identitySummaryPhone.textContent = resolvedPhone || '-';
+
+        const shouldShowForm = !valid || isEditingIdentity;
+
+        if (identitySummaryBar) {
+          identitySummaryBar.classList.toggle('hidden', shouldShowForm);
+          identitySummaryBar.classList.toggle('flex', !shouldShowForm);
+        }
+        if (profileBar) {
+          profileBar.classList.toggle('hidden', !shouldShowForm);
+        }
+        if (identityErrorEl) {
+          identityErrorEl.classList.toggle('hidden', !showError);
+          identityErrorEl.classList.toggle('flex', Boolean(showError));
+        }
+        if (identityHintEl) {
+          identityHintEl.classList.toggle('hidden', Boolean(showError));
+        }
+
+        if (assistantInput) {
+          assistantInput.placeholder = valid
+            ? 'Tanya jadwal dokter, stok obat, cara minum obat...'
+            : 'Isi Nama & No. Telepon di atas untuk memulai obrolan...';
+        }
+        if (chatInput) {
+          chatInput.placeholder = valid
+            ? 'Tulis pesan real-time ke petugas Latisha Farma...'
+            : 'Isi Nama & No. Telepon di atas untuk memulai obrolan...';
+        }
+      }
+
+      function requireValidIdentity() {
+        if (isIdentityValid()) {
+          updateIdentityBarUI(false);
+          return true;
+        }
+        isEditingIdentity = true;
+        updateIdentityBarUI(true);
+        setTimeout(function () {
+          if (nameInput && nameInput.value.trim().length < 2) {
+            nameInput.focus();
+          } else if (phoneInput) {
+            phoneInput.focus();
+          }
+        }, 50);
+        return false;
+      }
+
+      function loadProfile() {
+        try {
+          const saved = JSON.parse(localStorage.getItem(PROFILE_KEY) || '{}');
+          if (saved.name && nameInput) nameInput.value = saved.name;
+          if (saved.phone && phoneInput) phoneInput.value = saved.phone;
+        } catch (e) {}
+        updateIdentityBarUI(false);
+      }
+
+      function saveProfileLocal() {
+        try {
+          localStorage.setItem(
+            PROFILE_KEY,
+            JSON.stringify({
+              name: getRawChatName(),
+              phone: getRawChatPhone()
+            })
+          );
+        } catch (e) {}
+      }
+
+      function getResolvedPatientName() {
+        return getRawChatName() || 'Pelanggan Portal';
+      }
+
+      function getResolvedPatientPhone() {
+        return getRawChatPhone();
+      }
+
+      loadProfile();
+
+      if (nameInput) {
+        nameInput.addEventListener('input', function () {
+          saveProfileLocal();
+          if (isIdentityValid() && identityErrorEl) {
+            identityErrorEl.classList.add('hidden');
+            identityErrorEl.classList.remove('flex');
+            if (identityHintEl) identityHintEl.classList.remove('hidden');
+          }
+        });
+      }
+
+      if (phoneInput) {
+        phoneInput.addEventListener('input', function () {
+          phoneInput.value = phoneInput.value.replace(/[^0-9+]/g, '');
+          saveProfileLocal();
+          if (isIdentityValid() && identityErrorEl) {
+            identityErrorEl.classList.add('hidden');
+            identityErrorEl.classList.remove('flex');
+            if (identityHintEl) identityHintEl.classList.remove('hidden');
+          }
+        });
+      }
+
+      if (identityEditBtn) {
+        identityEditBtn.addEventListener('click', function () {
+          isEditingIdentity = true;
+          updateIdentityBarUI(false);
+          setTimeout(function () { if (nameInput) nameInput.focus(); }, 50);
+        });
+      }
+
+      if (profileSaveBtn) {
+        profileSaveBtn.addEventListener('click', function () {
+          if (!requireValidIdentity()) return;
+          saveProfileLocal();
+          isEditingIdentity = false;
+          updateIdentityBarUI(false);
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({
+                type: 'chat:update_profile',
+                sessionId: baseSessionId,
+                patientName: getResolvedPatientName(),
+                patientPhone: getResolvedPatientPhone()
+              })
+            );
+          }
+        });
+      }
+
+      const regNameEl = document.getElementById('name');
+      const regPhoneEl = document.getElementById('phone');
+      if (regNameEl) {
+        regNameEl.addEventListener('blur', function () {
+          if (nameInput && !nameInput.value.trim() && regNameEl.value.trim()) {
+            nameInput.value = regNameEl.value.trim();
+            saveProfileLocal();
+            updateIdentityBarUI(false);
+          }
+        });
+      }
+      if (regPhoneEl) {
+        regPhoneEl.addEventListener('blur', function () {
+          if (phoneInput && !phoneInput.value.trim() && regPhoneEl.value.trim()) {
+            phoneInput.value = regPhoneEl.value.trim();
+            saveProfileLocal();
+            updateIdentityBarUI(false);
+          }
+        });
+      }
+
+      if (assistantInput) {
+        assistantInput.addEventListener('focus', function () {
+          if (!isIdentityValid()) requireValidIdentity();
+        });
+      }
+
+      if (chatInput) {
+        chatInput.addEventListener('focus', function () {
+          if (!isIdentityValid()) requireValidIdentity();
+        });
+      }
+
+      // Fetch live pharmacy contact info for Kontak button
+      fetch('/api/public-chat-context/portal-info')
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (data) {
+          if (!data || !data.pharmacy) return;
+          if (data.pharmacy.phone) {
+            pharmacyPhone = String(data.pharmacy.phone).trim();
+            if (kontakBtn) kontakBtn.title = 'Salin nomor telepon apotek: ' + pharmacyPhone;
+          }
+          if (data.pharmacy.name) {
+            pharmacyName = String(data.pharmacy.name).trim();
+          }
+        })
+        .catch(function () {});
+
+      if (kontakBtn) {
+        kontakBtn.title = 'Salin nomor telepon apotek: ' + pharmacyPhone;
+        kontakBtn.addEventListener('click', async function () {
+          if (!pharmacyPhone || pharmacyPhone === '-') return;
+          const ok = await copyTextSafe(pharmacyPhone);
+          if (ok) {
+            if (kontakPhoneIcon) kontakPhoneIcon.classList.add('hidden');
+            if (kontakCheckIcon) kontakCheckIcon.classList.remove('hidden');
+            if (kontakLabel) kontakLabel.textContent = 'Tersalin';
+            setTimeout(function () {
+              if (kontakPhoneIcon) kontakPhoneIcon.classList.remove('hidden');
+              if (kontakCheckIcon) kontakCheckIcon.classList.add('hidden');
+              if (kontakLabel) kontakLabel.textContent = 'Kontak';
+            }, 2000);
+          }
+        });
+      }
+
+      function formatTime(isoStr) {
+        try {
+          return new Date(isoStr).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+        } catch (e) {
+          return '';
+        }
+      }
+
+      function stripWeeklyScheduleSection(text) {
+        const str = String(text || '');
+        if (!str || (str.indexOf('Jadwal Lengkap Mingguan') === -1 && str.indexOf('Daftar Dokter Terdaftar') === -1)) {
+          return str;
+        }
+        return str
+          .replace(/\n+\*\*Jadwal Lengkap Mingguan:\*\*[\s\S]*?(?=\n+Silakan lengkapi formulir|\n+Hubungi petugas|$)/g, '')
+          .replace(/\n+\*\*Daftar Dokter Terdaftar:\*\*[\s\S]*?(?=\n+Silakan lengkapi formulir|\n+Hubungi petugas|$)/g, '');
+      }
+
+      function buildFormattedContentFragment(rawText) {
+        const frag = document.createDocumentFragment();
+        const lines = stripWeeklyScheduleSection(rawText).split('\n');
+        lines.forEach(function (line) {
+          const trimmed = line.trim();
+          const isBullet = /^[-*•]\s+/.test(trimmed);
+          const contentLine = isBullet ? trimmed.replace(/^[-*•]\s+/, '') : line;
+
+          const segments = contentLine.split(/(\*\*[^*]+\*\*)/g);
+          function appendSegments(parentEl) {
+            segments.forEach(function (seg) {
+              if (seg.startsWith('**') && seg.endsWith('**') && seg.length > 4) {
+                const strong = document.createElement('strong');
+                strong.className = 'font-extrabold text-slate-900';
+                strong.textContent = seg.slice(2, -2);
+                parentEl.appendChild(strong);
+              } else {
+                parentEl.appendChild(document.createTextNode(seg));
+              }
+            });
+          }
+
+          if (isBullet) {
+            const row = document.createElement('div');
+            row.className = 'flex items-start gap-1.5 pl-1 my-0.5';
+            const dot = document.createElement('span');
+            dot.className = 'text-emerald-600 font-black leading-5';
+            dot.textContent = '•';
+            const txt = document.createElement('span');
+            txt.className = 'flex-1';
+            appendSegments(txt);
+            row.appendChild(dot);
+            row.appendChild(txt);
+            frag.appendChild(row);
+          } else if (!trimmed) {
+            const spacer = document.createElement('div');
+            spacer.className = 'h-1.5';
+            frag.appendChild(spacer);
+          } else {
+            const p = document.createElement('p');
+            p.className = 'leading-relaxed';
+            appendSegments(p);
+            frag.appendChild(p);
+          }
+        });
+        return frag;
+      }
+
+      // =====================================================================
+      // TAB SWITCHING: Obrolan | Pasien | Cek Obat
+      // =====================================================================
+      function setActiveTab(nextMode) {
+        activeMode = nextMode;
+        const activeTabCls = 'bg-white text-sky-800 shadow-xs';
+        const inactiveTabCls = 'text-slate-600 hover:text-slate-800';
+
+        [
+          { el: tabObrolan, mode: 'chat' },
+          { el: tabPasien, mode: 'live' },
+          { el: tabCekObat, mode: 'catalog' }
+        ].forEach(function (item) {
+          if (!item.el) return;
+          activeTabCls.split(' ').forEach(function (c) { item.el.classList.remove(c); });
+          inactiveTabCls.split(' ').forEach(function (c) { item.el.classList.remove(c); });
+          const targetCls = item.mode === activeMode ? activeTabCls : inactiveTabCls;
+          targetCls.split(' ').forEach(function (c) { item.el.classList.add(c); });
+        });
+
+        if (viewObrolan) {
+          viewObrolan.classList.toggle('hidden', activeMode !== 'chat');
+          viewObrolan.classList.toggle('flex', activeMode === 'chat');
+        }
+        if (viewPasien) {
+          viewPasien.classList.toggle('hidden', activeMode !== 'live');
+          viewPasien.classList.toggle('flex', activeMode === 'live');
+        }
+        if (viewCatalog) {
+          viewCatalog.classList.toggle('hidden', activeMode !== 'catalog');
+          viewCatalog.classList.toggle('flex', activeMode === 'catalog');
+        }
+        if (resetBtn) {
+          resetBtn.classList.toggle('hidden', activeMode !== 'chat');
+        }
+
+        if (activeMode === 'live' && isOpen) {
+          markReadOnServer('pasien');
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+          setTimeout(function () {
+            if (!isIdentityValid()) {
+              if (nameInput && !nameInput.value.trim()) nameInput.focus();
+              else if (phoneInput) phoneInput.focus();
+            } else if (chatInput) {
+              chatInput.focus();
+            }
+          }, 80);
+        } else if (activeMode === 'chat' && isOpen) {
+          markReadOnServer('obrolan');
+          assistantMessagesEl.scrollTop = assistantMessagesEl.scrollHeight;
+          setTimeout(function () {
+            if (!isIdentityValid()) {
+              if (nameInput && !nameInput.value.trim()) nameInput.focus();
+              else if (phoneInput) phoneInput.focus();
+            } else if (assistantInput) {
+              assistantInput.focus();
+            }
+          }, 80);
+        } else if (activeMode === 'catalog' && isOpen) {
+          fetchCatalogMedicines(catalogSearchInput ? catalogSearchInput.value : '');
+          setTimeout(function () { if (catalogSearchInput) catalogSearchInput.focus(); }, 80);
+        }
+      }
+
+      if (tabObrolan) tabObrolan.addEventListener('click', function () { setActiveTab('chat'); });
+      if (tabPasien) tabPasien.addEventListener('click', function () { setActiveTab('live'); });
+      if (tabCekObat) tabCekObat.addEventListener('click', function () { setActiveTab('catalog'); });
+
+      // =====================================================================
+      // VIEW 1: OBROLAN (ISOLATED __obrolan CHANNEL, SEPARATE FROM TAB PASIEN)
+      // =====================================================================
+      function createWelcomeAssistantMsg() {
+        return {
+          id: 'portal-welcome-msg',
+          role: 'assistant',
+          content:
+            'Halo! Selamat datang di layanan obrolan **' + pharmacyName + '**.\n\n' +
+            'Saya siap membantu menjawab pertanyaan Anda seputar:\n' +
+            '- **Jadwal praktik dokter hari ini** sesuai data terbaru klinik\n' +
+            '- **Cek stok & harga obat** (gunakan tab **Cek Obat** di atas)\n' +
+            '- **Panduan minum obat (KIE)** & penyimpanan obat\n' +
+            '- **Alur pendaftaran online**, antrean, promo, & cek kesehatan\n\n' +
+            'Silakan ketik pertanyaan Anda atau pilih topik cepat di bawah.',
+          timestamp: formatTime(new Date().toISOString())
+        };
+      }
+
+      function renderAssistantMessages() {
+        if (!assistantMessagesEl) return;
+        assistantMessagesEl.innerHTML = '';
+
+        // 1. Welcome Card
+        const welcomeMsg = createWelcomeAssistantMsg();
+        const welcomeWrap = document.createElement('div');
+        welcomeWrap.className = 'flex flex-col items-start';
+        const welcomeBubble = document.createElement('div');
+        welcomeBubble.className = 'max-w-[92%] rounded-2xl px-3.5 py-2.5 text-xs shadow-sm bg-white text-slate-700 border border-slate-200/90 rounded-bl-sm space-y-0.5 leading-relaxed';
+        welcomeBubble.appendChild(buildFormattedContentFragment(welcomeMsg.content));
+        welcomeWrap.appendChild(welcomeBubble);
+        assistantMessagesEl.appendChild(welcomeWrap);
+
+        // 2. Isolated Tab Obrolan Stream (ONLY obrolanMessagesCache)
+        obrolanMessagesCache.forEach(function (msg) {
+          const isPatient = msg.sender === 'patient';
+          const isAssistant = msg.sender === 'assistant';
+          const wrap = document.createElement('div');
+          wrap.className = 'flex flex-col ' + (isPatient ? 'items-end' : 'items-start');
+
+          if (!isPatient) {
+            const senderLabel = document.createElement('span');
+            senderLabel.className =
+              'text-[10px] font-bold mb-0.5 px-1 ' +
+              (isAssistant ? 'text-sky-700' : 'text-emerald-700');
+            senderLabel.textContent =
+              msg.senderName ||
+              (isAssistant ? 'Sistem Otomatis Latisha Farma' : 'Petugas Apotek Latisha Farma');
+            wrap.appendChild(senderLabel);
+          }
+
+          const bubble = document.createElement('div');
+          if (isPatient) {
+            bubble.className = 'max-w-[88%] rounded-2xl px-3.5 py-2.5 text-xs shadow-sm bg-sky-700 text-white rounded-br-sm font-medium whitespace-pre-wrap leading-relaxed';
+            bubble.textContent = msg.text || '';
+          } else if (isAssistant) {
+            bubble.className = 'max-w-[88%] rounded-2xl px-3.5 py-2.5 text-xs shadow-sm bg-white text-slate-700 border border-sky-200/90 rounded-bl-sm space-y-0.5 leading-relaxed';
+            bubble.appendChild(buildFormattedContentFragment(msg.text || ''));
+          } else {
+            bubble.className = 'max-w-[88%] rounded-2xl px-3.5 py-2.5 text-xs shadow-sm bg-emerald-50/90 text-slate-800 border border-emerald-300 rounded-bl-sm whitespace-pre-wrap font-medium leading-relaxed';
+            bubble.textContent = msg.text || '';
+          }
+          wrap.appendChild(bubble);
+
+          const meta = document.createElement('div');
+          meta.className = 'flex items-center gap-2 mt-1 px-1 text-[10px] text-slate-400 ' + (isPatient ? 'justify-end' : 'justify-start');
+          const timeSpan = document.createElement('span');
+          timeSpan.textContent = formatTime(msg.createdAt || new Date().toISOString());
+          meta.appendChild(timeSpan);
+
+          if (!isPatient) {
+            const copyBtn = document.createElement('button');
+            copyBtn.type = 'button';
+            copyBtn.className = 'inline-flex items-center gap-0.5 text-slate-400 hover:text-sky-700 font-semibold transition cursor-pointer';
+            copyBtn.textContent = 'Salin';
+            copyBtn.addEventListener('click', async function () {
+              const ok = await copyTextSafe(String(msg.text || '').replace(/\*\*/g, ''));
+              if (ok) {
+                copyBtn.textContent = 'Tersalin';
+                copyBtn.classList.add('text-emerald-600');
+                setTimeout(function () {
+                  copyBtn.textContent = 'Salin';
+                  copyBtn.classList.remove('text-emerald-600');
+                }, 2000);
+              }
+            });
+            meta.appendChild(copyBtn);
+          }
+
+          wrap.appendChild(meta);
+          assistantMessagesEl.appendChild(wrap);
+        });
+
+        if (isAutoReplyingObrolan) {
+          const loadingWrap = document.createElement('div');
+          loadingWrap.className = 'flex items-start';
+          loadingWrap.innerHTML =
+            '<div class="bg-white border border-slate-200 rounded-2xl rounded-bl-sm px-3.5 py-2.5 text-xs text-slate-500 flex items-center gap-2 shadow-sm">' +
+            '<span class="w-3 h-3 rounded-full border-2 border-sky-600 border-t-transparent animate-spin inline-block"></span>' +
+            '<span class="font-semibold">Menyiapkan jawaban otomatis sistem...</span>' +
+            '</div>';
+          assistantMessagesEl.appendChild(loadingWrap);
+        }
+
+        assistantMessagesEl.scrollTop = assistantMessagesEl.scrollHeight;
+      }
+
+      function appendObrolanMessage(msg) {
+        if (!msg || !msg.id || renderedObrolanIds.has(msg.id)) return;
+        renderedObrolanIds.add(msg.id);
+        obrolanMessagesCache.push(msg);
+        if (obrolanMessagesCache.length > 50) obrolanMessagesCache.shift();
+        renderAssistantMessages();
+      }
+
+      // Quick topic option handler for Tab Obrolan (called by quick topic buttons & Tanya Obat)
+      async function sendAssistantQuestion(rawText) {
+        const text = String(rawText || '').trim();
+        if (!text) return;
+        setActiveTab('chat');
+        await sendQuickTopicWithAutoReply('obrolan', text);
+      }
+
+      renderAssistantMessages();
+
+      if (resetBtn) {
+        resetBtn.addEventListener('click', function () {
+          renderedObrolanIds.clear();
+          obrolanMessagesCache.length = 0;
+          unreadObrolanCount = 0;
+          updateUnreadUI();
+          renderAssistantMessages();
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'chat:delete_session', sessionId: obrolanSessionId }));
+          } else {
+            fetch('/api/live-chat/sessions/' + encodeURIComponent(obrolanSessionId), {
+              method: 'DELETE'
+            }).catch(function () {});
+          }
+        });
+      }
+
+      // Manual typed question in Tab Obrolan -> sent ONLY to Tab Obrolan Petugas (__obrolan)
+      if (assistantForm && assistantInput) {
+        assistantForm.addEventListener('submit', async function (e) {
+          e.preventDefault();
+          const val = assistantInput.value.trim();
+          if (!val) return;
+          if (!requireValidIdentity()) return;
+          assistantInput.value = '';
+          await sendPatientMessage('obrolan', val);
+        });
+      }
+
+      document.querySelectorAll('.portal-assistant-starter').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          const text = btn.getAttribute('data-starter') || '';
+          if (text) sendQuickTopicWithAutoReply('obrolan', text);
+        });
+      });
+
+      // =====================================================================
+      // VIEW 3: CEK OBAT (LIVE CATALOG + TANYA OBAT)
+      // =====================================================================
+      function readLocalMedicinesFallback(query) {
+        try {
+          const raw = localStorage.getItem('latisha_medicines');
+          if (!raw) return [];
+          const list = JSON.parse(raw);
+          if (!Array.isArray(list)) return [];
+          const q = String(query || '').trim().toLowerCase();
+          if (!q) {
+            const avail = list.filter(function (m) { return Number(m.stock || 0) > 0; }).slice(0, 18);
+            return avail.length > 0 ? avail : list.slice(0, 18);
+          }
+          const tokens = q.split(/\s+/).filter(Boolean);
+          return list
+            .filter(function (m) {
+              const hay = ((m.name || '') + ' ' + (m.category || '') + ' ' + (m.kelas || '') + ' ' + (m.kekuatan || '')).toLowerCase();
+              return tokens.every(function (tk) { return hay.includes(tk); });
+            })
+            .slice(0, 25);
+        } catch (e) {
+          return [];
+        }
+      }
+
+      function createMedicineCategorySymbolEl(rawCategory) {
+        const label = String(rawCategory || 'Belum Dikategorikan').trim() || 'Belum Dikategorikan';
+        const lower = label.toLowerCase();
+        const wrap = document.createElement('span');
+        wrap.setAttribute('role', 'img');
+        wrap.setAttribute('aria-label', 'Golongan / Kategori: ' + label);
+        wrap.setAttribute('title', label);
+        wrap.className = 'inline-flex items-center justify-center shrink-0 w-4 h-4 select-none';
+
+        const svgNS = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(svgNS, 'svg');
+        svg.setAttribute('viewBox', '0 0 32 32');
+        svg.setAttribute('class', 'w-full h-full');
+        svg.setAttribute('aria-hidden', 'true');
+
+        const titleEl = document.createElementNS(svgNS, 'title');
+        titleEl.textContent = label;
+        svg.appendChild(titleEl);
+
+        const addCircle = function (fill, stroke) {
+          const c = document.createElementNS(svgNS, 'circle');
+          c.setAttribute('cx', '16');
+          c.setAttribute('cy', '16');
+          c.setAttribute('r', '12.5');
+          c.setAttribute('fill', fill);
+          c.setAttribute('stroke', stroke);
+          c.setAttribute('stroke-width', '2.6');
+          svg.appendChild(c);
+        };
+        const addRect = function (fill, stroke, rx) {
+          const r = document.createElementNS(svgNS, 'rect');
+          r.setAttribute('x', '3.5');
+          r.setAttribute('y', '3.5');
+          r.setAttribute('width', '25');
+          r.setAttribute('height', '25');
+          r.setAttribute('rx', String(rx || 7));
+          r.setAttribute('fill', fill);
+          r.setAttribute('stroke', stroke);
+          r.setAttribute('stroke-width', '2.4');
+          svg.appendChild(r);
+        };
+        const addText = function (txt, fill, size, y) {
+          const t = document.createElementNS(svgNS, 'text');
+          t.setAttribute('x', '16');
+          t.setAttribute('y', String(y || 20.5));
+          t.setAttribute('text-anchor', 'middle');
+          t.setAttribute('fill', fill);
+          t.setAttribute('font-size', String(size || 13));
+          t.setAttribute('font-weight', '900');
+          t.setAttribute('font-family', 'system-ui, -apple-system, sans-serif');
+          t.textContent = txt;
+          svg.appendChild(t);
+        };
+
+        if (lower.includes('narkotik')) {
+          addCircle('#ffffff', '#dc2626');
+          const p = document.createElementNS(svgNS, 'path');
+          p.setAttribute('d', 'M13.3 7.5h5.4v5.8h5.8v5.4h-5.8v5.8h-5.4v-5.8H7.5v-5.4h5.8V7.5z');
+          p.setAttribute('fill', '#dc2626');
+          p.setAttribute('stroke', '#0f172a');
+          p.setAttribute('stroke-width', '1.1');
+          svg.appendChild(p);
+        } else if (lower.includes('psikotropik')) {
+          addCircle('#7c3aed', '#0f172a');
+          addText('Ψ', '#ffffff', 16, 21.5);
+        } else if (lower.includes('prekursor')) {
+          const poly = document.createElementNS(svgNS, 'polygon');
+          poly.setAttribute('points', '16,2.8 27.6,9.4 27.6,22.6 16,29.2 4.4,22.6 4.4,9.4');
+          poly.setAttribute('fill', '#f97316');
+          poly.setAttribute('stroke', '#0f172a');
+          poly.setAttribute('stroke-width', '2.4');
+          svg.appendChild(poly);
+          addText('Pr', '#ffffff', 12.5, 20.2);
+        } else if (lower === 'oot' || lower.includes('obat-obat tertentu') || lower.includes('obat tertentu') || /\boot\b/.test(lower)) {
+          const oct = document.createElementNS(svgNS, 'polygon');
+          oct.setAttribute('points', '10.8,3.2 21.2,3.2 28.8,10.8 28.8,21.2 21.2,28.8 10.8,28.8 3.2,21.2 3.2,10.8');
+          oct.setAttribute('fill', '#facc15');
+          oct.setAttribute('stroke', '#0f172a');
+          oct.setAttribute('stroke-width', '2.4');
+          svg.appendChild(oct);
+          addText('OOT', '#0f172a', 9.8, 19.5);
+        } else if (lower.includes('bebas terbatas') || lower.includes('terbatas')) {
+          addCircle('#2563eb', '#0f172a');
+        } else if (lower.includes('obat bebas') || lower === 'bebas' || lower === 'otc') {
+          addCircle('#22c55e', '#0f172a');
+        } else if (lower.includes('keras') || lower === 'g' || lower === 'daftar g') {
+          addCircle('#ef4444', '#0f172a');
+          addText('K', '#0f172a', 16.5, 21.5);
+        } else if (lower.includes('jamu') || lower.includes('herbal') || lower.includes('oht') || lower.includes('fitofarmaka')) {
+          addCircle('#ecfdf5', '#15803d');
+          const leaf = document.createElementNS(svgNS, 'path');
+          leaf.setAttribute('d', 'M10 22c6.5 0 11.5-4.5 12-12-7.5.5-12 5.5-12 12z');
+          leaf.setAttribute('fill', '#16a34a');
+          svg.appendChild(leaf);
+        } else if (lower.includes('vitamin') || lower.includes('suplemen')) {
+          addRect('#fef3c7', '#d97706', 8);
+          addText('V', '#92400e', 14, 21);
+        } else if (lower.includes('alat kesehatan') || lower.includes('alkes') || lower.includes('medis')) {
+          addRect('#e0f2fe', '#0284c7', 7);
+          addText('+', '#0284c7', 18, 22);
+        } else if (lower.includes('makanan') || lower.includes('minuman') || lower.includes('nutrisi') || lower.includes('susu')) {
+          addRect('#ccfbf1', '#0d9488', 12.5);
+          addText('MN', '#0f766e', 11, 20);
+        } else if (lower.includes('kosmet') || lower.includes('cosmet')) {
+          addRect('#fdf2f8', '#db2777', 8);
+          addText('Km', '#be185d', 11, 20);
+        } else if (lower.includes('skincare') || lower.includes('skin care') || lower.includes('kulit')) {
+          addRect('#eef2ff', '#4f46e5', 8);
+          addText('Sc', '#4338ca', 11, 20);
+        } else {
+          const words = label.split(/[\s\/_-]+/).filter(Boolean);
+          const mono = words.length >= 2 ? (words[0][0] + words[1][0]).toUpperCase() : label.slice(0, 2).toUpperCase();
+          addRect('#e2e8f0', '#475569', 7);
+          addText(mono || '?', '#1e293b', 11, 20.2);
+        }
+
+        wrap.appendChild(svg);
+        return wrap;
+      }
+
+      function renderCatalogList(items) {
+        if (!catalogListEl) return;
+        catalogListEl.innerHTML = '';
+        if (!items || items.length === 0) {
+          const empty = document.createElement('div');
+          empty.className = 'text-center py-8 text-xs text-slate-400';
+          empty.textContent = 'Obat tidak ditemukan di katalog stok saat ini.';
+          catalogListEl.appendChild(empty);
+          return;
+        }
+
+        items.forEach(function (med) {
+          const card = document.createElement('div');
+          card.className = 'bg-white p-2.5 rounded-xl border border-slate-200 hover:border-sky-300 transition flex items-center justify-between gap-2';
+
+          const info = document.createElement('div');
+          info.className = 'min-w-0';
+
+          const title = document.createElement('p');
+          title.className = 'text-xs font-extrabold text-slate-800 truncate';
+          title.textContent = med.name || '-';
+          info.appendChild(title);
+
+          const metaRow = document.createElement('div');
+          metaRow.className = 'flex items-center gap-1.5 mt-0.5 text-[10px]';
+
+          metaRow.appendChild(createMedicineCategorySymbolEl(med.category));
+
+          const sep = document.createElement('span');
+          sep.className = 'text-slate-300';
+          sep.textContent = '·';
+          metaRow.appendChild(sep);
+
+          const stockNum = Number(med.stock || 0);
+          const unitStr = med.unit || med.satuanKecil || 'pcs';
+          const stockSpan = document.createElement('span');
+          stockSpan.className = 'font-bold ' + (stockNum > 0 ? 'text-emerald-700' : 'text-rose-600');
+          stockSpan.textContent = stockNum > 0 ? 'Stok: ' + stockNum + ' ' + unitStr : 'Stok Habis';
+          metaRow.appendChild(stockSpan);
+          info.appendChild(metaRow);
+
+          const priceP = document.createElement('p');
+          priceP.className = 'text-[11px] font-black text-sky-700 font-mono mt-0.5';
+          priceP.textContent = 'Rp ' + Number(med.sellPrice || 0).toLocaleString('id-ID') + ' / ' + unitStr;
+          info.appendChild(priceP);
+
+          const askBtn = document.createElement('button');
+          askBtn.type = 'button';
+          askBtn.className = 'px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-[10px] font-extrabold shrink-0 cursor-pointer transition';
+          askBtn.textContent = 'Tanya Obat';
+          askBtn.addEventListener('click', function () {
+            sendAssistantQuestion(
+              'Tolong jelaskan kegunaan, aturan pakai umum, dan ketersediaan obat ' + (med.name || '') + '.'
+            );
+          });
+
+          card.appendChild(info);
+          card.appendChild(askBtn);
+          catalogListEl.appendChild(card);
+        });
+      }
+
+      async function fetchCatalogMedicines(query) {
+        if (!catalogListEl) return;
+        const q = String(query || '').trim();
+        try {
+          const res = await fetch('/api/public-chat-context/medicines?q=' + encodeURIComponent(q));
+          if (!res.ok) throw new Error('Catalog fetch error');
+          const data = await res.json();
+          if (data && Array.isArray(data.medicines) && (data.medicines.length > 0 || Number(data.total || 0) > 0)) {
+            renderCatalogList(data.medicines);
+            return;
+          }
+          renderCatalogList(readLocalMedicinesFallback(q));
+        } catch (e) {
+          renderCatalogList(readLocalMedicinesFallback(q));
+        }
+      }
+
+      if (catalogSearchInput) {
+        catalogSearchInput.addEventListener('input', function () {
+          const val = catalogSearchInput.value || '';
+          if (catalogClearBtn) catalogClearBtn.classList.toggle('hidden', !val);
+          if (catalogDebounceTimer) clearTimeout(catalogDebounceTimer);
+          catalogDebounceTimer = setTimeout(function () {
+            fetchCatalogMedicines(val);
+          }, 200);
+        });
+      }
+
+      if (catalogClearBtn && catalogSearchInput) {
+        catalogClearBtn.addEventListener('click', function () {
+          catalogSearchInput.value = '';
+          catalogClearBtn.classList.add('hidden');
+          fetchCatalogMedicines('');
+          catalogSearchInput.focus();
+        });
+      }
+
+      // =====================================================================
+      // VIEW 2: PASIEN (REAL-TIME WEBSOCKET LIVE CHAT WITH STAFF)
+      // =====================================================================
+      function updatePresenceUI() {
+        if (!presenceText) return;
+        if (isConnected) {
+          if (staffOnlineCount > 0) {
+            const label = 'Petugas Apotek Online (' + staffOnlineCount + ') · Real-Time';
+            presenceText.textContent = label;
+            if (liveSubStatus) liveSubStatus.textContent = label;
+            if (headerDot) headerDot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-sky-800 absolute -bottom-0.5 -right-0.5';
+            if (fabDot) fabDot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-300 border-2 border-sky-800 absolute -top-0.5 -right-0.5';
+            if (topHeaderDot) topHeaderDot.className = 'w-2 h-2 rounded-full bg-emerald-300 animate-pulse';
+            if (bannerDot) bannerDot.className = 'w-3 h-3 rounded-full bg-emerald-400 border-2 border-white absolute -bottom-0.5 -right-0.5';
+            if (bannerBadge) {
+              bannerBadge.textContent = 'Petugas Online (' + staffOnlineCount + ')';
+              bannerBadge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200';
+            }
+          } else {
+            presenceText.textContent = pharmacyName + ' · Obrolan Interaktif';
+            if (liveSubStatus) liveSubStatus.textContent = 'Petugas Standby · Pesan Anda tersimpan';
+            if (headerDot) headerDot.className = 'w-2.5 h-2.5 rounded-full bg-amber-300 border-2 border-sky-800 absolute -bottom-0.5 -right-0.5';
+            if (fabDot) fabDot.className = 'w-2.5 h-2.5 rounded-full bg-amber-300 border-2 border-sky-800 absolute -top-0.5 -right-0.5';
+            if (topHeaderDot) topHeaderDot.className = 'w-2 h-2 rounded-full bg-amber-300';
+            if (bannerDot) bannerDot.className = 'w-3 h-3 rounded-full bg-amber-300 border-2 border-white absolute -bottom-0.5 -right-0.5';
+            if (bannerBadge) {
+              bannerBadge.textContent = 'Petugas Standby · Pesan Tersimpan';
+              bannerBadge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-50 text-sky-800 border border-sky-200';
+            }
+          }
+        } else {
+          presenceText.textContent = 'Menghubungkan ke server apotek...';
+          if (liveSubStatus) liveSubStatus.textContent = 'Menghubungkan ke server apotek...';
+          if (headerDot) headerDot.className = 'w-2.5 h-2.5 rounded-full bg-amber-300 border-2 border-sky-800 absolute -bottom-0.5 -right-0.5';
+          if (bannerBadge) {
+            bannerBadge.textContent = 'Menghubungkan...';
+            bannerBadge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200';
+          }
+        }
+      }
+
+      function updateUnreadUI() {
+        const totalUnread = unreadObrolanCount + unreadPasienCount;
+        [unreadBadge, topHeaderUnread].forEach(function (badge) {
+          if (!badge) return;
+          if (!isOpen && totalUnread > 0) {
+            badge.textContent = String(totalUnread);
+            badge.classList.remove('hidden');
+            badge.classList.add('flex');
+          } else {
+            badge.classList.add('hidden');
+            badge.classList.remove('flex');
+          }
+        });
+        if (tabObrolanBadge) {
+          if (unreadObrolanCount > 0) {
+            tabObrolanBadge.textContent = String(unreadObrolanCount);
+            tabObrolanBadge.classList.remove('hidden');
+            tabObrolanBadge.classList.add('flex');
+          } else {
+            tabObrolanBadge.classList.add('hidden');
+            tabObrolanBadge.classList.remove('flex');
+          }
+        }
+        if (tabPasienBadge) {
+          if (unreadPasienCount > 0) {
+            tabPasienBadge.textContent = String(unreadPasienCount);
+            tabPasienBadge.classList.remove('hidden');
+            tabPasienBadge.classList.add('flex');
+          } else {
+            tabPasienBadge.classList.add('hidden');
+            tabPasienBadge.classList.remove('flex');
+          }
+        }
+      }
+
+      function appendMessageBubble(msg) {
+        if (!msg || !msg.id || renderedMessageIds.has(msg.id)) return;
+        renderedMessageIds.add(msg.id);
+        sessionMessagesCache.push(msg);
+        if (sessionMessagesCache.length > 50) sessionMessagesCache.shift();
+
+        const isPatient = msg.sender === 'patient';
+        const isAssistant = msg.sender === 'assistant';
+        const wrapper = document.createElement('div');
+        wrapper.className = 'flex flex-col ' + (isPatient ? 'items-end' : 'items-start');
+        wrapper.setAttribute('data-msg-id', msg.id);
+
+        if (!isPatient) {
+          const senderLabel = document.createElement('span');
+          senderLabel.className =
+            'text-[10px] font-bold mb-0.5 px-1 ' +
+            (isAssistant ? 'text-sky-700' : 'text-emerald-700');
+          senderLabel.textContent =
+            msg.senderName ||
+            (isAssistant ? 'Asisten Otomatis Latisha Farma' : 'Petugas Apotek Latisha Farma');
+          wrapper.appendChild(senderLabel);
+        }
+
+        const bubble = document.createElement('div');
+        if (isPatient) {
+          bubble.className =
+            'max-w-[88%] rounded-2xl px-3.5 py-2.5 text-xs shadow-sm break-words whitespace-pre-wrap leading-relaxed bg-sky-700 text-white rounded-br-sm font-medium';
+          bubble.textContent = msg.text || '';
+        } else if (isAssistant) {
+          bubble.className =
+            'max-w-[88%] rounded-2xl px-3.5 py-2.5 text-xs shadow-sm break-words leading-relaxed bg-white text-slate-700 border border-sky-200 rounded-bl-sm space-y-0.5';
+          bubble.appendChild(buildFormattedContentFragment(msg.text || ''));
+        } else {
+          bubble.className =
+            'max-w-[88%] rounded-2xl px-3.5 py-2.5 text-xs shadow-sm break-words whitespace-pre-wrap leading-relaxed bg-white text-slate-800 border border-emerald-200 rounded-bl-sm';
+          bubble.textContent = msg.text || '';
+        }
+        wrapper.appendChild(bubble);
+
+        const timeLabel = document.createElement('span');
+        timeLabel.className = 'text-[10px] text-slate-400 mt-0.5 px-1';
+        timeLabel.textContent = formatTime(msg.createdAt || new Date().toISOString());
+        wrapper.appendChild(timeLabel);
+
+        const typingEl = document.getElementById('portalChatTypingIndicator');
+        if (typingEl) {
+          messagesEl.insertBefore(wrapper, typingEl);
+        } else {
+          messagesEl.appendChild(wrapper);
+        }
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+
+      function setTypingIndicator(channel, visible) {
+        if (channel === 'obrolan') {
+          renderAssistantMessages();
+          return;
+        }
+        const existing = document.getElementById('portalChatTypingIndicator');
+        if (visible) {
+          if (!existing) {
+            const wrap = document.createElement('div');
+            wrap.id = 'portalChatTypingIndicator';
+            wrap.className = 'flex items-start';
+            wrap.innerHTML =
+              '<div class="bg-white border border-sky-200 rounded-2xl rounded-bl-sm px-3.5 py-2.5 text-xs text-slate-500 flex items-center gap-2 shadow-sm">' +
+              '<span class="w-3 h-3 rounded-full border-2 border-sky-600 border-t-transparent animate-spin inline-block"></span>' +
+              '<span class="font-semibold">Menyiapkan jawaban layanan otomatis...</span>' +
+              '</div>';
+            messagesEl.appendChild(wrap);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+          }
+        } else if (existing) {
+          existing.remove();
+        }
+      }
+
+      function setQuickButtonsDisabled(channel, disabled) {
+        const selector = channel === 'obrolan' ? '.portal-assistant-starter' : '.portal-chat-starter';
+        document.querySelectorAll(selector).forEach(function (b) {
+          b.disabled = disabled;
+        });
+      }
+
+      function clearPasienRenderedMessages() {
+        renderedMessageIds.clear();
+        sessionMessagesCache.length = 0;
+        const nodes = messagesEl.querySelectorAll('[data-msg-id]');
+        nodes.forEach(function (n) { n.remove(); });
+      }
+
+      function markReadOnServer(channel) {
+        const targetSid = channel === 'obrolan' ? obrolanSessionId : pasienSessionId;
+        if (channel === 'obrolan') {
+          unreadObrolanCount = 0;
+        } else {
+          unreadPasienCount = 0;
+        }
+        updateUnreadUI();
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'chat:mark_read', sessionId: targetSid }));
+        } else {
+          fetch('/api/live-chat/sessions/' + encodeURIComponent(targetSid) + '/read', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reader: 'patient' })
+          }).catch(function () {});
+        }
+      }
+
+      function setChatOpen(nextOpen) {
+        isOpen = nextOpen;
+        if (isOpen) {
+          panel.classList.remove('hidden');
+          if (fabOpenIcon) fabOpenIcon.classList.add('hidden');
+          if (fabCloseIcon) fabCloseIcon.classList.remove('hidden');
+          if (fabDot) fabDot.classList.add('hidden');
+          toggleBtn.setAttribute('title', 'Tutup Obrolan Pasien');
+          toggleBtn.setAttribute('aria-label', 'Tutup obrolan interaktif layanan pelanggan dan pasien');
+          toggleBtn.setAttribute('aria-expanded', 'true');
+          updateIdentityBarUI(false);
+          if (unreadPasienCount > 0 && unreadObrolanCount === 0) {
+            setActiveTab('live');
+          } else if (unreadObrolanCount > 0) {
+            setActiveTab('chat');
+          } else {
+            setActiveTab(activeMode);
+          }
+        } else {
+          panel.classList.add('hidden');
+          if (fabOpenIcon) fabOpenIcon.classList.remove('hidden');
+          if (fabCloseIcon) fabCloseIcon.classList.add('hidden');
+          if (fabDot) fabDot.classList.remove('hidden');
+          toggleBtn.setAttribute('title', 'Obrolan Pasien');
+          toggleBtn.setAttribute('aria-label', 'Buka obrolan interaktif layanan pelanggan dan pasien');
+          toggleBtn.setAttribute('aria-expanded', 'false');
+          updateUnreadUI();
+        }
+      }
+
+      toggleBtn.addEventListener('click', function () {
+        setChatOpen(!isOpen);
+      });
+
+      if (headerChatBtn) {
+        headerChatBtn.addEventListener('click', function () {
+          setChatOpen(true);
+        });
+      }
+
+      if (bannerOpenChatBtn) {
+        bannerOpenChatBtn.addEventListener('click', function () {
+          setChatOpen(true);
+        });
+      }
+
+      if (minimizeBtn) {
+        minimizeBtn.addEventListener('click', function () {
+          setChatOpen(false);
+        });
+      }
+
+      async function dispatchChatPacket(channel, senderRole, senderLabel, textVal, customId) {
+        const targetSid = channel === 'obrolan' ? obrolanSessionId : pasienSessionId;
+        const patientName = getResolvedPatientName();
+        const patientPhone = getResolvedPatientPhone();
+        const msgId = customId || 'ptmsg-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+
+        const optimistic = {
+          id: msgId,
+          sessionId: targetSid,
+          sender: senderRole,
+          senderName: senderLabel,
+          text: textVal,
+          createdAt: new Date().toISOString()
+        };
+        if (channel === 'obrolan') {
+          appendObrolanMessage(optimistic);
+        } else {
+          appendMessageBubble(optimistic);
+        }
+
+        const packet = {
+          type: 'chat:send',
+          id: msgId,
+          sessionId: targetSid,
+          sender: senderRole,
+          senderName: senderLabel,
+          patientName: patientName,
+          patientPhone: patientPhone,
+          source: 'portal',
+          text: textVal
+        };
+
+        try {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(packet));
+          } else {
+            await fetch('/api/live-chat/messages', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(packet)
+            });
+          }
+          if (bc) {
+            bc.postMessage({ type: 'chat:message', sessionId: targetSid, message: optimistic });
+          }
+        } catch (err) {
+          console.warn('Gagal mengirim pesan obrolan:', err);
+        }
+      }
+
+      async function sendPatientMessage(channel, rawText) {
+        const text = String(rawText || '').trim();
+        if (!text) return;
+        if (!requireValidIdentity()) return;
+        saveProfileLocal();
+        isEditingIdentity = false;
+        updateIdentityBarUI(false);
+        await dispatchChatPacket(channel, 'patient', getResolvedPatientName(), text);
+      }
+
+      async function sendQuickTopicWithAutoReply(channel, rawPrompt) {
+        const text = String(rawPrompt || '').trim();
+        const isObrolan = channel === 'obrolan';
+        const isBusy = isObrolan ? isAutoReplyingObrolan : isAutoReplyingLive;
+        if (!text || isBusy) return;
+        if (!requireValidIdentity()) return;
+        saveProfileLocal();
+        isEditingIdentity = false;
+        updateIdentityBarUI(false);
+
+        if (isObrolan) {
+          isAutoReplyingObrolan = true;
+        } else {
+          isAutoReplyingLive = true;
+        }
+        setQuickButtonsDisabled(channel, true);
+
+        try {
+          await dispatchChatPacket(
+            channel,
+            'patient',
+            getResolvedPatientName(),
+            text,
+            'ptq-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7)
+          );
+          setTypingIndicator(channel, true);
+
+          const sourceCache = isObrolan ? obrolanMessagesCache : sessionMessagesCache;
+          const historySnapshot = sourceCache.slice(-8).map(function (m) {
+            return {
+              role: m.sender === 'patient' ? 'user' : 'assistant',
+              content: m.text
+            };
+          });
+
+          const nowDate = new Date();
+          const todayDayName = INDONESIAN_DAYS[nowDate.getDay()];
+          const todayDateLabel = nowDate.toLocaleDateString('id-ID', {
+            weekday: 'long',
+            day: 'numeric',
+            month: 'long',
+            year: 'numeric'
+          });
+
+          const response = await fetch('/api/gemini/patient-chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              message: text,
+              history: historySnapshot,
+              context: {
+                todayDayName: todayDayName,
+                todayDateLabel: todayDateLabel,
+                patientName: getResolvedPatientName(),
+                patientPhone: getResolvedPatientPhone()
+              }
+            })
+          });
+
+          const data = await response.json().catch(function () { return {}; });
+          const replyText =
+            response.ok && data && data.reply
+              ? String(data.reply)
+              : (data && data.error) ||
+                'Maaf, layanan jawaban otomatis sedang sibuk. Pertanyaan Anda sudah diteruskan ke Petugas Apotek.';
+
+          setTypingIndicator(channel, false);
+          await dispatchChatPacket(
+            channel,
+            'assistant',
+            'Asisten Otomatis Latisha Farma',
+            replyText,
+            'ast-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7)
+          );
+        } catch (err) {
+          setTypingIndicator(channel, false);
+          await dispatchChatPacket(
+            channel,
+            'assistant',
+            'Asisten Otomatis Latisha Farma',
+            'Maaf, terjadi kendala koneksi saat memuat jawaban otomatis. Pertanyaan Anda tetap diteruskan ke Petugas Apotek.',
+            'ast-err-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7)
+          );
+        } finally {
+          if (isObrolan) {
+            isAutoReplyingObrolan = false;
+          } else {
+            isAutoReplyingLive = false;
+          }
+          setTypingIndicator(channel, false);
+          setQuickButtonsDisabled(channel, false);
+        }
+      }
+
+      if (chatForm && chatInput) {
+        chatForm.addEventListener('submit', function (e) {
+          e.preventDefault();
+          const val = chatInput.value.trim();
+          if (!val) return;
+          if (!requireValidIdentity()) return;
+          chatInput.value = '';
+          sendPatientMessage('pasien', val);
+        });
+      }
+
+      document.querySelectorAll('.portal-chat-starter').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          const text = btn.getAttribute('data-starter') || '';
+          if (text) sendQuickTopicWithAutoReply('pasien', text);
+        });
+      });
+
+      const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000; // 10 menit tanpa interaksi
+
+      function deleteExpiredSessionOnServer(channelSid) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'chat:delete_session', sessionId: channelSid }));
+        } else {
+          fetch('/api/live-chat/sessions/' + encodeURIComponent(channelSid), {
+            method: 'DELETE'
+          }).catch(function () {});
+        }
+        if (bc) {
+          try {
+            bc.postMessage({ type: 'chat:session_deleted', sessionId: channelSid });
+          } catch (e) {}
+        }
+      }
+
+      function checkLocalInactivity() {
+        const nowMs = Date.now();
+        if (obrolanMessagesCache.length > 0 && !isAutoReplyingObrolan) {
+          const lastMsg = obrolanMessagesCache[obrolanMessagesCache.length - 1];
+          const lastTime = lastMsg && lastMsg.createdAt ? new Date(lastMsg.createdAt).getTime() : NaN;
+          if (Number.isFinite(lastTime) && nowMs - lastTime >= INACTIVITY_TIMEOUT_MS) {
+            renderedObrolanIds.clear();
+            obrolanMessagesCache.length = 0;
+            unreadObrolanCount = 0;
+            renderAssistantMessages();
+            updateUnreadUI();
+            deleteExpiredSessionOnServer(obrolanSessionId);
+          }
+        }
+        if (sessionMessagesCache.length > 0 && !isAutoReplyingLive) {
+          const lastMsg = sessionMessagesCache[sessionMessagesCache.length - 1];
+          const lastTime = lastMsg && lastMsg.createdAt ? new Date(lastMsg.createdAt).getTime() : NaN;
+          if (Number.isFinite(lastTime) && nowMs - lastTime >= INACTIVITY_TIMEOUT_MS) {
+            clearPasienRenderedMessages();
+            unreadPasienCount = 0;
+            updateUnreadUI();
+            deleteExpiredSessionOnServer(pasienSessionId);
+          }
+        }
+      }
+
+      function fetchSessionState() {
+        checkLocalInactivity();
+        fetch('/api/live-chat/sessions/' + encodeURIComponent(baseSessionId))
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (data) {
+            if (!data) return;
+            if (typeof data.staffOnlineCount === 'number') {
+              staffOnlineCount = data.staffOnlineCount;
+              updatePresenceUI();
+            }
+            if (data.obrolanSession && Array.isArray(data.obrolanSession.messages)) {
+              data.obrolanSession.messages.forEach(appendObrolanMessage);
+              if (!(isOpen && activeMode === 'chat')) {
+                unreadObrolanCount = data.obrolanSession.unreadForPatient || 0;
+                updateUnreadUI();
+              }
+            } else if (!data.obrolanSession && obrolanMessagesCache.length > 0 && !isAutoReplyingObrolan) {
+              renderedObrolanIds.clear();
+              obrolanMessagesCache.length = 0;
+              unreadObrolanCount = 0;
+              renderAssistantMessages();
+              updateUnreadUI();
+            }
+            if (data.pasienSession && Array.isArray(data.pasienSession.messages)) {
+              data.pasienSession.messages.forEach(appendMessageBubble);
+              if (!(isOpen && activeMode === 'live')) {
+                unreadPasienCount = data.pasienSession.unreadForPatient || 0;
+                updateUnreadUI();
+              }
+            } else if (!data.pasienSession && sessionMessagesCache.length > 0 && !isAutoReplyingLive) {
+              clearPasienRenderedMessages();
+              unreadPasienCount = 0;
+              updateUnreadUI();
+            }
+          })
+          .catch(function () {});
+      }
+
+      fetchSessionState();
+      const pollTimer = setInterval(fetchSessionState, 15000);
+      const inactivityTimer = setInterval(checkLocalInactivity, 15000);
+
+      if ('BroadcastChannel' in window) {
+        try {
+          bc = new BroadcastChannel(LIVE_CHAT_BC_NAME);
+          bc.onmessage = function (evt) {
+            const data = evt.data;
+            if (!data) return;
+            if (data.type === 'chat:session_deleted') {
+              if (data.sessionId === obrolanSessionId) {
+                renderedObrolanIds.clear();
+                obrolanMessagesCache.length = 0;
+                unreadObrolanCount = 0;
+                renderAssistantMessages();
+                updateUnreadUI();
+              } else if (data.sessionId === pasienSessionId) {
+                clearPasienRenderedMessages();
+                unreadPasienCount = 0;
+                updateUnreadUI();
+              }
+              return;
+            }
+            if (data.type !== 'chat:message' || !data.message) return;
+            if (data.sessionId === obrolanSessionId) {
+              const isNew = !renderedObrolanIds.has(data.message.id);
+              appendObrolanMessage(data.message);
+              if (isNew && data.message.sender === 'staff' && !(isOpen && activeMode === 'chat')) {
+                unreadObrolanCount += 1;
+                updateUnreadUI();
+              }
+            } else if (data.sessionId === pasienSessionId) {
+              const isNew = !renderedMessageIds.has(data.message.id);
+              appendMessageBubble(data.message);
+              if (isNew && data.message.sender === 'staff' && !(isOpen && activeMode === 'live')) {
+                unreadPasienCount += 1;
+                updateUnreadUI();
+              }
+            }
+          };
+        } catch (e) {}
+      }
+
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') {
+          fetchSessionState();
+        }
+      });
+
+      function connectPortalWs() {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl =
+          protocol +
+          '//' +
+          window.location.host +
+          '/ws/patient-chat?role=patient&sessionId=' +
+          encodeURIComponent(baseSessionId);
+
+        try {
+          ws = new WebSocket(wsUrl);
+
+          ws.onopen = function () {
+            reconnectAttempt = 0;
+            isConnected = true;
+            updatePresenceUI();
+            if (isOpen && activeMode === 'chat') {
+              ws.send(JSON.stringify({ type: 'chat:mark_read', sessionId: obrolanSessionId }));
+            } else if (isOpen && activeMode === 'live') {
+              ws.send(JSON.stringify({ type: 'chat:mark_read', sessionId: pasienSessionId }));
+            }
+            if (heartbeatTimer) clearInterval(heartbeatTimer);
+            heartbeatTimer = setInterval(function () {
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'ping' }));
+              }
+            }, 25000);
+          };
+
+          ws.onmessage = function (event) {
+            try {
+              const payload = JSON.parse(event.data);
+              if (!payload || typeof payload.type !== 'string') return;
+
+              if (payload.type === 'pong') {
+                if (typeof payload.staffOnlineCount === 'number') {
+                  staffOnlineCount = payload.staffOnlineCount;
+                  updatePresenceUI();
+                }
+              } else if (payload.type === 'chat:init') {
+                if (typeof payload.staffOnlineCount === 'number') {
+                  staffOnlineCount = payload.staffOnlineCount;
+                  updatePresenceUI();
+                }
+                if (payload.obrolanSession && Array.isArray(payload.obrolanSession.messages)) {
+                  payload.obrolanSession.messages.forEach(appendObrolanMessage);
+                  if (!(isOpen && activeMode === 'chat')) {
+                    unreadObrolanCount = payload.obrolanSession.unreadForPatient || 0;
+                    updateUnreadUI();
+                  }
+                } else if (!payload.obrolanSession && obrolanMessagesCache.length > 0 && !isAutoReplyingObrolan) {
+                  renderedObrolanIds.clear();
+                  obrolanMessagesCache.length = 0;
+                  unreadObrolanCount = 0;
+                  renderAssistantMessages();
+                  updateUnreadUI();
+                }
+                if (payload.pasienSession && Array.isArray(payload.pasienSession.messages)) {
+                  payload.pasienSession.messages.forEach(appendMessageBubble);
+                  if (!(isOpen && activeMode === 'live')) {
+                    unreadPasienCount = payload.pasienSession.unreadForPatient || 0;
+                    updateUnreadUI();
+                  }
+                } else if (!payload.pasienSession && sessionMessagesCache.length > 0 && !isAutoReplyingLive) {
+                  clearPasienRenderedMessages();
+                  unreadPasienCount = 0;
+                  updateUnreadUI();
+                }
+              } else if (payload.type === 'presence:update') {
+                if (typeof payload.staffOnlineCount === 'number') {
+                  staffOnlineCount = payload.staffOnlineCount;
+                  updatePresenceUI();
+                }
+              } else if (payload.type === 'chat:message' && payload.message) {
+                const msg = payload.message;
+                if (msg.sessionId === obrolanSessionId) {
+                  const isNew = !renderedObrolanIds.has(msg.id);
+                  appendObrolanMessage(msg);
+                  if (isNew && msg.sender === 'staff') {
+                    if (isOpen && activeMode === 'chat') {
+                      ws.send(JSON.stringify({ type: 'chat:mark_read', sessionId: obrolanSessionId }));
+                    } else {
+                      unreadObrolanCount += 1;
+                      updateUnreadUI();
+                    }
+                  }
+                } else if (msg.sessionId === pasienSessionId) {
+                  const isNew = !renderedMessageIds.has(msg.id);
+                  appendMessageBubble(msg);
+                  if (isNew && msg.sender === 'staff') {
+                    if (isOpen && activeMode === 'live') {
+                      ws.send(JSON.stringify({ type: 'chat:mark_read', sessionId: pasienSessionId }));
+                    } else {
+                      unreadPasienCount += 1;
+                      updateUnreadUI();
+                    }
+                  }
+                }
+              } else if (payload.type === 'chat:session_deleted') {
+                if (payload.sessionId === obrolanSessionId) {
+                  renderedObrolanIds.clear();
+                  obrolanMessagesCache.length = 0;
+                  unreadObrolanCount = 0;
+                  renderAssistantMessages();
+                  updateUnreadUI();
+                } else if (payload.sessionId === pasienSessionId) {
+                  clearPasienRenderedMessages();
+                  unreadPasienCount = 0;
+                  updateUnreadUI();
+                }
+              }
+            } catch (e) {}
+          };
+
+          ws.onclose = function () {
+            isConnected = false;
+            updatePresenceUI();
+            if (heartbeatTimer) {
+              clearInterval(heartbeatTimer);
+              heartbeatTimer = null;
+            }
+            const delay = Math.min(10000, 1500 * Math.pow(1.6, reconnectAttempt));
+            reconnectAttempt += 1;
+            reconnectTimer = setTimeout(connectPortalWs, delay);
+          };
+
+          ws.onerror = function () {
+            try { ws.close(); } catch (e) {}
+          };
+        } catch (e) {
+          isConnected = false;
+          updatePresenceUI();
+        }
+      }
+
+      connectPortalWs();
+
+      window.addEventListener('beforeunload', function () {
+        clearInterval(pollTimer);
+        clearInterval(inactivityTimer);
+        if (bc) bc.close();
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        if (ws) ws.close();
+      });
+    })();
+  </script>
+</body>
+</html>

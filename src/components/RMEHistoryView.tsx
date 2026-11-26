@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   FolderOpen,
   Search,
@@ -20,12 +20,29 @@ import {
   Save,
   Clock,
   Activity,
-  Check
+  Check,
+  Code,
+  Copy,
+  RefreshCw,
+  ChevronDown,
+  Tag
 } from 'lucide-react';
 import { INITIAL_PATIENTS } from '../data/initialData';
 import { RMERecord, Staff, Medicine, ICD10Item, StaffFeeItem, PrescriptionItem, VitalSign, Patient } from '../types';
 import { openPrintWindow } from '../utils/printHelper';
+import { PaginationControls } from './PaginationControls';
 import { useFacilityProfiles, formatPharmacyAddress } from './PharmacySettingsModal';
+import { SUPABASE_RME_SQL_SCHEMA, fetchRmeFromSupabase, isDemoRmeId } from '../utils/supabaseClient';
+import { getDeletedIdsSet } from '../utils/deletionRegistry';
+import { useIsOwnerAdmin } from '../utils/roleAccess';
+import { demoGetItem, demoSetItem } from '../utils/demoSandbox';
+import { MedicationLabelConfigurator } from './MedicationLabelConfigurator';
+import {
+  MedicationLabelItem,
+  MedicationLabelLayout,
+  buildMedicationLabelItems,
+  saveMedicationLabelPrintPayload
+} from '../utils/medicationLabelHelper';
 
 function toRomanNumeral(num: number): string {
   const n = Math.max(1, Math.round(num || 1));
@@ -98,7 +115,7 @@ function formatStandardSigna(dosage: string, unit: string): { latin: string; cle
 
 function lookupPatientForRx(rmId: string, patientName: string): Patient | null {
   try {
-    const saved = localStorage.getItem('latisha_patients');
+    const saved = demoGetItem('latisha_patients');
     const list: Patient[] = saved ? JSON.parse(saved) : INITIAL_PATIENTS;
     return (
       list.find((p) => p.id === rmId || p.name.toLowerCase() === patientName.toLowerCase()) || null
@@ -111,14 +128,28 @@ function lookupPatientForRx(rmId: string, patientName: string): Patient | null {
   }
 }
 
+interface RmeCloudResult {
+  success: boolean;
+  count?: number;
+  uploadedCount?: number;
+  deletedFlushedCount?: number;
+  needsTableSetup?: boolean;
+  isDemo?: boolean;
+  error?: string;
+}
+
 interface RMEHistoryViewProps {
   rmeRecords: RMERecord[];
   staffList?: Staff[];
   medicines?: Medicine[];
   icd10List?: ICD10Item[];
   onUpdateRecord?: (record: RMERecord) => void;
-  onDeleteRecord?: (id: string) => void;
-  onBulkDeleteRecords?: (ids: string[]) => void;
+  onDeleteRecord?: (id: string) => void | Promise<RmeCloudResult | void>;
+  onBulkDeleteRecords?: (ids: string[]) => void | Promise<RmeCloudResult | void>;
+  onSyncRmeFromSupabase?: (records: RMERecord[]) => void;
+  onSyncRmeSupabase?: () => Promise<RmeCloudResult>;
+  needsTableSetup?: boolean;
+  isDemoSandbox?: boolean;
 }
 
 export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
@@ -128,7 +159,11 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
   icd10List = [],
   onUpdateRecord,
   onDeleteRecord,
-  onBulkDeleteRecords
+  onBulkDeleteRecords,
+  onSyncRmeFromSupabase,
+  onSyncRmeSupabase,
+  needsTableSetup = false,
+  isDemoSandbox = false
 }) => {
   const { pharmacyProfile, apjProfile, dpjProfile } = useFacilityProfiles();
   const pharmacyFullAddress = formatPharmacyAddress(pharmacyProfile);
@@ -136,7 +171,47 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedRecord, setSelectedRecord] = useState<RMERecord | null>(null);
-  const [printType, setPrintType] = useState<'rme' | 'copy-resep' | 'surat-sakit'>('rme');
+  const [printType, setPrintType] = useState<'rme' | 'copy-resep' | 'surat-sakit' | 'etiket-obat'>('rme');
+  const [etiketLabels, setEtiketLabels] = useState<MedicationLabelItem[]>([]);
+  const [etiketLayout, setEtiketLayout] = useState<MedicationLabelLayout>('thermal-80');
+
+  const openRmePrintModal = (
+    rec: RMERecord,
+    initialType: 'rme' | 'copy-resep' | 'surat-sakit' | 'etiket-obat'
+  ) => {
+    setSelectedRecord(rec);
+    setPrintType(initialType);
+    setEtiketLabels(buildMedicationLabelItems(rec.prescription || [], medicines));
+  };
+
+  const handlePrintRmeEtiket = (rec: RMERecord) => {
+    const patientInfo = lookupPatientForRx(rec.rmId, rec.patientName);
+    saveMedicationLabelPrintPayload({
+      rxId: `CRX/${rec.id}`,
+      rmId: rec.rmId,
+      patientName: rec.patientName,
+      patientAge: rec.age ? String(rec.age) : undefined,
+      patientGender: rec.gender,
+      patientAddress: patientInfo?.address,
+      doctorName: rec.doctorName,
+      date: rec.date,
+      screenedBy: apjProfile.name,
+      layout: etiketLayout,
+      labels: etiketLabels,
+      createdAt: new Date().toISOString()
+    });
+    openPrintWindow('etiket-obat', { rxId: `CRX/${rec.id}`, layout: etiketLayout });
+  };
+
+  // Supabase Integration State
+  const isOwnerAdmin = useIsOwnerAdmin();
+  const [showRmeSqlModal, setShowRmeSqlModal] = useState(false);
+  const [copiedRmeSql, setCopiedRmeSql] = useState(false);
+  const [syncRmeLoading, setSyncRmeLoading] = useState(false);
+  const [syncRmeNotice, setSyncRmeNotice] = useState<{
+    type: 'success' | 'error' | 'info';
+    message: string;
+  } | null>(null);
 
   // Edit Modal State
   const [editingRecord, setEditingRecord] = useState<RMERecord | null>(null);
@@ -163,20 +238,74 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
   const [editMedicalSupportFee, setEditMedicalSupportFee] = useState<number>(5000);
   const [editAdminFee, setEditAdminFee] = useState<number>(1000);
   const [selectedNewMedId, setSelectedNewMedId] = useState('');
+  const [medSearchQuery, setMedSearchQuery] = useState('');
+  const [isMedDropdownOpen, setIsMedDropdownOpen] = useState(false);
+  const [highlightedMedIdx, setHighlightedMedIdx] = useState(0);
+  const medDropdownRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (medDropdownRef.current && !medDropdownRef.current.contains(event.target as Node)) {
+        setIsMedDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const selectedMedObj = medicines.find((m) => m.id === selectedNewMedId);
+  const selectedMedDisplay = selectedMedObj
+    ? `${selectedMedObj.name} (${selectedMedObj.satuanKecil || selectedMedObj.unit}) - Stok: ${selectedMedObj.stock}`
+    : '';
+
+  const filteredMedOptions = useMemo(() => {
+    const q = medSearchQuery.trim().toLowerCase();
+    const matched =
+      !q || (selectedNewMedId && medSearchQuery === selectedMedDisplay)
+        ? medicines
+        : medicines.filter(
+            (m) =>
+              m.name.toLowerCase().includes(q) ||
+              (m.kelas || '').toLowerCase().includes(q) ||
+              (m.category || '').toLowerCase().includes(q) ||
+              (m.kekuatan || '').toLowerCase().includes(q) ||
+              (m.barcode || '').toLowerCase().includes(q)
+          );
+    return matched.slice(0, 50);
+  }, [medicines, medSearchQuery, selectedNewMedId, selectedMedDisplay]);
 
   // Filtered records based on search term
-  const filteredRecords = rmeRecords.filter((rec) => {
-    const q = searchTerm.toLowerCase();
-    const staffNames = rec.assignedStaff ? rec.assignedStaff.map((s) => s.staffName.toLowerCase()).join(' ') : '';
-    return (
-      rec.patientName.toLowerCase().includes(q) ||
-      rec.rmId.toLowerCase().includes(q) ||
-      rec.soapA.toLowerCase().includes(q) ||
-      rec.doctorName.toLowerCase().includes(q) ||
-      rec.id.toLowerCase().includes(q) ||
-      staffNames.includes(q)
-    );
-  });
+  const filteredRecords = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    if (!q) return rmeRecords;
+    return rmeRecords.filter((rec) => {
+      const staffNames = rec.assignedStaff
+        ? rec.assignedStaff.map((s) => s.staffName.toLowerCase()).join(' ')
+        : '';
+      return (
+        rec.patientName.toLowerCase().includes(q) ||
+        rec.rmId.toLowerCase().includes(q) ||
+        rec.soapA.toLowerCase().includes(q) ||
+        rec.doctorName.toLowerCase().includes(q) ||
+        rec.id.toLowerCase().includes(q) ||
+        staffNames.includes(q)
+      );
+    });
+  }, [rmeRecords, searchTerm]);
+
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(25);
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchTerm]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredRecords.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const paginatedRecords = useMemo(() => {
+    const start = (safePage - 1) * pageSize;
+    return filteredRecords.slice(start, start + pageSize);
+  }, [filteredRecords, safePage, pageSize]);
 
   // Checkbox Selection Logic
   const isAllSelected =
@@ -226,21 +355,48 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
     });
   };
 
-  const handleConfirmExecuteDelete = () => {
-    if (deleteConfirmState.type === 'single' && deleteConfirmState.id) {
-      if (onDeleteRecord) {
-        onDeleteRecord(deleteConfirmState.id);
-      }
-      setSelectedIds((prev) => prev.filter((item) => item !== deleteConfirmState.id));
-    } else if (deleteConfirmState.type === 'bulk') {
-      if (onBulkDeleteRecords) {
-        onBulkDeleteRecords(selectedIds);
-      } else if (onDeleteRecord) {
-        selectedIds.forEach((id) => onDeleteRecord(id));
-      }
-      setSelectedIds([]);
-    }
+  const handleConfirmExecuteDelete = async () => {
+    const targetState = { ...deleteConfirmState };
+    const bulkIds = [...selectedIds];
     setDeleteConfirmState({ isOpen: false, type: 'single' });
+
+    if (targetState.type === 'single' && targetState.id) {
+      setSelectedIds((prev) => prev.filter((item) => item !== targetState.id));
+      if (selectedRecord?.id === targetState.id) {
+        setSelectedRecord(null);
+      }
+      if (onDeleteRecord) {
+        const res = await Promise.resolve(onDeleteRecord(targetState.id));
+        if (res && !res.success && !res.isDemo) {
+          setSyncRmeNotice({
+            type: 'info',
+            message: res.needsTableSetup
+              ? 'Catatan RME dihapus di aplikasi, namun tabel medical_records di Supabase perlu dijalankan ulang Skema SQL-nya.'
+              : `Catatan RME dihapus secara lokal dan dijadwalkan untuk dihapus dari Supabase saat koneksi kembali stabil (${res.error || 'Menunggu sinkronisasi'}).`
+          });
+        }
+      }
+    } else if (targetState.type === 'bulk') {
+      setSelectedIds([]);
+      if (selectedRecord && bulkIds.includes(selectedRecord.id)) {
+        setSelectedRecord(null);
+      }
+      if (onBulkDeleteRecords) {
+        const res = await Promise.resolve(onBulkDeleteRecords(bulkIds));
+        if (res && !res.success && !res.isDemo) {
+          setSyncRmeNotice({
+            type: 'info',
+            message: res.needsTableSetup
+              ? 'Data terpilih dihapus di aplikasi, namun tabel medical_records di Supabase perlu dijalankan ulang Skema SQL-nya.'
+              : `${bulkIds.length} catatan RME dihapus secara lokal dan antre penghapusan otomatis ke Supabase (${res.error || 'Menunggu sinkronisasi'}).`
+          });
+        }
+      } else if (onDeleteRecord) {
+        for (const id of bulkIds) {
+          await Promise.resolve(onDeleteRecord(id));
+        }
+      }
+    }
   };
 
   // Open Edit Modal
@@ -285,17 +441,30 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
     }
 
     setEditPrescription(rec.prescription ? [...rec.prescription] : []);
+    setSelectedNewMedId('');
+    setMedSearchQuery('');
+    setIsMedDropdownOpen(false);
+    setHighlightedMedIdx(0);
   };
 
   // Staff checklist toggle in edit form
   const handleToggleStaffInEdit = (staff: Staff) => {
     const exists = editAssignedStaff.find((s) => s.staffId === staff.id || s.staffName === staff.name);
     if (exists) {
-      setEditAssignedStaff(editAssignedStaff.filter((s) => s.staffId !== staff.id && s.staffName !== staff.name));
+      const nextStaff = editAssignedStaff.filter((s) => s.staffId !== staff.id && s.staffName !== staff.name);
+      setEditAssignedStaff(nextStaff);
+      if (staff.role === 'Dokter' && editDoctorName === staff.name) {
+        const remainingDoctor = nextStaff.find((s) => s.role === 'Dokter');
+        if (remainingDoctor) {
+          setEditDoctorName(remainingDoctor.staffName);
+        }
+      }
     } else {
       let defaultFee = 5000;
-      if (staff.role === 'Dokter') defaultFee = editDoctorFee || 20000;
-      else if (staff.role === 'Perawat / Bidan' || staff.role === 'Perawat / Nakes Lapangan') defaultFee = editMedicalSupportFee || 5000;
+      if (staff.role === 'Dokter') {
+        defaultFee = editDoctorFee || 20000;
+        setEditDoctorName(staff.name);
+      } else if (staff.role === 'Perawat / Bidan' || staff.role === 'Perawat / Nakes Lapangan') defaultFee = editMedicalSupportFee || 5000;
       else if (staff.role === 'Kasir & Front Office') defaultFee = editAdminFee || 1000;
 
       setEditAssignedStaff([
@@ -334,6 +503,9 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
 
     setEditPrescription([...editPrescription, newItem]);
     setSelectedNewMedId('');
+    setMedSearchQuery('');
+    setIsMedDropdownOpen(false);
+    setHighlightedMedIdx(0);
   };
 
   const handleRemoveMedFromEditPrescription = (idx: number) => {
@@ -351,13 +523,16 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
     e.preventDefault();
     if (!editingRecord) return;
 
+    const assignedDoctor = editAssignedStaff.find((s) => s.role === 'Dokter');
+    const syncedDoctorName = assignedDoctor ? assignedDoctor.staffName : editDoctorName;
+
     const updatedRecord: RMERecord = {
       ...editingRecord,
       patientName: editPatientName,
       rmId: editRmId,
       date: editDate,
       time: editTime,
-      doctorName: editDoctorName,
+      doctorName: syncedDoctorName,
       vitalSign: editVital,
       soapS: editSoapS,
       soapO: editSoapO,
@@ -390,12 +565,100 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-3 w-full sm:w-auto">
-          <div className="relative w-full sm:w-72">
+        <div className="flex items-center gap-3 flex-wrap w-full sm:w-auto">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-100 text-emerald-800 rounded-full text-[10px] font-bold border border-emerald-300">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+              Supabase Live: medical_records
+            </span>
+            {isOwnerAdmin && (
+              <button
+                type="button"
+                onClick={() => setShowRmeSqlModal(true)}
+                className="px-2.5 py-1 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all cursor-pointer"
+              >
+                <Code className="w-3 h-3 text-emerald-600" />
+                <span>Skema SQL e-RME</span>
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={syncRmeLoading}
+              onClick={async () => {
+                setSyncRmeLoading(true);
+                setSyncRmeNotice(null);
+                try {
+                  if (onSyncRmeSupabase) {
+                    const syncRes = await onSyncRmeSupabase();
+                    if (syncRes.isDemo) {
+                      setSyncRmeNotice({
+                        type: 'info',
+                        message: syncRes.error || 'Mode Demo / Sandbox aktif. Sinkronisasi Supabase dinonaktifkan.'
+                      });
+                    } else if (syncRes.needsTableSetup) {
+                      setSyncRmeNotice({
+                        type: 'error',
+                        message: syncRes.error || 'Tabel medical_records belum siap di Supabase. Silakan jalankan Skema SQL e-RME.'
+                      });
+                    } else if (!syncRes.success) {
+                      setSyncRmeNotice({
+                        type: 'error',
+                        message: `Gagal menyinkronkan data e-RME: ${syncRes.error || 'Kesalahan jaringan'}`
+                      });
+                    } else {
+                      const flushedText =
+                        syncRes.deletedFlushedCount && syncRes.deletedFlushedCount > 0
+                          ? ` (${syncRes.deletedFlushedCount} penghapusan dibersihkan di cloud)`
+                          : '';
+                      setSyncRmeNotice({
+                        type: 'success',
+                        message: `Sinkronisasi 2-arah e-RME selesai: ${syncRes.count ?? rmeRecords.length} catatan aktif${flushedText}.`
+                      });
+                    }
+                    return;
+                  }
+
+                  const fetchRes = await fetchRmeFromSupabase({ forceRefresh: true });
+                  if (fetchRes.error) {
+                    setSyncRmeNotice({
+                      type: 'error',
+                      message: `Gagal mengambil data RME dari Supabase: ${fetchRes.error}`
+                    });
+                  } else {
+                    const deletedSet = getDeletedIdsSet('rme_records');
+                    const finalRecs = (fetchRes.data || []).filter(
+                      (r) => r?.id && !isDemoRmeId(r.id) && !deletedSet.has(String(r.id).trim())
+                    );
+                    if (onSyncRmeFromSupabase) {
+                      onSyncRmeFromSupabase(finalRecs);
+                    }
+                    demoSetItem('latisha_rme_records', JSON.stringify(finalRecs));
+                    setSyncRmeNotice({
+                      type: 'success',
+                      message: `Berhasil menarik ${finalRecs.length} catatan e-RME aktif dari Supabase.`
+                    });
+                  }
+                } catch (e: any) {
+                  setSyncRmeNotice({
+                    type: 'error',
+                    message: `Gagal sinkronisasi: ${e?.message || String(e)}`
+                  });
+                } finally {
+                  setSyncRmeLoading(false);
+                }
+              }}
+              className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all disabled:opacity-50 cursor-pointer"
+            >
+              <RefreshCw className={`w-3 h-3 ${syncRmeLoading ? 'animate-spin' : ''}`} />
+              <span>{syncRmeLoading ? 'Menyinkronkan...' : 'Sinkronkan'}</span>
+            </button>
+          </div>
+
+          <div className="relative w-full sm:w-56">
             <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
             <input
               type="text"
-              placeholder="Cari pasien / RM / petugas / diagnosa..."
+              placeholder="Cari pasien / RM..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-9 pr-3 py-2 border rounded-xl text-xs font-semibold bg-slate-50 focus:bg-white focus:ring-2 focus:ring-sky-500 outline-none"
@@ -407,6 +670,39 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Sync / Cloud Status Banner */}
+      {(syncRmeNotice || needsTableSetup || isDemoSandbox) && (
+        <div
+          className={`px-4 py-2.5 rounded-xl border text-xs font-semibold flex items-center justify-between gap-3 ${
+            syncRmeNotice?.type === 'error' || (!syncRmeNotice && needsTableSetup)
+              ? 'bg-rose-50 border-rose-200 text-rose-800'
+              : syncRmeNotice?.type === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-amber-50 border-amber-200 text-amber-800'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>
+              {syncRmeNotice?.message ||
+                (needsTableSetup
+                  ? 'Tabel medical_records belum disiapkan atau terkendala izin RLS di Supabase. Klik "Skema SQL e-RME" untuk menjalankan skrip.'
+                  : 'Mode Demo / Sandbox aktif — perubahan data RME tersimpan di ruang simulasi dan tidak mengubah database Supabase produksi.')}
+            </span>
+          </div>
+          {syncRmeNotice && (
+            <button
+              type="button"
+              onClick={() => setSyncRmeNotice(null)}
+              className="p-1 rounded-lg hover:bg-black/5 transition cursor-pointer shrink-0"
+              aria-label="Tutup notifikasi"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Bulk Action Strip when checkboxes are selected */}
       {selectedIds.length > 0 && (
@@ -484,14 +780,14 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
-              {filteredRecords.length === 0 ? (
+              {paginatedRecords.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="p-10 text-center text-slate-400 italic">
                     Belum ada catatan rekam medis yang sesuai pencarian.
                   </td>
                 </tr>
               ) : (
-                filteredRecords.map((rec) => {
+                paginatedRecords.map((rec) => {
                   const isChecked = selectedIds.includes(rec.id);
 
                   // Extract assigned staff from RME form
@@ -620,10 +916,7 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
                       <td className="p-3 text-center space-x-1.5 whitespace-nowrap">
                         <button
                           type="button"
-                          onClick={() => {
-                            setPrintType('rme');
-                            setSelectedRecord(rec);
-                          }}
+                          onClick={() => openRmePrintModal(rec, 'rme')}
                           className="px-2.5 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg text-[10px] font-bold transition shadow-2xs inline-flex items-center gap-1 cursor-pointer"
                         >
                           <FileText className="w-3 h-3" />
@@ -632,10 +925,7 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
 
                         <button
                           type="button"
-                          onClick={() => {
-                            setPrintType('copy-resep');
-                            setSelectedRecord(rec);
-                          }}
+                          onClick={() => openRmePrintModal(rec, 'copy-resep')}
                           title="Cetak Salinan Resep (Copy Rx / Apograph) sesuai aturan penulisan resep baku"
                           className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[10px] font-bold transition shadow-2xs inline-flex items-center gap-1 cursor-pointer"
                         >
@@ -643,12 +933,21 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
                           <span>Copy Rx</span>
                         </button>
 
+                        {rec.prescription && rec.prescription.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => openRmePrintModal(rec, 'etiket-obat')}
+                            title="Cetak Label Instruksi Penggunaan Obat (Etiket Kemasan)"
+                            className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition shadow-2xs inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <Tag className="w-3 h-3" />
+                            <span>Etiket</span>
+                          </button>
+                        )}
+
                         <button
                           type="button"
-                          onClick={() => {
-                            setPrintType('surat-sakit');
-                            setSelectedRecord(rec);
-                          }}
+                          onClick={() => openRmePrintModal(rec, 'surat-sakit')}
                           className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-[10px] font-bold transition inline-flex items-center gap-1 cursor-pointer"
                         >
                           <Printer className="w-3 h-3" />
@@ -662,6 +961,18 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
             </tbody>
           </table>
         </div>
+        <PaginationControls
+          currentPage={safePage}
+          totalPages={totalPages}
+          totalCount={filteredRecords.length}
+          pageSize={pageSize}
+          onPageChange={setPage}
+          onPageSizeChange={(sz) => {
+            setPageSize(sz);
+            setPage(1);
+          }}
+          itemLabel="arsip RME"
+        />
       </div>
 
       {/* Edit Record Modal Dialog */}
@@ -930,28 +1241,143 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
 
               {/* Section 5: Resep Obat */}
               <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="font-black text-[11px] text-slate-700 uppercase tracking-wider block">
                     5. Terapi Obat (Resep Dokter)
                   </span>
-                  <div className="flex items-center gap-1.5">
-                    <select
-                      value={selectedNewMedId}
-                      onChange={(e) => setSelectedNewMedId(e.target.value)}
-                      className="p-1.5 border rounded-lg text-xs bg-white text-slate-800"
-                    >
-                      <option value="">-- Tambah Obat Baru --</option>
-                      {medicines.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.name} ({m.unit}) - Stok: {m.stock}
-                        </option>
-                      ))}
-                    </select>
+                  <div className="flex items-center gap-1.5 flex-1 sm:flex-initial sm:min-w-[340px]">
+                    <div ref={medDropdownRef} className="relative flex-1">
+                      <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={medSearchQuery}
+                        onFocus={() => {
+                          setIsMedDropdownOpen(true);
+                          setHighlightedMedIdx(0);
+                        }}
+                        onChange={(e) => {
+                          setMedSearchQuery(e.target.value);
+                          setSelectedNewMedId('');
+                          setIsMedDropdownOpen(true);
+                          setHighlightedMedIdx(0);
+                        }}
+                        onKeyDown={(e) => {
+                          if (!isMedDropdownOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                            setIsMedDropdownOpen(true);
+                            return;
+                          }
+                          if (e.key === 'ArrowDown') {
+                            e.preventDefault();
+                            setHighlightedMedIdx((prev) =>
+                              filteredMedOptions.length === 0 ? 0 : (prev + 1) % filteredMedOptions.length
+                            );
+                          } else if (e.key === 'ArrowUp') {
+                            e.preventDefault();
+                            setHighlightedMedIdx((prev) =>
+                              filteredMedOptions.length === 0
+                                ? 0
+                                : (prev - 1 + filteredMedOptions.length) % filteredMedOptions.length
+                            );
+                          } else if (e.key === 'Enter') {
+                            e.preventDefault();
+                            if (isMedDropdownOpen && !selectedNewMedId && filteredMedOptions[highlightedMedIdx]) {
+                              const chosen = filteredMedOptions[highlightedMedIdx];
+                              setSelectedNewMedId(chosen.id);
+                              setMedSearchQuery(`${chosen.name} (${chosen.satuanKecil || chosen.unit}) - Stok: ${chosen.stock}`);
+                              setIsMedDropdownOpen(false);
+                            } else if (selectedNewMedId) {
+                              handleAddMedToEditPrescription();
+                            }
+                          } else if (e.key === 'Escape') {
+                            setIsMedDropdownOpen(false);
+                          }
+                        }}
+                        placeholder="-- Cari & Pilih Obat Baru --"
+                        className="w-full pl-8 pr-12 p-1.5 border border-slate-300 rounded-lg text-xs bg-white text-slate-800 font-medium focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                      />
+                      <div className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5">
+                        {(medSearchQuery || selectedNewMedId) && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMedSearchQuery('');
+                              setSelectedNewMedId('');
+                              setIsMedDropdownOpen(true);
+                              setHighlightedMedIdx(0);
+                            }}
+                            className="p-0.5 text-slate-400 hover:text-slate-700 rounded cursor-pointer"
+                            title="Bersihkan pencarian"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setIsMedDropdownOpen((prev) => !prev)}
+                          className="p-0.5 text-slate-400 hover:text-slate-700 rounded cursor-pointer"
+                          title="Tampilkan daftar obat"
+                        >
+                          <ChevronDown className={`w-3.5 h-3.5 transition-transform ${isMedDropdownOpen ? 'rotate-180' : ''}`} />
+                        </button>
+                      </div>
+
+                      {isMedDropdownOpen && (
+                        <div className="absolute left-0 right-0 mt-1 bg-white border border-slate-300 rounded-xl shadow-xl z-40 max-h-56 overflow-y-auto divide-y divide-slate-100">
+                          {filteredMedOptions.length === 0 ? (
+                            <div className="p-3 text-center text-[11px] text-slate-400 italic">
+                              Obat "{medSearchQuery}" tidak ditemukan dalam master obat.
+                            </div>
+                          ) : (
+                            filteredMedOptions.map((m, idx) => {
+                              const unitLabel = m.satuanKecil || m.unit;
+                              const isHighlighted = idx === highlightedMedIdx;
+                              const isSelected = selectedNewMedId === m.id;
+                              return (
+                                <button
+                                  key={m.id}
+                                  type="button"
+                                  onMouseDown={(e) => {
+                                    e.preventDefault();
+                                    setSelectedNewMedId(m.id);
+                                    setMedSearchQuery(`${m.name} (${unitLabel}) - Stok: ${m.stock}`);
+                                    setIsMedDropdownOpen(false);
+                                  }}
+                                  onMouseEnter={() => setHighlightedMedIdx(idx)}
+                                  className={`w-full text-left px-3 py-2 text-xs transition flex items-center justify-between gap-2 cursor-pointer ${
+                                    isSelected
+                                      ? 'bg-emerald-50 text-emerald-950 font-bold'
+                                      : isHighlighted
+                                      ? 'bg-slate-100 text-slate-900'
+                                      : 'bg-white text-slate-800 hover:bg-slate-50'
+                                  }`}
+                                >
+                                  <div className="min-w-0 flex-1">
+                                    <div className="font-bold text-slate-900 truncate">{m.name}</div>
+                                    <div className="text-[10px] text-slate-500 truncate">
+                                      {m.kelas ? `${m.kelas} · ` : ''}Satuan: {unitLabel}
+                                    </div>
+                                  </div>
+                                  <span
+                                    className={`shrink-0 px-2 py-0.5 rounded-md font-mono text-[10px] font-bold ${
+                                      m.stock > 0
+                                        ? 'bg-emerald-100 text-emerald-800'
+                                        : 'bg-rose-100 text-rose-700'
+                                    }`}
+                                  >
+                                    Stok: {m.stock}
+                                  </span>
+                                </button>
+                              );
+                            })
+                          )}
+                        </div>
+                      )}
+                    </div>
                     <button
                       type="button"
                       onClick={handleAddMedToEditPrescription}
                       disabled={!selectedNewMedId}
-                      className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer"
+                      className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer shrink-0"
                     >
                       <Plus className="w-3.5 h-3.5" />
                       <span>Tambah</span>
@@ -1044,20 +1470,22 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
       {/* RME Detail & Printable Sheet Modal */}
       {selectedRecord && (
         <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center z-50 p-4 overflow-y-auto">
-          <div className="bg-white rounded-3xl w-full max-w-2xl shadow-2xl overflow-hidden border border-slate-200 my-6">
+          <div className="bg-white rounded-3xl w-full max-w-3xl shadow-2xl overflow-hidden border border-slate-200 my-6 flex flex-col max-h-[90vh]">
             {/* Modal Header (Non-print) */}
-            <div className="px-6 py-4 bg-slate-900 text-white flex flex-wrap justify-between items-center gap-3 no-print">
+            <div className="px-6 py-4 bg-slate-900 text-white flex flex-wrap justify-between items-center gap-3 no-print shrink-0">
               <div>
                 <h3 className="font-extrabold text-sm uppercase tracking-wide">
                   {printType === 'rme'
                     ? 'Rekam Medis Elektronik (e-RME Pasien)'
                     : printType === 'copy-resep'
                     ? 'Salinan Resep (Copy Rx / Apograph) Baku'
+                    : printType === 'etiket-obat'
+                    ? 'Cetak Label Instruksi Penggunaan Obat (Etiket)'
                     : 'Surat Keterangan Sakit Dokter'}
                 </h3>
                 <p className="text-[10px] text-sky-400">ID Dokumen: {selectedRecord.id}</p>
               </div>
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => setPrintType('rme')}
@@ -1082,10 +1510,27 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
                 </button>
                 <button
                   type="button"
+                  onClick={() => {
+                    if (etiketLabels.length === 0 && (selectedRecord.prescription?.length || 0) > 0) {
+                      setEtiketLabels(buildMedicationLabelItems(selectedRecord.prescription || [], medicines));
+                    }
+                    setPrintType('etiket-obat');
+                  }}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition cursor-pointer inline-flex items-center gap-1 ${
+                    printType === 'etiket-obat'
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                  }`}
+                >
+                  <Tag className="w-3 h-3" />
+                  <span>Label Obat</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => setPrintType('surat-sakit')}
                   className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition cursor-pointer ${
                     printType === 'surat-sakit'
-                      ? 'bg-emerald-600 text-white'
+                      ? 'bg-amber-600 text-white'
                       : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
                   }`}
                 >
@@ -1101,8 +1546,30 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
               </div>
             </div>
 
-            {/* Printable Content Body */}
-            <div id="printable-section" className="p-8 space-y-6 text-xs text-slate-800 bg-white">
+            {printType === 'etiket-obat' ? (
+              <div className="p-6 overflow-y-auto flex-1 bg-slate-100">
+                <MedicationLabelConfigurator
+                  labels={etiketLabels}
+                  onChangeLabels={setEtiketLabels}
+                  layout={etiketLayout}
+                  onChangeLayout={setEtiketLayout}
+                  rxId={`CRX/${selectedRecord.id}`}
+                  rmId={selectedRecord.rmId}
+                  patientName={selectedRecord.patientName}
+                  patientAge={selectedRecord.age ? String(selectedRecord.age) : undefined}
+                  date={selectedRecord.date}
+                  pharmacyName={pharmacyProfile.name}
+                  pharmacyAddress={pharmacyFullAddress}
+                  pharmacyPhone={pharmacyProfile.phone}
+                  pharmacySia={pharmacyProfile.sia}
+                  apjName={apjProfile.name}
+                  apjSipa={apjProfile.sipa}
+                />
+              </div>
+            ) : (
+              <>
+                {/* Printable Content Body */}
+                <div id="printable-section" className="p-8 space-y-6 text-xs text-slate-800 bg-white overflow-y-auto flex-1">
               {/* Clinic Letterhead Terintegrasi Profil Apotek, APJ, dan DPJ */}
               <div className="border-b-2 border-slate-900 pb-4">
                 <div className="flex items-center justify-between gap-4">
@@ -1122,10 +1589,14 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
                       {pharmacyProfile.name}
                     </h2>
                     <p className="text-[11px] text-slate-600 mt-0.5">
-                      {pharmacyFullAddress} · Telp / WA: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
+                      {pharmacyFullAddress} · Telp: {pharmacyProfile.phone} · Email: {pharmacyProfile.email}
                     </p>
-                    <p className="text-[10px] text-slate-500 font-mono">
-                      SIA: {pharmacyProfile.sia} · APJ: {apjProfile.name} (SIPA: {apjProfile.sipa}) · DPJ: {dpjProfile.name} (SIP: {dpjProfile.sip})
+                    <p className="text-[10px] text-slate-600 font-mono">
+                      {[
+                        pharmacyProfile.sia ? `SIA: ${pharmacyProfile.sia}` : '',
+                        pharmacyProfile.nib ? `NIB: ${pharmacyProfile.nib}` : '',
+                        pharmacyProfile.npwp ? `NPWP: ${pharmacyProfile.npwp}` : ''
+                      ].filter(Boolean).join(' · ')}
                     </p>
                   </div>
                   <div className="w-16 shrink-0" />
@@ -1391,14 +1862,7 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
 
                         {/* Tanda Penutup Salinan Resep: p.c.c (Pro Copia Conform) */}
                         <div className="pt-4 border-t-2 border-slate-800 flex items-center justify-between text-xs">
-                          <div className="text-[10px] text-slate-600 space-y-0.5">
-                            <div>
-                              <strong>Keterangan Singkatan Baku:</strong>{' '}
-                              <span className="italic">R/ (Recipe = Ambillah)</span> ·{' '}
-                              <span className="italic">No. (Numero = Jumlah)</span> ·{' '}
-                              <span className="italic">S (Signa = Tandailah)</span> ·{' '}
-                              <span className="italic">det orig (Detur Originale = Diserahkan sesuai asli)</span>
-                            </div>
+                          <div className="text-[10px] text-slate-600">
                             <div>
                               <strong>Diagnosa Klinis (ICD-10):</strong> {selectedRecord.soapA}
                             </div>
@@ -1411,22 +1875,6 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
                               (Pro Copia Conform / Sesuai Aslinya)
                             </span>
                           </div>
-                        </div>
-                      </div>
-
-                      {/* 3. KELENGKAPAN SKRINING RESEP (STANDAR PERMENKES RI NO. 73 TAHUN 2016) */}
-                      <div className="grid grid-cols-3 gap-2 p-2.5 bg-slate-50 rounded-xl border border-slate-300 text-[10px]">
-                        <div>
-                          <span className="font-black text-slate-800 block uppercase">1. Skrining Administratif</span>
-                          <span className="text-emerald-800 font-semibold">✓ Inscriptio, SIP Dokter, Tgl, Identitas & Umur/BB Pasien Lengkap</span>
-                        </div>
-                        <div>
-                          <span className="font-black text-slate-800 block uppercase">2. Skrining Farmasetik</span>
-                          <span className="text-emerald-800 font-semibold">✓ Bentuk, Kekuatan, Dosis, Jumlah Romawi & Stabilitas Sesuai</span>
-                        </div>
-                        <div>
-                          <span className="font-black text-slate-800 block uppercase">3. Skrining Klinis</span>
-                          <span className="text-emerald-800 font-semibold">✓ Tepat Indikasi, Dosis, Waktu Pakai & Bebas Kontraindikasi</span>
                         </div>
                       </div>
                     </div>
@@ -1464,19 +1912,10 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
                 </div>
               )}
 
-              {/* Signature Block: Adjust for Copy Resep (Dokter + APJ p.c.c) vs RME / Surat Sakit */}
+              {/* Signature Block: Copy Resep (APJ p.c.c only) vs RME / Surat Sakit */}
               {printType === 'copy-resep' ? (
                 <div className="grid grid-cols-2 pt-4 text-xs gap-4">
-                  <div className="text-center space-y-12">
-                    <p className="font-semibold text-slate-700">
-                      Dokter Penulis Resep (Inscriptio),<br />
-                      <span className="text-[10px] text-slate-500">{dpjProfile.specialization}</span>
-                    </p>
-                    <div>
-                      <p className="font-extrabold underline text-slate-900">{selectedRecord.doctorName || dpjProfile.name}</p>
-                      <p className="text-[10px] text-slate-600 font-mono">SIP: {dpjProfile.sip}</p>
-                    </div>
-                  </div>
+                  <div />
                   <div className="text-center space-y-12">
                     <p className="font-semibold text-slate-700">
                       {pharmacyProfile.city}, {selectedRecord.date}<br />
@@ -1506,9 +1945,11 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
                 </div>
               )}
             </div>
+              </>
+            )}
 
             {/* Modal Actions (Non-print) */}
-            <div className="p-4 bg-slate-50 border-t border-slate-200 flex justify-between items-center no-print">
+            <div className="p-4 bg-slate-50 border-t border-slate-200 flex flex-wrap justify-between items-center gap-2 no-print shrink-0">
               <button
                 type="button"
                 onClick={() => setSelectedRecord(null)}
@@ -1516,25 +1957,64 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
               >
                 Tutup
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (selectedRecord) {
-                    try {
-                      localStorage.setItem('latisha_active_print_rme', JSON.stringify(selectedRecord));
-                    } catch (e) {}
-                    openPrintWindow(printType, { rmeId: selectedRecord.id });
-                  }
-                }}
-                className="px-6 py-2 bg-sky-600 hover:bg-sky-700 active:scale-95 text-white font-bold rounded-xl text-xs transition shadow-md flex items-center gap-1.5 cursor-pointer"
-              >
-                <Printer className="w-4 h-4" />
-                <span>
-                  {printType === 'copy-resep'
-                    ? 'Cetak Salinan Resep / Copy Rx (Ctrl+P)'
-                    : 'Cetak Dokumen Resmi (Ctrl+P)'}
-                </span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                {printType === 'etiket-obat' ? (
+                  <button
+                    type="button"
+                    disabled={etiketLabels.filter((l) => l.selected).length === 0}
+                    onClick={() => selectedRecord && handlePrintRmeEtiket(selectedRecord)}
+                    className="px-6 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 active:scale-95 text-white font-bold rounded-xl text-xs transition shadow-md flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Printer className="w-4 h-4" />
+                    <span>
+                      Cetak Label Obat (
+                      {etiketLabels
+                        .filter((l) => l.selected)
+                        .reduce((s, l) => s + Math.max(1, l.copies || 1), 0)}{' '}
+                      Etiket)
+                    </span>
+                  </button>
+                ) : (
+                  <>
+                    {(selectedRecord.prescription?.length || 0) > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (etiketLabels.length === 0) {
+                            setEtiketLabels(
+                              buildMedicationLabelItems(selectedRecord.prescription || [], medicines)
+                            );
+                          }
+                          setPrintType('etiket-obat');
+                        }}
+                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs transition shadow-sm flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Tag className="w-4 h-4" />
+                        <span>Cetak Label Obat (Etiket)</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (selectedRecord) {
+                          try {
+                            demoSetItem('latisha_active_print_rme', JSON.stringify(selectedRecord));
+                          } catch (e) {}
+                          openPrintWindow(printType, { rmeId: selectedRecord.id });
+                        }
+                      }}
+                      className="px-6 py-2 bg-sky-600 hover:bg-sky-700 active:scale-95 text-white font-bold rounded-xl text-xs transition shadow-md flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Printer className="w-4 h-4" />
+                      <span>
+                        {printType === 'copy-resep'
+                          ? 'Cetak Salinan Resep / Copy Rx (Ctrl+P)'
+                          : 'Cetak Dokumen Resmi (Ctrl+P)'}
+                      </span>
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -1587,6 +2067,56 @@ export const RMEHistoryView: React.FC<RMEHistoryViewProps> = ({
                   <span>Ya, Hapus Permanen</span>
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Modal Skema SQL Tabel medical_records Supabase (APJ / Owner Only) */}
+      {isOwnerAdmin && showRmeSqlModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-[100] flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-2xl w-full overflow-hidden shadow-2xl border border-slate-200 flex flex-col max-h-[85vh]">
+            <div className="p-4 bg-slate-900 text-white flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <Code className="w-5 h-5 text-emerald-400" />
+                <h3 className="font-extrabold text-sm tracking-wide">
+                  Skema SQL Tabel medical_records (Arsip e-RME) Supabase
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowRmeSqlModal(false)}
+                className="p-1 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-4 overflow-y-auto space-y-3 font-mono text-xs bg-slate-950 text-emerald-400">
+              <div className="flex justify-between items-center text-slate-400 text-[11px]">
+                <span>-- Copy &amp; Paste ke SQL Editor Supabase</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(SUPABASE_RME_SQL_SCHEMA);
+                    setCopiedRmeSql(true);
+                    setTimeout(() => setCopiedRmeSql(false), 2000);
+                  }}
+                  className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-600 text-white font-bold rounded-lg text-[10px] flex items-center gap-1 font-sans transition-all cursor-pointer"
+                >
+                  <Copy className="w-3 h-3" />
+                  <span>{copiedRmeSql ? 'Tersalin!' : 'Salin Skrip DDL SQL'}</span>
+                </button>
+              </div>
+              <pre className="whitespace-pre-wrap leading-relaxed select-all">
+                {SUPABASE_RME_SQL_SCHEMA}
+              </pre>
+            </div>
+            <div className="p-3 bg-slate-100 border-t border-slate-200 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowRmeSqlModal(false)}
+                className="px-4 py-1.5 bg-slate-800 text-white rounded-xl text-xs font-bold hover:bg-slate-900 cursor-pointer"
+              >
+                Tutup
+              </button>
             </div>
           </div>
         </div>

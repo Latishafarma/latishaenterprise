@@ -209,11 +209,11 @@ export const LiveMonitorView: React.FC<LiveMonitorViewProps> = ({
                   <p className="text-xs font-medium">Belum ada pasien dalam antrean hari ini.</p>
                 </div>
               ) : (
-                queue.map((item) => {
+                queue.map((item, idx) => {
                   const isCurrent = item.nomor === currentPatient?.nomor;
                   return (
                     <div
-                      key={item.nomor}
+                      key={`${item.nomor || 'q'}-${item.rmId || idx}-${idx}`}
                       className={`p-3 rounded-2xl border transition-all ${
                         isCurrent
                           ? 'bg-sky-50 border-sky-400 ring-2 ring-sky-200'
