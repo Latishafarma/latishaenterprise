@@ -3,9 +3,9 @@ import { Patient, OnlineRegistration, ICD10Item, Staff, StaffRole, StaffStatus, 
 import { INITIAL_ICD10_LIST, INITIAL_STAFF, INITIAL_DUTY_SCHEDULES, INITIAL_MEDICINES } from '../data/initialData';
 import { resolveGenericDrugName } from '../data/drugInteractions';
 import { isDemoMode, demoGetItem, demoSetItem } from './demoSandbox';
-import { getDeletedIdsSet } from './deletionRegistry';
+import { getDeletedIdsSet, getPendingSyncIdsSet } from './deletionRegistry';
 import { normalizeServiceFeeRole, normalizeServiceFeeType } from './serviceFeeHelper';
-import { getSavedRolePermissions, normalizeRolePermissionsMap } from './staffRegistrationHelper';
+import { getSavedRolePermissions, normalizeRolePermissionsMap, generateNextStaffId } from './staffRegistrationHelper';
 
 import { CashierShiftSession, CashDenominationItem, CASH_DENOMINATIONS_LIST } from '../types';
 
@@ -2273,24 +2273,48 @@ const OPTIONAL_STAFF_COLS = [
   'is_dpj',
   'registered_at',
   'validated_at',
-  'validated_by'
+  'validated_by',
+  'id_pegawai',
+  'peran_multi',
+  'hak_akses',
+  'no_hp',
+  'status',
+  'branch_id',
+  'updated_at'
 ];
 
-function stripOptionalStaffCols(row: Record<string, any>): Record<string, any> {
-  const copy = { ...row };
-  for (const col of OPTIONAL_STAFF_COLS) {
-    delete copy[col];
-  }
-  return copy;
-}
+const CORE_REQUIRED_STAFF_COLS = new Set(['id', 'nama_lengkap', 'peran']);
 
 function findMissingOptionalStaffCol(error: any, row: Record<string, any>): string | undefined {
   if (!error) return undefined;
-  const msg = String(error.message || '').toLowerCase();
+  const rawMsg = String(error.message || '');
+  const msg = rawMsg.toLowerCase();
   const isSchemaError =
-    msg.includes('column') || msg.includes('schema cache') || error.code === 'PGRST204';
+    msg.includes('column') ||
+    msg.includes('schema cache') ||
+    error.code === 'PGRST204' ||
+    error.code === '42703';
   if (!isSchemaError) return undefined;
-  return OPTIONAL_STAFF_COLS.find((col) => col in row && msg.includes(col));
+
+  const knownMatch = OPTIONAL_STAFF_COLS.find(
+    (col) => col in row && !CORE_REQUIRED_STAFF_COLS.has(col) && msg.includes(col)
+  );
+  if (knownMatch) return knownMatch;
+
+  // Dynamic extraction for any unrecognized optional column name in PostgREST / PostgreSQL error
+  const quotedPatterns = [
+    /'([a-z0-9_]+)'\s+column/i,
+    /column\s+"([a-z0-9_]+)"/i,
+    /column\s+[a-z0-9_]+\.([a-z0-9_]+)\s+does\s+not\s+exist/i
+  ];
+  for (const regex of quotedPatterns) {
+    const m = rawMsg.match(regex);
+    const colName = m?.[1]?.trim();
+    if (colName && colName in row && !CORE_REQUIRED_STAFF_COLS.has(colName)) {
+      return colName;
+    }
+  }
+  return undefined;
 }
 
 // Helper: Convert Supabase row to local Staff format
@@ -2364,7 +2388,7 @@ export function supabaseRowToStaff(row: Record<string, any>): Staff {
   return ensurePrimaryOwnerStaffRole(baseStaff).staff;
 }
 
-// Seed initial Staff list into Supabase if empty
+// Seed initial Staff list into Supabase if empty (only primary APJ / Owner in production so deleted staff IDs stay clean starting at STF-002)
 export async function seedStaffToSupabase(): Promise<{ success: boolean; count: number; error?: string }> {
   const client = getSupabaseClient();
   if (!client) {
@@ -2372,21 +2396,31 @@ export async function seedStaffToSupabase(): Promise<{ success: boolean; count: 
   }
 
   const { staffTable } = getSupabaseConfig();
+  const primaryOwner = ensurePrimaryOwnerStaffRole(INITIAL_STAFF[0]).staff;
   const deletedStaffSet = getDeletedIdsSet('staff');
-  const seedCandidates = INITIAL_STAFF.filter((s) => !deletedStaffSet.has(s.id));
-  const targetSeed = seedCandidates.length > 0 ? seedCandidates : [INITIAL_STAFF[0]];
-  const rows = targetSeed.map(staffToSupabaseRow);
+  const targetSeed = isDemoMode()
+    ? INITIAL_STAFF.filter((s) => !deletedStaffSet.has(s.id))
+    : [primaryOwner];
+  let currentRows = (targetSeed.length > 0 ? targetSeed : [primaryOwner]).map(staffToSupabaseRow);
 
   try {
-    let { error } = await client
-      .from(staffTable)
-      .upsert(rows, { onConflict: 'id' });
-
-    if (error && findMissingOptionalStaffCol(error, rows[0] || {})) {
-      const retry = await client
+    let error: any = null;
+    for (let attempt = 0; attempt <= OPTIONAL_STAFF_COLS.length + 4; attempt++) {
+      const res = await client
         .from(staffTable)
-        .upsert(rows.map(stripOptionalStaffCols), { onConflict: 'id' });
-      error = retry.error;
+        .upsert(currentRows, { onConflict: 'id' });
+      error = res.error;
+      if (!error) break;
+      const missingCol = findMissingOptionalStaffCol(error, currentRows[0] || {});
+      if (missingCol) {
+        currentRows = currentRows.map((r) => {
+          const copy = { ...r };
+          delete copy[missingCol];
+          return copy;
+        });
+        continue;
+      }
+      break;
     }
 
     if (error) {
@@ -2394,8 +2428,8 @@ export async function seedStaffToSupabase(): Promise<{ success: boolean; count: 
       return { success: false, count: 0, error: error.message };
     }
 
-    console.info(`[Supabase Staff Seed Success] Berhasil menyemai ${rows.length} data pegawai.`);
-    return { success: true, count: rows.length };
+    console.info(`[Supabase Staff Seed Success] Berhasil menyemai ${currentRows.length} data pegawai.`);
+    return { success: true, count: currentRows.length };
   } catch (err: any) {
     console.warn('[Supabase Staff Seed Exception]:', err);
     return { success: false, count: 0, error: err?.message || String(err) };
@@ -2410,9 +2444,13 @@ export async function fetchStaffFromSupabase(): Promise<{ data: Staff[] | null; 
   }
 
   const { staffTable } = getSupabaseConfig();
+  const primaryOwner = ensurePrimaryOwnerStaffRole(INITIAL_STAFF[0]).staff;
   const deletedStaffSet = getDeletedIdsSet('staff');
-  const seedCandidates = INITIAL_STAFF.filter((s) => !deletedStaffSet.has(s.id));
-  const fallbackStaff = seedCandidates.length > 0 ? seedCandidates : [INITIAL_STAFF[0]];
+  const fallbackStaff = isDemoMode()
+    ? INITIAL_STAFF.filter((s) => !deletedStaffSet.has(s.id))
+    : [primaryOwner];
+  const resolvedFallback = fallbackStaff.length > 0 ? fallbackStaff : [primaryOwner];
+
   try {
     const { data, error } = await client
       .from(staffTable)
@@ -2428,9 +2466,9 @@ export async function fetchStaffFromSupabase(): Promise<{ data: Staff[] | null; 
       console.info('[Supabase Staff Empty] Menjalankan auto-seed data pegawai awal...');
       const seedRes = await seedStaffToSupabase();
       if (seedRes.success) {
-        return { data: fallbackStaff, seeded: true };
+        return { data: resolvedFallback, seeded: true };
       }
-      return { data: fallbackStaff, error: seedRes.error };
+      return { data: resolvedFallback, error: seedRes.error };
     }
 
     const staffList: Staff[] = [];
@@ -2482,7 +2520,7 @@ export async function syncStaffToSupabase(st: Staff): Promise<{ success: boolean
     let currentRow = { ...row };
     let error: any = null;
 
-    for (let attempt = 0; attempt <= OPTIONAL_STAFF_COLS.length; attempt++) {
+    for (let attempt = 0; attempt <= OPTIONAL_STAFF_COLS.length + 4; attempt++) {
       const res = await client
         .from(staffTable)
         .upsert(currentRow, { onConflict: 'id' });
@@ -2508,6 +2546,169 @@ export async function syncStaffToSupabase(st: Staff): Promise<{ success: boolean
   } catch (err: any) {
     console.warn('[Supabase Sync Staff Exception]:', err);
     return { success: false, error: err?.message || String(err) };
+  }
+}
+
+// Atomic self-registration into Supabase: fetches live staff list first, prevents duplicate names,
+// computes collision-free STF-XXX ID, and performs INSERT (never silently overwriting an existing employee)
+export async function registerNewStaffToSupabase(
+  buildStaff: (resolvedId: string) => Staff,
+  localStaffSnapshot: Staff[] = []
+): Promise<{
+  success: boolean;
+  staff?: Staff;
+  allCloudStaff?: Staff[];
+  duplicateStaff?: Staff;
+  error?: string;
+}> {
+  const client = getSupabaseClient();
+  if (!client) {
+    return { success: false, error: 'Klien Supabase belum dikonfigurasi.' };
+  }
+
+  const { staffTable } = getSupabaseConfig();
+  const primaryOwner = ensurePrimaryOwnerStaffRole(INITIAL_STAFF[0]).staff;
+
+  try {
+    const { data: rawRows, error: fetchError } = await client
+      .from(staffTable)
+      .select('*')
+      .order('id', { ascending: true });
+
+    if (fetchError) {
+      console.warn('[Supabase Register Staff Fetch Error]:', fetchError.message);
+      return {
+        success: false,
+        error: `Gagal terhubung ke tabel pegawai Supabase: ${fetchError.message}`
+      };
+    }
+
+    let cloudStaff: Staff[] = (rawRows || []).map(supabaseRowToStaff);
+    if (cloudStaff.length === 0) {
+      await seedStaffToSupabase().catch(() => {});
+      cloudStaff = [primaryOwner];
+    }
+
+    const provisional = buildStaff('__PENDING__');
+    const normalizedInputName = String(provisional.name || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ');
+    const duplicateStaff = cloudStaff.find(
+      (st) =>
+        String(st.name || '')
+          .trim()
+          .toLowerCase()
+          .replace(/\s+/g, ' ') === normalizedInputName
+    );
+    if (duplicateStaff) {
+      return {
+        success: false,
+        duplicateStaff,
+        allCloudStaff: cloudStaff,
+        error: `Pegawai dengan nama "${duplicateStaff.name}" sudah terdaftar di sistem dengan ID ${duplicateStaff.id} (Status: ${duplicateStaff.status}).`
+      };
+    }
+
+    const pendingSyncLocalSet = getPendingSyncIdsSet('staff');
+    const usedStaffList: Staff[] = [
+      ...cloudStaff,
+      ...localStaffSnapshot.filter(
+        (st) =>
+          st?.id &&
+          pendingSyncLocalSet.has(String(st.id).trim()) &&
+          !cloudStaff.some((cs) => cs.id.toLowerCase() === st.id.toLowerCase())
+      )
+    ];
+
+    let lastError: any = null;
+    for (let idAttempt = 0; idAttempt < 6; idAttempt++) {
+      const candidateId = generateNextStaffId(usedStaffList);
+      const targetStaff = ensurePrimaryOwnerStaffRole(buildStaff(candidateId)).staff;
+      let currentRow = staffToSupabaseRow(targetStaff);
+      let insertError: any = null;
+      let insertedRow: Record<string, any> | null = null;
+      let conflictHit = false;
+
+      for (let colAttempt = 0; colAttempt <= OPTIONAL_STAFF_COLS.length + 4; colAttempt++) {
+        const res = await client
+          .from(staffTable)
+          .insert(currentRow)
+          .select('*')
+          .maybeSingle();
+
+        insertError = res.error;
+        if (!insertError) {
+          insertedRow = res.data;
+          break;
+        }
+
+        const missingCol = findMissingOptionalStaffCol(insertError, currentRow);
+        if (missingCol) {
+          const nextRow = { ...currentRow };
+          delete nextRow[missingCol];
+          currentRow = nextRow;
+          continue;
+        }
+
+        const errMsg = String(insertError.message || '').toLowerCase();
+        if (
+          insertError.code === '23505' ||
+          errMsg.includes('duplicate key') ||
+          errMsg.includes('already exists')
+        ) {
+          conflictHit = true;
+        }
+        break;
+      }
+
+      if (!insertError) {
+        const verifiedStaff = insertedRow
+          ? ensurePrimaryOwnerStaffRole({
+              ...targetStaff,
+              ...supabaseRowToStaff(insertedRow),
+              // Keep exact permissions/roles in case legacy DB lacked JSONB columns
+              permissions:
+                supabaseRowToStaff(insertedRow).permissions &&
+                supabaseRowToStaff(insertedRow).permissions!.length > 0
+                  ? supabaseRowToStaff(insertedRow).permissions
+                  : targetStaff.permissions,
+              roles:
+                supabaseRowToStaff(insertedRow).roles &&
+                supabaseRowToStaff(insertedRow).roles!.length > 0
+                  ? supabaseRowToStaff(insertedRow).roles
+                  : targetStaff.roles
+            }).staff
+          : targetStaff;
+
+        const allCloudStaff = [...cloudStaff, verifiedStaff];
+        console.info(
+          `[Supabase Register Staff Success] Pegawai ${verifiedStaff.name} (${verifiedStaff.id}) tersimpan ke Supabase.`
+        );
+        return { success: true, staff: verifiedStaff, allCloudStaff };
+      }
+
+      lastError = insertError;
+      if (conflictHit) {
+        usedStaffList.push({ ...targetStaff, id: candidateId });
+        continue;
+      }
+      break;
+    }
+
+    return {
+      success: false,
+      allCloudStaff: cloudStaff,
+      error:
+        lastError?.message ||
+        'Gagal menyimpan pendaftaran pegawai baru ke Supabase. Pastikan koneksi internet stabil dan kebijakan RLS tabel pegawai aktif.'
+    };
+  } catch (err: any) {
+    console.warn('[Supabase Register Staff Exception]:', err);
+    return {
+      success: false,
+      error: err?.message || String(err)
+    };
   }
 }
 

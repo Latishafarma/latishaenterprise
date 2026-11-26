@@ -272,13 +272,20 @@ export function markIdsDeleted(domain: SyncRegistryDomain, ids: string[]): void 
 
 /**
  * Records a deletion confirmed from Supabase realtime so stale caches cannot re-insert it.
+ * Note: For 'staff', IDs are sequential and reusable (STF-002, STF-003, ...), so we remove
+ * local pending flags without keeping a permanent tombstone that would wipe future hires.
  */
 export function recordRemoteDeletedId(domain: SyncRegistryDomain, id: string): void {
   const cleanId = String(id || '').trim();
   if (!cleanId) return;
   const keys = STORAGE_KEYS[domain];
-  const deleted = readIdList(keys.deleted);
-  writeIdList(keys.deleted, [...deleted, cleanId]);
+  if (domain === 'staff') {
+    const deleted = readIdList(keys.deleted).filter((existing) => existing !== cleanId);
+    writeIdList(keys.deleted, deleted);
+  } else {
+    const deleted = readIdList(keys.deleted);
+    writeIdList(keys.deleted, [...deleted, cleanId]);
+  }
 
   const pendingSync = readIdList(keys.pendingSync).filter((existing) => existing !== cleanId);
   writeIdList(keys.pendingSync, pendingSync);
@@ -289,7 +296,8 @@ export function recordRemoteDeletedId(domain: SyncRegistryDomain, id: string): v
 
 /**
  * Marks IDs as confirmed deleted on Supabase (clears them from pendingDelete queue
- * while keeping them in deleted tombstones to guard against stale caches/re-seeds).
+ * while keeping them in deleted tombstones for non-reusable ID domains).
+ * For 'staff', IDs are sequential & reusable, so confirmed cloud deletes also lift the tombstone.
  */
 export function confirmCloudDeletes(domain: SyncRegistryDomain, ids: string[]): void {
   const cleanIds = new Set(ids.map((id) => String(id || '').trim()).filter(Boolean));
@@ -297,6 +305,25 @@ export function confirmCloudDeletes(domain: SyncRegistryDomain, ids: string[]): 
   const keys = STORAGE_KEYS[domain];
   const remaining = readIdList(keys.pendingDelete).filter((id) => !cleanIds.has(id));
   writeIdList(keys.pendingDelete, remaining);
+  if (domain === 'staff') {
+    const remainingDeleted = readIdList(keys.deleted).filter((id) => !cleanIds.has(id));
+    writeIdList(keys.deleted, remainingDeleted);
+  }
+}
+
+/**
+ * Clears any stale deleted tombstones that are no longer waiting in pendingDelete.
+ * Crucial for 'staff' where sequential IDs (STF-002+) can legitimately be reassigned.
+ */
+export function clearNonPendingDeletedTombstones(domain: SyncRegistryDomain): void {
+  const keys = STORAGE_KEYS[domain];
+  const pendingDeleteSet = new Set(readIdList(keys.pendingDelete));
+  if (pendingDeleteSet.size === 0) {
+    writeIdList(keys.deleted, []);
+    return;
+  }
+  const retained = readIdList(keys.deleted).filter((id) => pendingDeleteSet.has(id));
+  writeIdList(keys.deleted, retained);
 }
 
 /**

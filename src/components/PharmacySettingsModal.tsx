@@ -68,11 +68,19 @@ import {
   seedStaffToSupabase,
   fetchStaffFromSupabase,
   syncStaffToSupabase,
+  deleteStaffFromSupabase,
   fetchFacilityProfilesFromSupabase,
   syncFacilityProfilesToSupabase,
   getSupabaseClient,
   FacilityProfileBundle
 } from '../utils/supabaseClient';
+import {
+  clearNonPendingDeletedTombstones,
+  confirmCloudDeletes,
+  confirmCloudSync,
+  getPendingDeleteIds,
+  getPendingSyncIdsSet
+} from '../utils/deletionRegistry';
 import { PTKP_OPTIONS } from '../utils/taxService';
 import {
   isDemoMode,
@@ -2697,32 +2705,68 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
                           onClick={async () => {
                             setSyncStaffLoading(true);
                             try {
+                              if (!isDemoMode()) {
+                                const pendingDels = getPendingDeleteIds('staff');
+                                for (const delId of pendingDels) {
+                                  const delRes = await deleteStaffFromSupabase(delId).catch(() => ({
+                                    success: false
+                                  }));
+                                  if (delRes.success) {
+                                    confirmCloudDeletes('staff', [delId]);
+                                  }
+                                }
+                                clearNonPendingDeletedTombstones('staff');
+                              }
+
                               // 1. Ambil data pegawai terbaru dari Supabase
                               const fetchRes = await fetchStaffFromSupabase();
                               if (fetchRes.error) {
                                 alert(`Gagal mengambil data pegawai dari Supabase: ${fetchRes.error}`);
                               } else if (fetchRes.data && fetchRes.data.length > 0) {
-                                const supabaseStaffs = fetchRes.data;
-                                const cleanLocalStaffs = staffList;
+                                const pendingDelSet = new Set(getPendingDeleteIds('staff'));
+                                const pendingSyncSet = getPendingSyncIdsSet('staff');
+                                const supabaseStaffs = fetchRes.data.filter(
+                                  (s) => s?.id && !pendingDelSet.has(String(s.id).trim())
+                                );
                                 const mergedMap = new Map<string, Staff>();
 
-                                // Masukkan data lokal terlebih dahulu
-                                cleanLocalStaffs.forEach((s) =>
-                                  mergedMap.set(s.id, ensurePrimaryOwnerStaffRole(s).staff)
-                                );
-                                // Gabungkan / tumpuk dengan data dari Supabase
+                                // Data Supabase adalah sumber kebenaran utama agar akun baru (dari link registrasi) & penghapusan tetap sinkron
                                 supabaseStaffs.forEach((s) =>
                                   mergedMap.set(s.id, ensurePrimaryOwnerStaffRole(s).staff)
                                 );
 
+                                // Hanya dorong ulang data lokal yang memang belum tersinkron (pendingSync)
+                                const unsyncedLocal = staffList.filter(
+                                  (s) =>
+                                    s?.id &&
+                                    !pendingDelSet.has(String(s.id).trim()) &&
+                                    pendingSyncSet.has(String(s.id).trim())
+                                );
+
+                                for (const localSt of unsyncedLocal) {
+                                  const existingRemote = mergedMap.get(localSt.id);
+                                  let targetToSync = ensurePrimaryOwnerStaffRole(localSt).staff;
+                                  if (
+                                    existingRemote &&
+                                    existingRemote.name.trim().toLowerCase() !==
+                                      targetToSync.name.trim().toLowerCase()
+                                  ) {
+                                    // Hindari menimpa pegawai berbeda dari device lain dengan ID yang sama
+                                    const freeId = generateNextStaffId(Array.from(mergedMap.values()));
+                                    targetToSync = { ...targetToSync, id: freeId };
+                                  }
+                                  const upRes = await syncStaffToSupabase(targetToSync);
+                                  if (upRes.success) {
+                                    confirmCloudSync('staff', [localSt.id, targetToSync.id]);
+                                  }
+                                  mergedMap.set(targetToSync.id, targetToSync);
+                                }
+
                                 const finalStaffs = Array.from(mergedMap.values());
 
-                                // Kirim ulang data lokal yang belum ada di Supabase atau akun APJ / Owner yang baru diperbaiki
+                                // Pastikan akun APJ / Owner utama tetap tersinkron
                                 for (const st of finalStaffs) {
-                                  if (
-                                    !supabaseStaffs.some((sb) => sb.id === st.id) ||
-                                    isPrimaryOwnerStaffRecord(st)
-                                  ) {
+                                  if (isPrimaryOwnerStaffRecord(st)) {
                                     await syncStaffToSupabase(st);
                                   }
                                 }

@@ -220,6 +220,7 @@ import {
   subscribeICD10Realtime,
   fetchStaffFromSupabase,
   syncStaffToSupabase,
+  registerNewStaffToSupabase,
   deleteStaffFromSupabase,
   subscribeStaffRealtime,
   fetchRmeFromSupabase,
@@ -378,7 +379,8 @@ import {
   markOpnameRefsDeleted,
   getPendingDeleteFeeLedgerTrxIds,
   addPendingDeleteFeeLedgerTrxIds,
-  confirmFeeLedgerTrxDeletes
+  confirmFeeLedgerTrxDeletes,
+  clearNonPendingDeletedTombstones
 } from './utils/deletionRegistry';
 import { PatientServiceChatWidget } from './components/PatientServiceChatWidget';
 import {
@@ -941,23 +943,119 @@ export default function App() {
     return INITIAL_DOCTORS;
   });
   const [staffList, setStaffList] = useState<Staff[]>(() => {
-    const deletedSet = getDeletedIdsSet('staff');
+    clearNonPendingDeletedTombstones('staff');
+    const pendingDeleteSet = new Set(getPendingDeleteIds('staff'));
     const saved = demoGetItem('latisha_staff');
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
           const valid = parsed
-            .filter((st: Staff) => st?.id && !deletedSet.has(String(st.id).trim()))
+            .filter((st: Staff) => st?.id && !pendingDeleteSet.has(String(st.id).trim()))
             .map((st: Staff) => ensurePrimaryOwnerStaffRole(st).staff);
           if (valid.length > 0) return valid;
         }
       } catch {}
     }
-    return INITIAL_STAFF.filter((st) => !deletedSet.has(st.id)).map(
-      (st) => ensurePrimaryOwnerStaffRole(st).staff
-    );
+    const defaultSeeds = isDemoMode() ? INITIAL_STAFF : [INITIAL_STAFF[0]];
+    return defaultSeeds
+      .filter((st) => st?.id && !pendingDeleteSet.has(st.id))
+      .map((st) => ensurePrimaryOwnerStaffRole(st).staff);
   });
+  const staffListRef = React.useRef<Staff[]>(staffList);
+  useEffect(() => {
+    staffListRef.current = staffList;
+  }, [staffList]);
+  const [isLoadingCloudStaff, setIsLoadingCloudStaff] = useState<boolean>(false);
+  const [cloudStaffSyncError, setCloudStaffSyncError] = useState<string>('');
+  const lastStaffCloudSyncAtRef = React.useRef<number>(0);
+
+  const refreshStaffFromCloud = useCallback(
+    async (options?: { silent?: boolean }): Promise<Staff[] | null> => {
+      if (isDemoActive || isDemoMode()) return null;
+      if (!options?.silent) {
+        setIsLoadingCloudStaff(true);
+      }
+      try {
+        const pendingDelStaff = getPendingDeleteIds('staff');
+        if (pendingDelStaff.length > 0) {
+          for (const delId of pendingDelStaff) {
+            const delRes = await deleteStaffFromSupabase(delId).catch(() => ({ success: false }));
+            if (delRes.success) {
+              confirmCloudDeletes('staff', [delId]);
+            }
+          }
+        }
+        clearNonPendingDeletedTombstones('staff');
+
+        const res = await fetchStaffFromSupabase();
+        if (res.error && !res.data) {
+          setCloudStaffSyncError(res.error);
+          return null;
+        }
+        setCloudStaffSyncError('');
+        lastStaffCloudSyncAtRef.current = Date.now();
+
+        if (!res.data) return null;
+
+        const remainingPendingDelSet = new Set(getPendingDeleteIds('staff'));
+        const pendingSyncStaffSet = getPendingSyncIdsSet('staff');
+        const remoteClean = res.data
+          .filter((s) => s?.id && !remainingPendingDelSet.has(String(s.id).trim()))
+          .map((s) => ensurePrimaryOwnerStaffRole(s).staff);
+
+        // Replay genuinely unsynced local additions safely without overwriting other devices' IDs
+        const mergedMap = new Map<string, Staff>();
+        remoteClean.forEach((s) => mergedMap.set(s.id, s));
+
+        const localPending = staffListRef.current.filter(
+          (s) =>
+            s?.id &&
+            !remainingPendingDelSet.has(String(s.id).trim()) &&
+            pendingSyncStaffSet.has(String(s.id).trim())
+        );
+
+        for (const pendingItem of localPending) {
+          const safePending = ensurePrimaryOwnerStaffRole(pendingItem).staff;
+          const existingSameName = Array.from(mergedMap.values()).find(
+            (r) =>
+              r.name.trim().toLowerCase().replace(/\s+/g, ' ') ===
+              safePending.name.trim().toLowerCase().replace(/\s+/g, ' ')
+          );
+          if (existingSameName) {
+            confirmCloudSync('staff', [safePending.id]);
+            continue;
+          }
+          const collision = mergedMap.get(safePending.id);
+          const targetItem = collision
+            ? { ...safePending, id: generateNextStaffId(Array.from(mergedMap.values())) }
+            : safePending;
+          const pushRes = await syncStaffToSupabase(targetItem).catch(() => ({ success: false }));
+          if (pushRes.success) {
+            confirmCloudSync('staff', [safePending.id, targetItem.id]);
+          }
+          mergedMap.set(targetItem.id, targetItem);
+        }
+
+        const nextList = Array.from(mergedMap.values());
+        if (nextList.length > 0) {
+          markInitialCloudSyncCompleted('staff');
+          saveStaffListLocally(nextList, { broadcast: false });
+          setStaffList(nextList);
+          return nextList;
+        }
+        return null;
+      } catch (err: any) {
+        setCloudStaffSyncError(err?.message || 'Gagal menyinkronkan data pegawai dengan Supabase');
+        return null;
+      } finally {
+        if (!options?.silent) {
+          setIsLoadingCloudStaff(false);
+        }
+      }
+    },
+    [isDemoActive]
+  );
 
   const [icd10List, setIcd10List] = useState<ICD10Item[]>(() => {
     const saved = demoGetItem('latisha_icd10_list');
@@ -2340,12 +2438,22 @@ export default function App() {
           );
           setStaffList((prev) =>
             prev.map((s) =>
-              s.id === 'STF-002' || s.id === 'STF-02'
-                ? { ...s, name: parsedDpj.name, phone: parsedDpj.phone || s.phone }
+              s.isDpj === true && getStaffActiveRoles(s, s.role).includes('Dokter')
+                ? {
+                    ...s,
+                    name: parsedDpj.name,
+                    phone: parsedDpj.phone || s.phone,
+                    ...(parsedDpj.sip ? { sipNumber: parsedDpj.sip } : {}),
+                    ...(parsedDpj.idi ? { estrNumber: parsedDpj.idi } : {})
+                  }
                 : s
             )
           );
-          if (activeStaffId === 'STF-002' || activeStaffId === 'STF-02') {
+          const matchedActiveStaff = staffListRef.current.find((s) => s.id === activeStaffId);
+          if (
+            matchedActiveStaff?.isDpj === true &&
+            getStaffActiveRoles(matchedActiveStaff, matchedActiveStaff.role).includes('Dokter')
+          ) {
             setUserName(parsedDpj.name);
           }
         }
@@ -2476,56 +2584,11 @@ export default function App() {
       }
     });
 
-    // 4. Initial Inbound Sync: Pull latest staff list from Supabase (tombstone-safe + replay pending deletes)
+    // 4. Initial Inbound Sync: Pull latest staff list from Supabase (safe against reused STF-XXX IDs)
     let cancelledStaffEffect = false;
     (async () => {
-      const pendingDelStaff = getPendingDeleteIds('staff');
-      if (pendingDelStaff.length > 0 && !isDemoMode()) {
-        for (const delId of pendingDelStaff) {
-          const delRes = await deleteStaffFromSupabase(delId).catch(() => ({ success: false }));
-          if (cancelledStaffEffect) return;
-          if (delRes.success) confirmCloudDeletes('staff', [delId]);
-        }
-      }
-      const res = await fetchStaffFromSupabase();
       if (cancelledStaffEffect) return;
-      if (res.data) {
-        const deletedStaffSet = getDeletedIdsSet('staff');
-        const stubbornIds = res.data
-          .filter((s) => s.id && deletedStaffSet.has(String(s.id).trim()))
-          .map((s) => String(s.id).trim());
-        if (stubbornIds.length > 0 && !isDemoMode()) {
-          Promise.all(
-            stubbornIds.map((sid) =>
-              deleteStaffFromSupabase(sid)
-                .then((dRes) => {
-                  if (dRes.success) confirmCloudDeletes('staff', [sid]);
-                })
-                .catch(() => {})
-            )
-          );
-        }
-        const remoteClean = res.data.filter((s) => s.id && !deletedStaffSet.has(String(s.id).trim()));
-        if (remoteClean.length > 0) {
-          const pendingSyncStaffSet = getPendingSyncIdsSet('staff');
-          markInitialCloudSyncCompleted('staff');
-          setStaffList((prev) => {
-            const map = new Map<string, Staff>();
-            remoteClean.forEach((s) => map.set(s.id, ensurePrimaryOwnerStaffRole(s).staff));
-            prev
-              .filter(
-                (s) =>
-                  s.id &&
-                  !deletedStaffSet.has(String(s.id).trim()) &&
-                  pendingSyncStaffSet.has(String(s.id).trim())
-              )
-              .forEach((s) => map.set(s.id, ensurePrimaryOwnerStaffRole(s).staff));
-            const nextList = Array.from(map.values());
-            saveStaffListLocally(nextList, { broadcast: false });
-            return nextList;
-          });
-        }
-      }
+      await refreshStaffFromCloud({ silent: true });
     })();
 
     // 5. Initial Inbound Sync & Safe Realtime: Pull latest RME records from Supabase (tombstone-safe + replay pending deletes)
@@ -4808,7 +4871,7 @@ export default function App() {
       },
       (updatedStaff) => {
         const cleanId = String(updatedStaff?.id || '').trim();
-        if (!cleanId || getDeletedIdsSet('staff').has(cleanId)) return;
+        if (!cleanId || getPendingDeleteIds('staff').includes(cleanId)) return;
         const safeStaff = ensurePrimaryOwnerStaffRole(updatedStaff).staff;
         setStaffList((prev) => {
           const exists = prev.some((s) => s.id === safeStaff.id);
@@ -5085,9 +5148,9 @@ export default function App() {
 
     const applySyncedStaffList = (parsed: unknown) => {
       if (!Array.isArray(parsed) || parsed.length === 0) return;
-      const deletedSet = getDeletedIdsSet('staff');
+      const pendingDeleteSet = new Set(getPendingDeleteIds('staff'));
       const valid = parsed
-        .filter((st: Staff) => st?.id && !deletedSet.has(String(st.id).trim()))
+        .filter((st: Staff) => st?.id && !pendingDeleteSet.has(String(st.id).trim()))
         .map((st: Staff) => ensurePrimaryOwnerStaffRole(st).staff);
       if (valid.length > 0) setStaffList(valid);
     };
@@ -5130,16 +5193,33 @@ export default function App() {
       } catch {}
     }
 
+    // Fallback cloud sync saat window kembali aktif atau berkala (agar pendaftaran pegawai dari GitHub link tetap masuk walau Realtime WebSocket sempat putus)
+    const handleFocusOrVisible = () => {
+      if (document.visibilityState === 'hidden') return;
+      if (Date.now() - lastStaffCloudSyncAtRef.current < 12000) return;
+      void refreshStaffFromCloud({ silent: true });
+    };
+    const staffPollInterval = window.setInterval(() => {
+      if (document.visibilityState !== 'hidden') {
+        void refreshStaffFromCloud({ silent: true });
+      }
+    }, 25000);
+
     window.addEventListener('storage', handleStaffStorageSync);
     window.addEventListener(ROLE_PERMISSIONS_UPDATED_EVENT, handleLocalRolePermEvent);
+    window.addEventListener('focus', handleFocusOrVisible);
+    document.addEventListener('visibilitychange', handleFocusOrVisible);
     return () => {
       window.removeEventListener('storage', handleStaffStorageSync);
       window.removeEventListener(ROLE_PERMISSIONS_UPDATED_EVENT, handleLocalRolePermEvent);
+      window.removeEventListener('focus', handleFocusOrVisible);
+      document.removeEventListener('visibilitychange', handleFocusOrVisible);
+      window.clearInterval(staffPollInterval);
       try {
         rbacChannel?.close();
       } catch {}
     };
-  }, [isDemoActive]);
+  }, [isDemoActive, refreshStaffFromCloud]);
 
   // Resolve current logged-in staff account & effective RBAC permissions live from staffList
   const currentStaff: Staff | undefined = useMemo(
@@ -11452,36 +11532,55 @@ export default function App() {
       ? getSavedRolePermissions()
       : normalizeRolePermissionsMap(rolePermissions);
     const assignedPermissions = resolveRoleDefaultPermissions(finalRole, liveRolePermissions);
-    const uniqueId = staffList.some((s) => s.id.toLowerCase() === incomingStaff.id.toLowerCase())
-      ? generateNextStaffId(staffList)
-      : incomingStaff.id;
-    const savedStaff = ensurePrimaryOwnerStaffRole({
-      ...incomingStaff,
-      id: uniqueId,
-      role: finalRole,
-      roles: [finalRole],
-      permissions: assignedPermissions,
-      status: 'Menunggu Validasi',
-      registeredAt: incomingStaff.registeredAt || new Date().toISOString()
-    }).staff;
 
-    markIdsPendingSync('staff', [savedStaff.id]);
-    setStaffList((prev) => {
-      if (prev.some((s) => s.id.toLowerCase() === savedStaff.id.toLowerCase())) {
-        return prev;
-      }
-      const nextList = [...prev, savedStaff];
-      saveStaffListLocally(nextList);
-      return nextList;
-    });
+    const buildStaffWithId = (resolvedId: string): Staff =>
+      ensurePrimaryOwnerStaffRole({
+        ...incomingStaff,
+        id: resolvedId,
+        role: finalRole,
+        roles: [finalRole],
+        permissions: assignedPermissions,
+        status: 'Menunggu Validasi',
+        registeredAt: incomingStaff.registeredAt || new Date().toISOString()
+      }).staff;
+
+    let savedStaff: Staff;
 
     if (!isDemoActive && !isDemoMode()) {
-      await syncStaffToSupabase(savedStaff)
-        .then((res) => {
-          if (res.success) confirmCloudSync('staff', [savedStaff.id]);
-        })
-        .catch(() => {});
+      const regRes = await registerNewStaffToSupabase(buildStaffWithId, staffListRef.current);
+      if (regRes.allCloudStaff && regRes.allCloudStaff.length > 0) {
+        const pendingDeleteSet = new Set(getPendingDeleteIds('staff'));
+        const syncedList = regRes.allCloudStaff
+          .filter((s) => s?.id && !pendingDeleteSet.has(String(s.id).trim()))
+          .map((s) => ensurePrimaryOwnerStaffRole(s).staff);
+        if (syncedList.length > 0) {
+          saveStaffListLocally(syncedList);
+          setStaffList(syncedList);
+        }
+      }
+      if (!regRes.success || !regRes.staff) {
+        throw new Error(
+          regRes.error ||
+            'Pendaftaran gagal tersimpan ke database Supabase. Silakan periksa koneksi internet dan coba lagi.'
+        );
+      }
+      savedStaff = regRes.staff;
+      confirmCloudSync('staff', [savedStaff.id]);
     } else {
+      const uniqueId = staffListRef.current.some(
+        (s) => s.id.toLowerCase() === incomingStaff.id.toLowerCase()
+      )
+        ? generateNextStaffId(staffListRef.current)
+        : incomingStaff.id;
+      savedStaff = buildStaffWithId(uniqueId);
+      setStaffList((prev) => {
+        if (prev.some((s) => s.id.toLowerCase() === savedStaff.id.toLowerCase())) {
+          return prev;
+        }
+        const nextList = [...prev, savedStaff];
+        saveStaffListLocally(nextList);
+        return nextList;
+      });
       confirmCloudSync('staff', [savedStaff.id]);
     }
 
@@ -11588,6 +11687,11 @@ export default function App() {
           branches={branches}
           rolePermissions={rolePermissions}
           isDemoSandbox={isDemoActive}
+          isLoadingCloudStaff={isLoadingCloudStaff}
+          cloudSyncError={cloudStaffSyncError}
+          onRefreshCloudStaff={async () => {
+            await refreshStaffFromCloud();
+          }}
           onRegisterStaff={handleSelfRegisterStaff}
           onBackToLogin={(prefillStaff) => {
             setShowStaffRegistration(false);
@@ -11647,9 +11751,21 @@ export default function App() {
             <div className="grid grid-cols-1 md:grid-cols-12 divide-y md:divide-y-0 md:divide-x divide-slate-100">
               {/* Left / Primary Column: Staff Login Form */}
               <form
-                onSubmit={(e) => {
+                onSubmit={async (e) => {
                   e.preventDefault();
-                  const matched = verifyStaffCredentials(loginNameInput, loginIdInput, staffList);
+                  let candidateList = staffList;
+                  let matched = verifyStaffCredentials(loginNameInput, loginIdInput, candidateList);
+                  if (
+                    (!matched || matched.status === 'Menunggu Validasi') &&
+                    !isDemoActive &&
+                    !isDemoMode()
+                  ) {
+                    const refreshed = await refreshStaffFromCloud({ silent: true });
+                    if (refreshed && refreshed.length > 0) {
+                      candidateList = refreshed;
+                      matched = verifyStaffCredentials(loginNameInput, loginIdInput, candidateList);
+                    }
+                  }
                   if (!matched) {
                     setLoginErrorMessage(
                       'Nama atau ID tidak ditemukan. Pastikan nama petugas (boleh nama saja atau dengan gelar) dan ID pegawai sesuai dengan data yang tersimpan di sistem.'
@@ -13643,11 +13759,15 @@ export default function App() {
             saveStaffListLocally(nextList);
             return nextList;
           });
-          syncStaffToSupabase(s)
-            .then((res) => {
-              if (res.success) confirmCloudSync('staff', [s.id]);
-            })
-            .catch(() => {});
+          if (!isDemoActive && !isDemoMode()) {
+            syncStaffToSupabase(s)
+              .then((res) => {
+                if (res.success) confirmCloudSync('staff', [s.id]);
+              })
+              .catch(() => {});
+          } else {
+            confirmCloudSync('staff', [s.id]);
+          }
           addAuditLog('Pegawai', `Registrasi staf baru ${s.name} (${s.role})`);
         }}
         onUpdateStaff={(updated) => {
@@ -13661,12 +13781,21 @@ export default function App() {
                 validatedBy: updated.validatedBy || userName || 'APJ / Owner'
               }
             : updated;
+          markIdsPendingSync('staff', [enriched.id]);
           setStaffList((prev) => {
             const nextList = prev.map((s) => (s.id === enriched.id ? enriched : s));
             saveStaffListLocally(nextList);
             return nextList;
           });
-          syncStaffToSupabase(enriched);
+          if (!isDemoActive && !isDemoMode()) {
+            syncStaffToSupabase(enriched)
+              .then((res) => {
+                if (res.success) confirmCloudSync('staff', [enriched.id]);
+              })
+              .catch(() => {});
+          } else {
+            confirmCloudSync('staff', [enriched.id]);
+          }
           if (
             becameActive &&
             getStaffActiveRoles(enriched, enriched.role).includes('Dokter') &&
@@ -13770,7 +13899,7 @@ export default function App() {
                 );
                 setStaffList((prev) =>
                   prev.map((s) =>
-                    s.isDpj || s.id === 'STF-002'
+                    s.isDpj === true && getStaffActiveRoles(s, s.role).includes('Dokter')
                       ? {
                           ...s,
                           name: parsedDpj.name,
@@ -13781,7 +13910,10 @@ export default function App() {
                       : s
                   )
                 );
-                if (currentStaff?.isDpj || currentStaff?.id === 'STF-002') {
+                if (
+                  currentStaff?.isDpj === true &&
+                  getStaffActiveRoles(currentStaff, currentStaff.role).includes('Dokter')
+                ) {
                   setUserName(parsedDpj.name);
                 }
               }
