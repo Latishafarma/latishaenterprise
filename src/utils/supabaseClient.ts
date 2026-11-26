@@ -13291,7 +13291,8 @@ export async function pushDiscountsPromosToServerBridge(
 ): Promise<void> {
   if (isDemoMode() || typeof fetch === 'undefined') return;
   try {
-    await fetch('/api/promo-discount', {
+    const { safeBackendFetch } = await import('./serverBridgeHelper');
+    await safeBackendFetch('/api/promo-discount', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ discounts, promos })
@@ -13305,8 +13306,9 @@ export async function fetchDiscountsPromosFromServerBridge(): Promise<{
 } | null> {
   if (isDemoMode() || typeof fetch === 'undefined') return null;
   try {
-    const res = await fetch('/api/promo-discount');
-    if (!res.ok) return null;
+    const { safeBackendFetch } = await import('./serverBridgeHelper');
+    const res = await safeBackendFetch('/api/promo-discount');
+    if (!res || !res.ok) return null;
     const data = await res.json();
     return {
       discounts: Array.isArray(data?.discounts) ? data.discounts : [],

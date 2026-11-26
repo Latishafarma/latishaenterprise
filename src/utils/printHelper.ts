@@ -5,6 +5,7 @@ import {
   syncFacilityProfileToServer
 } from '../components/PharmacySettingsModal';
 import { demoGetItem, demoSetItem, isDemoMode } from './demoSandbox';
+import { hasLocalServerBackend, safeBackendFetch } from './serverBridgeHelper';
 
 /**
  * Universal print window helper that opens a clean top-level tab
@@ -12,6 +13,7 @@ import { demoGetItem, demoSetItem, isDemoMode } from './demoSandbox';
  */
 export function openPrintWindow(mode: string, params: Record<string, string> = {}) {
   const demoActive = isDemoMode();
+  const backendAvailable = hasLocalServerBackend();
   const searchParams = new URLSearchParams({ print: mode, ...params });
   if (demoActive && !searchParams.get('mode')) {
     searchParams.set('mode', 'demo');
@@ -28,7 +30,7 @@ export function openPrintWindow(mode: string, params: Record<string, string> = {
       } catch {}
     }
 
-    if (!demoActive) {
+    if (!demoActive && backendAvailable) {
       syncFacilityProfileToServer({
         pharmacy: pharmProfile,
         apj: apjProfile,
@@ -38,8 +40,10 @@ export function openPrintWindow(mode: string, params: Record<string, string> = {
 
     const { logoUrl, ...pharmWithoutLogo } = pharmProfile;
     const pharmForUrl = logoUrl
-      ? demoActive
-        ? pharmProfile
+      ? demoActive || !backendAvailable
+        ? logoUrl.length < 4000
+          ? pharmProfile
+          : pharmWithoutLogo
         : { ...pharmWithoutLogo, logoUrl: `/api/facility-logo?t=${Date.now()}` }
       : pharmWithoutLogo;
 
@@ -74,15 +78,13 @@ export function openPrintWindow(mode: string, params: Record<string, string> = {
         (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(storageKey) : null) ||
         demoGetItem(storageKey);
       if (rawPayload) {
-        if (!demoActive) {
-          try {
-            fetch('/api/print-payload', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              keepalive: true,
-              body: JSON.stringify({ key: storageKey, payload: rawPayload })
-            }).catch(() => {});
-          } catch {}
+        if (!demoActive && backendAvailable) {
+          void safeBackendFetch('/api/print-payload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            keepalive: true,
+            body: JSON.stringify({ key: storageKey, payload: rawPayload })
+          });
         }
 
         if (rawPayload.length < 8000) {

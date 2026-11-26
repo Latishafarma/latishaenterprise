@@ -29,6 +29,7 @@ import {
   Clock,
   LocateFixed
 } from 'lucide-react';
+import { safeBackendFetch } from '../utils/serverBridgeHelper';
 import {
   PharmacyProfile,
   PharmacyBankAccount,
@@ -365,14 +366,14 @@ export const syncFacilityProfileToServer = (payload: {
   try {
     if (isDemoMode()) return;
     if (typeof window === 'undefined' || typeof window.fetch !== 'function') return;
-    fetch('/api/facility-profile', {
+    void safeBackendFetch('/api/facility-profile', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
       keepalive: true,
       body: JSON.stringify(payload)
-    }).catch(() => {});
+    });
   } catch {}
 };
 
@@ -602,8 +603,8 @@ export const useFacilityProfiles = () => {
         });
       }
 
-      fetch('/api/facility-profile')
-        .then((r) => (r.ok ? r.json() : null))
+      safeBackendFetch('/api/facility-profile')
+        .then((r) => (r && r.ok ? r.json() : null))
         .then((serverData) => {
           if (!serverData) return;
           let updated = false;

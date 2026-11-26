@@ -37,6 +37,7 @@ import {
   normalizeMedicationLabelLayout
 } from '../utils/medicationLabelHelper';
 import { formatDateDDMMYYYY } from '../utils/racikanBudHelper';
+import { hasLocalServerBackend, safeBackendFetch } from '../utils/serverBridgeHelper';
 
 interface PrintViewProps {
   mode: string;
@@ -127,14 +128,15 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
     };
     const storageKey = payloadKeyMap[mode];
     const demoActive = isDemoMode();
+    const backendAvailable = hasLocalServerBackend();
     const hasInlineUrlPayload = Boolean(searchParams.get('_payload'));
     const fetchRemotePayload = (): Promise<any> =>
-      fetch(`/api/print-payload/${storageKey}`)
-        .then((r) => (r.ok ? r.json() : null))
+      safeBackendFetch(`/api/print-payload/${storageKey}`)
+        .then((r) => (r && r.ok ? r.json() : null))
         .catch(() => null);
 
     const remotePayloadPromise =
-      storageKey && !demoActive && !hasInlineUrlPayload
+      storageKey && !demoActive && backendAvailable && !hasInlineUrlPayload
         ? fetchRemotePayload()
             .then((data) => {
               if (data?.payload || cancelled) return data;
@@ -212,11 +214,11 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
       }
     };
 
-    if (demoActive) {
+    if (demoActive || !backendAvailable) {
       setTimeout(triggerPrintWhenImagesReady, 200);
     } else {
-      const facilityPromise = fetch('/api/facility-profile')
-        .then((r) => (r.ok ? r.json() : null))
+      const facilityPromise = safeBackendFetch('/api/facility-profile')
+        .then((r) => (r && r.ok ? r.json() : null))
         .then((data) => {
           if (cancelled) return;
           if (data?.pharmacy) {
@@ -1960,10 +1962,17 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
               {pharmacyProfile.logoUrl ? (
                 <div className="w-16 h-16 shrink-0 flex items-center justify-center">
                   <img
-                    src={pharmacyProfile.logoUrl || '/api/facility-logo'}
+                    src={
+                      pharmacyProfile.logoUrl ||
+                      (hasLocalServerBackend()
+                        ? '/api/facility-logo'
+                        : `${import.meta.env.BASE_URL}assets/aistudio/logo_resmi_apotek_673c56f0.png`)
+                    }
                     onError={(e) => {
                       e.currentTarget.onerror = null;
-                      e.currentTarget.src = '/api/facility-logo';
+                      e.currentTarget.src = hasLocalServerBackend()
+                        ? '/api/facility-logo'
+                        : `${import.meta.env.BASE_URL}assets/aistudio/logo_resmi_apotek_673c56f0.png`;
                     }}
                     alt="Logo Faskes"
                     className="w-16 h-16 object-contain"

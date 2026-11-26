@@ -37,6 +37,7 @@ import {
 } from '../types';
 import { formatPharmacyAddress, useFacilityProfiles } from './PharmacySettingsModal';
 import { MedicineCategorySymbol } from './MedicineCategorySymbol';
+import { hasLocalServerBackend, safeBackendFetch } from '../utils/serverBridgeHelper';
 
 interface ChatMessage {
   id: string;
@@ -329,12 +330,12 @@ export const PatientServiceChatWidget: React.FC<PatientServiceChatWidgetProps> =
             sessionId
           })
         );
-      } else {
-        fetch(`/api/live-chat/sessions/${encodeURIComponent(sessionId)}/read`, {
+      } else if (hasLocalServerBackend()) {
+        void safeBackendFetch(`/api/live-chat/sessions/${encodeURIComponent(sessionId)}/read`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ reader: 'staff' })
-        }).catch(() => {});
+        });
       }
     }, []);
 
@@ -375,9 +376,10 @@ export const PatientServiceChatWidget: React.FC<PatientServiceChatWidgetProps> =
       };
 
       const hydrateSessions = async () => {
+        if (!hasLocalServerBackend()) return;
         try {
-          const res = await fetch('/api/live-chat/sessions');
-          if (!res.ok) return;
+          const res = await safeBackendFetch('/api/live-chat/sessions');
+          if (!res || !res.ok) return;
           const data = await res.json();
           if (!isDisposed && Array.isArray(data?.sessions)) {
             applySessionList(data.sessions);
@@ -385,8 +387,11 @@ export const PatientServiceChatWidget: React.FC<PatientServiceChatWidgetProps> =
         } catch {}
       };
 
-      hydrateSessions();
-      const pollTimer = window.setInterval(hydrateSessions, 3500);
+      const backendAvailable = hasLocalServerBackend();
+      if (backendAvailable) {
+        hydrateSessions();
+      }
+      const pollTimer = backendAvailable ? window.setInterval(hydrateSessions, 3500) : null;
 
       // Instant same-browser cross-tab fallback sync
       if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -395,21 +400,23 @@ export const PatientServiceChatWidget: React.FC<PatientServiceChatWidgetProps> =
           bc.onmessage = (evt) => {
             if (isDisposed) return;
             if (evt.data?.type === 'chat:message' || evt.data?.type === 'chat:session_deleted') {
-              hydrateSessions();
+              if (hasLocalServerBackend()) {
+                hydrateSessions();
+              }
             }
           };
         } catch {}
       }
 
       const handleVisibility = () => {
-        if (document.visibilityState === 'visible') {
+        if (document.visibilityState === 'visible' && hasLocalServerBackend()) {
           hydrateSessions();
         }
       };
       document.addEventListener('visibilitychange', handleVisibility);
 
       const connectStaffWs = () => {
-        if (isDisposed) return;
+        if (isDisposed || !hasLocalServerBackend()) return;
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/ws/patient-chat?role=staff&staffName=${encodeURIComponent(
           resolvedStaffName
@@ -508,11 +515,13 @@ export const PatientServiceChatWidget: React.FC<PatientServiceChatWidgetProps> =
         }
       };
 
-      connectStaffWs();
+      if (backendAvailable) {
+        connectStaffWs();
+      }
 
       return () => {
         isDisposed = true;
-        clearInterval(pollTimer);
+        if (pollTimer !== null) clearInterval(pollTimer);
         document.removeEventListener('visibilitychange', handleVisibility);
         if (bc) bc.close();
         if (staffHeartbeatTimerRef.current) clearInterval(staffHeartbeatTimerRef.current);
@@ -541,18 +550,42 @@ export const PatientServiceChatWidget: React.FC<PatientServiceChatWidgetProps> =
         };
 
         try {
+          const nowIso = new Date().toISOString();
           if (staffWsRef.current && staffWsRef.current.readyState === WebSocket.OPEN) {
             staffWsRef.current.send(JSON.stringify(packet));
-          } else {
-            const res = await fetch('/api/live-chat/messages', {
+          } else if (hasLocalServerBackend()) {
+            const res = await safeBackendFetch('/api/live-chat/messages', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(packet)
             });
-            if (res.ok) {
+            if (res && res.ok) {
               const data = await res.json();
               if (data?.session) upsertLiveSession(data.session);
             }
+          } else {
+            setLiveSessions((prev) =>
+              prev.map((s) =>
+                s.sessionId === selectedLiveSessionId
+                  ? {
+                      ...s,
+                      updatedAt: nowIso,
+                      unreadForStaff: 0,
+                      messages: [
+                        ...s.messages,
+                        {
+                          id: msgId,
+                          sessionId: selectedLiveSessionId,
+                          sender: 'staff',
+                          senderName: resolvedStaffName,
+                          text,
+                          createdAt: nowIso
+                        }
+                      ]
+                    }
+                  : s
+              )
+            );
           }
           if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
             try {
@@ -566,7 +599,7 @@ export const PatientServiceChatWidget: React.FC<PatientServiceChatWidgetProps> =
                   sender: 'staff',
                   senderName: resolvedStaffName,
                   text,
-                  createdAt: new Date().toISOString()
+                  createdAt: nowIso
                 }
               });
               bc.close();
@@ -589,10 +622,10 @@ export const PatientServiceChatWidget: React.FC<PatientServiceChatWidgetProps> =
             sessionId
           })
         );
-      } else {
-        fetch(`/api/live-chat/sessions/${encodeURIComponent(sessionId)}`, {
+      } else if (hasLocalServerBackend()) {
+        void safeBackendFetch(`/api/live-chat/sessions/${encodeURIComponent(sessionId)}`, {
           method: 'DELETE'
-        }).catch(() => {});
+        });
       }
       setLiveSessions((prev) => prev.filter((s) => s.sessionId !== sessionId));
       setSelectedObrolanSessionId((prev) => (prev === sessionId ? null : prev));
@@ -679,8 +712,9 @@ export const PatientServiceChatWidget: React.FC<PatientServiceChatWidgetProps> =
     // Keep server public chat context synchronized with live clinic schedules, medicine catalog, promos, lab fees, and queue
     // so patient portal quick-topic buttons (Jadwal Dokter, Cek Harga & Stok, etc.) auto-answer with real live data.
     useEffect(() => {
+      if (!hasLocalServerBackend()) return;
       const timer = window.setTimeout(() => {
-        fetch('/api/public-chat-context', {
+        void safeBackendFetch('/api/public-chat-context', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -734,7 +768,7 @@ export const PatientServiceChatWidget: React.FC<PatientServiceChatWidgetProps> =
               waitingCount: waitingQueueCount
             }
           })
-        }).catch(() => {});
+        });
       }, 500);
       return () => clearTimeout(timer);
     }, [
@@ -863,17 +897,55 @@ export const PatientServiceChatWidget: React.FC<PatientServiceChatWidgetProps> =
         };
 
         try {
-          const res = await fetch('/api/live-chat/messages', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(fullPacket)
-          });
-          if (res.ok) {
-            const data = await res.json();
-            if (data?.session) {
-              upsertLiveSession(data.session);
-              setSelectedObrolanSessionId(data.session.sessionId);
+          const nowIso = new Date().toISOString();
+          let syncedFromServer = false;
+          if (hasLocalServerBackend()) {
+            const res = await safeBackendFetch('/api/live-chat/messages', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(fullPacket)
+            });
+            if (res && res.ok) {
+              const data = await res.json();
+              if (data?.session) {
+                upsertLiveSession(data.session);
+                setSelectedObrolanSessionId(data.session.sessionId);
+                syncedFromServer = true;
+              }
             }
+          }
+          if (!syncedFromServer) {
+            const newMsg: LiveChatMessage = {
+              id: packet.id,
+              sessionId: packet.sessionId,
+              sender: packet.sender,
+              senderName: packet.senderName,
+              text: packet.text,
+              createdAt: nowIso
+            };
+            setLiveSessions((prev) => {
+              const existing = prev.find((s) => s.sessionId === packet.sessionId);
+              const updated: LiveChatSession = existing
+                ? {
+                    ...existing,
+                    updatedAt: nowIso,
+                    messages: [...existing.messages, newMsg]
+                  }
+                : {
+                    sessionId: packet.sessionId,
+                    patientName: packet.patientName,
+                    patientPhone: packet.patientPhone,
+                    source: 'in-app',
+                    createdAt: nowIso,
+                    updatedAt: nowIso,
+                    unreadForStaff: 0,
+                    unreadForPatient: 0,
+                    messages: [newMsg]
+                  };
+              const others = prev.filter((s) => s.sessionId !== packet.sessionId);
+              return [updated, ...others];
+            });
+            setSelectedObrolanSessionId(packet.sessionId);
           }
           if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
             try {
@@ -887,7 +959,7 @@ export const PatientServiceChatWidget: React.FC<PatientServiceChatWidgetProps> =
                   sender: packet.sender,
                   senderName: packet.senderName,
                   text: packet.text,
-                  createdAt: new Date().toISOString()
+                  createdAt: nowIso
                 }
               });
               bc.close();
@@ -978,7 +1050,46 @@ export const PatientServiceChatWidget: React.FC<PatientServiceChatWidgetProps> =
             month: 'long',
             year: 'numeric'
           });
-          const response = await fetch('/api/gemini/patient-chat', {
+          if (!hasLocalServerBackend()) {
+            const todaySchedules = (schedules || []).filter(
+              (s) => s.day?.toLowerCase() === todayDayName.toLowerCase()
+            );
+            const fallbackLines = [
+              `Informasi **${pharmacyName}**:`,
+              pharmacyPhone && pharmacyPhone !== '-' ? `- Kontak / WhatsApp Apotek: **${pharmacyPhone}**` : '',
+              todaySchedules.length > 0
+                ? `- Jadwal Praktik (${todayDayName}): ${todaySchedules
+                    .slice(0, 4)
+                    .map((s) => `${s.staffName} (${s.startTime}-${s.endTime})`)
+                    .join('; ')}`
+                : '',
+              matchedMedicines.length > 0
+                ? `- Katalog Obat Terkait: ${matchedMedicines
+                    .slice(0, 4)
+                    .map((m) => `${m.name} (Stok: ${m.stock} ${m.unit}, Rp ${Number(m.sellPrice || 0).toLocaleString('id-ID')})`)
+                    .join('; ')}`
+                : ''
+            ]
+              .filter(Boolean)
+              .join('\n');
+
+            await dispatchGeneralRoomPacket({
+              id: `ast-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+              sessionId: targetSessionId,
+              sender: 'assistant',
+              senderName: 'Sistem Otomatis Latisha Farma',
+              patientName: customerName,
+              patientPhone: customerPhone,
+              text: fallbackLines
+            });
+
+            if (!isOpenRef.current) {
+              setUnreadCount((c) => c + 1);
+            }
+            return;
+          }
+
+          const response = await safeBackendFetch('/api/gemini/patient-chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1035,8 +1146,8 @@ export const PatientServiceChatWidget: React.FC<PatientServiceChatWidgetProps> =
             })
           });
 
-          const data = await response.json().catch(() => ({}));
-          if (!response.ok || !data?.reply) {
+          const data = response ? await response.json().catch(() => ({})) : {};
+          if (!response || !response.ok || !data?.reply) {
             throw new Error(
               data?.error || 'Tidak dapat terhubung ke layanan obrolan saat ini. Coba lagi.'
             );

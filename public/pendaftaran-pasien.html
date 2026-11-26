@@ -1802,6 +1802,33 @@
       let isAutoReplyingLive = false;
       let catalogDebounceTimer = null;
       const renderedObrolanIds = new Set();
+
+      let sessionBackendUnavailable = false;
+      function isStaticHostEnvironment() {
+        const proto = String(window.location.protocol || '').toLowerCase();
+        if (proto === 'file:') return true;
+        const host = String(window.location.hostname || '').toLowerCase();
+        return ['.github.io', '.gitlab.io', '.bitbucket.io', '.pages.dev'].some(function (sfx) {
+          return host === sfx.slice(1) || host.endsWith(sfx);
+        });
+      }
+      function hasLocalServerBackend() {
+        return !isStaticHostEnvironment() && !sessionBackendUnavailable;
+      }
+      async function safeBackendFetch(url, options) {
+        if (!hasLocalServerBackend() || typeof fetch !== 'function') return null;
+        try {
+          const res = await fetch(url, options);
+          const ct = String(res.headers.get('content-type') || '').toLowerCase();
+          if (res.status === 404 || res.status === 405 || res.status === 501 || ct.includes('text/html')) {
+            sessionBackendUnavailable = true;
+            return null;
+          }
+          return res;
+        } catch (e) {
+          return null;
+        }
+      }
       const obrolanMessagesCache = [];
       const renderedMessageIds = new Set();
       const sessionMessagesCache = [];
@@ -2097,19 +2124,21 @@
       }
 
       // Fetch live pharmacy contact info for Kontak button
-      fetch('/api/public-chat-context/portal-info')
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (data) {
-          if (!data || !data.pharmacy) return;
-          if (data.pharmacy.phone) {
-            pharmacyPhone = String(data.pharmacy.phone).trim();
-            if (kontakBtn) kontakBtn.title = 'Salin nomor telepon apotek: ' + pharmacyPhone;
-          }
-          if (data.pharmacy.name) {
-            pharmacyName = String(data.pharmacy.name).trim();
-          }
-        })
-        .catch(function () {});
+      if (hasLocalServerBackend()) {
+        safeBackendFetch('/api/public-chat-context/portal-info')
+          .then(function (r) { return r && r.ok ? r.json() : null; })
+          .then(function (data) {
+            if (!data || !data.pharmacy) return;
+            if (data.pharmacy.phone) {
+              pharmacyPhone = String(data.pharmacy.phone).trim();
+              if (kontakBtn) kontakBtn.title = 'Salin nomor telepon apotek: ' + pharmacyPhone;
+            }
+            if (data.pharmacy.name) {
+              pharmacyName = String(data.pharmacy.name).trim();
+            }
+          })
+          .catch(function () {});
+      }
 
       if (kontakBtn) {
         kontakBtn.title = 'Salin nomor telepon apotek: ' + pharmacyPhone;
@@ -2397,8 +2426,8 @@
           renderAssistantMessages();
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'chat:delete_session', sessionId: obrolanSessionId }));
-          } else {
-            fetch('/api/live-chat/sessions/' + encodeURIComponent(obrolanSessionId), {
+          } else if (hasLocalServerBackend()) {
+            safeBackendFetch('/api/live-chat/sessions/' + encodeURIComponent(obrolanSessionId), {
               method: 'DELETE'
             }).catch(function () {});
           }
@@ -2635,9 +2664,13 @@
       async function fetchCatalogMedicines(query) {
         if (!catalogListEl) return;
         const q = String(query || '').trim();
+        if (!hasLocalServerBackend()) {
+          renderCatalogList(readLocalMedicinesFallback(q));
+          return;
+        }
         try {
-          const res = await fetch('/api/public-chat-context/medicines?q=' + encodeURIComponent(q));
-          if (!res.ok) throw new Error('Catalog fetch error');
+          const res = await safeBackendFetch('/api/public-chat-context/medicines?q=' + encodeURIComponent(q));
+          if (!res || !res.ok) throw new Error('Catalog fetch error');
           const data = await res.json();
           if (data && Array.isArray(data.medicines) && (data.medicines.length > 0 || Number(data.total || 0) > 0)) {
             renderCatalogList(data.medicines);
@@ -2698,6 +2731,14 @@
               bannerBadge.textContent = 'Petugas Standby · Pesan Tersimpan';
               bannerBadge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-50 text-sky-800 border border-sky-200';
             }
+          }
+        } else if (!hasLocalServerBackend()) {
+          presenceText.textContent = pharmacyName + ' · Portal Pendaftaran & Info';
+          if (liveSubStatus) liveSubStatus.textContent = 'Hubungi WhatsApp Apotek: ' + pharmacyPhone;
+          if (headerDot) headerDot.className = 'w-2.5 h-2.5 rounded-full bg-sky-300 border-2 border-sky-800 absolute -bottom-0.5 -right-0.5';
+          if (bannerBadge) {
+            bannerBadge.textContent = 'Portal Online · Info Apotek';
+            bannerBadge.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-50 text-sky-800 border border-sky-200';
           }
         } else {
           presenceText.textContent = 'Menghubungkan ke server apotek...';
@@ -2846,8 +2887,8 @@
         updateUnreadUI();
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'chat:mark_read', sessionId: targetSid }));
-        } else {
-          fetch('/api/live-chat/sessions/' + encodeURIComponent(targetSid) + '/read', {
+        } else if (hasLocalServerBackend()) {
+          safeBackendFetch('/api/live-chat/sessions/' + encodeURIComponent(targetSid) + '/read', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ reader: 'patient' })
@@ -2942,8 +2983,8 @@
         try {
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(packet));
-          } else {
-            await fetch('/api/live-chat/messages', {
+          } else if (hasLocalServerBackend()) {
+            await safeBackendFetch('/api/live-chat/messages', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(packet)
@@ -3011,27 +3052,34 @@
             year: 'numeric'
           });
 
-          const response = await fetch('/api/gemini/patient-chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              message: text,
-              history: historySnapshot,
-              context: {
-                todayDayName: todayDayName,
-                todayDateLabel: todayDateLabel,
-                patientName: getResolvedPatientName(),
-                patientPhone: getResolvedPatientPhone()
-              }
-            })
-          });
+          let replyText = '';
+          if (!hasLocalServerBackend()) {
+            replyText =
+              'Terima kasih telah menghubungi **' + pharmacyName + '**.\n\n' +
+              'Untuk konfirmasi jadwal dokter, ketersediaan obat, atau konsultasi langsung bersama petugas kami, silakan hubungi telepon / WhatsApp resmi **' + pharmacyPhone + '**.';
+          } else {
+            const response = await safeBackendFetch('/api/gemini/patient-chat', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                message: text,
+                history: historySnapshot,
+                context: {
+                  todayDayName: todayDayName,
+                  todayDateLabel: todayDateLabel,
+                  patientName: getResolvedPatientName(),
+                  patientPhone: getResolvedPatientPhone()
+                }
+              })
+            });
 
-          const data = await response.json().catch(function () { return {}; });
-          const replyText =
-            response.ok && data && data.reply
-              ? String(data.reply)
-              : (data && data.error) ||
-                'Maaf, layanan jawaban otomatis sedang sibuk. Pertanyaan Anda sudah diteruskan ke Petugas Apotek.';
+            const data = response ? await response.json().catch(function () { return {}; }) : {};
+            replyText =
+              response && response.ok && data && data.reply
+                ? String(data.reply)
+                : (data && data.error) ||
+                  'Maaf, layanan jawaban otomatis sedang sibuk. Pertanyaan Anda sudah diteruskan ke Petugas Apotek.';
+          }
 
           setTypingIndicator(channel, false);
           await dispatchChatPacket(
@@ -3084,8 +3132,8 @@
       function deleteExpiredSessionOnServer(channelSid) {
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'chat:delete_session', sessionId: channelSid }));
-        } else {
-          fetch('/api/live-chat/sessions/' + encodeURIComponent(channelSid), {
+        } else if (hasLocalServerBackend()) {
+          safeBackendFetch('/api/live-chat/sessions/' + encodeURIComponent(channelSid), {
             method: 'DELETE'
           }).catch(function () {});
         }
@@ -3124,8 +3172,9 @@
 
       function fetchSessionState() {
         checkLocalInactivity();
-        fetch('/api/live-chat/sessions/' + encodeURIComponent(baseSessionId))
-          .then(function (r) { return r.ok ? r.json() : null; })
+        if (!hasLocalServerBackend()) return;
+        safeBackendFetch('/api/live-chat/sessions/' + encodeURIComponent(baseSessionId))
+          .then(function (r) { return r && r.ok ? r.json() : null; })
           .then(function (data) {
             if (!data) return;
             if (typeof data.staffOnlineCount === 'number') {
@@ -3160,8 +3209,13 @@
           .catch(function () {});
       }
 
-      fetchSessionState();
-      const pollTimer = setInterval(fetchSessionState, 15000);
+      const backendAvailable = hasLocalServerBackend();
+      if (backendAvailable) {
+        fetchSessionState();
+      } else {
+        updatePresenceUI();
+      }
+      const pollTimer = backendAvailable ? setInterval(fetchSessionState, 15000) : null;
       const inactivityTimer = setInterval(checkLocalInactivity, 15000);
 
       if ('BroadcastChannel' in window) {
@@ -3211,6 +3265,7 @@
       });
 
       function connectPortalWs() {
+        if (!hasLocalServerBackend()) return;
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl =
           protocol +
@@ -3345,10 +3400,12 @@
         }
       }
 
-      connectPortalWs();
+      if (backendAvailable) {
+        connectPortalWs();
+      }
 
       window.addEventListener('beforeunload', function () {
-        clearInterval(pollTimer);
+        if (pollTimer !== null) clearInterval(pollTimer);
         clearInterval(inactivityTimer);
         if (bc) bc.close();
         if (heartbeatTimer) clearInterval(heartbeatTimer);

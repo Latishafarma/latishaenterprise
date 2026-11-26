@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import { DutySchedule, Medicine } from '../types';
 import { MedicineCategorySymbol } from './MedicineCategorySymbol';
+import { hasLocalServerBackend, safeBackendFetch } from '../utils/serverBridgeHelper';
 
 interface LiveChatMessage {
   id: string;
@@ -321,9 +322,10 @@ export const PortalPatientLiveChat: React.FC<PortalPatientLiveChatProps> = ({
 
   // Fetch official pharmacy contact info on mount
   useEffect(() => {
+    if (!hasLocalServerBackend()) return;
     let active = true;
-    fetch('/api/public-chat-context/portal-info')
-      .then((res) => (res.ok ? res.json() : null))
+    safeBackendFetch('/api/public-chat-context/portal-info')
+      .then((res) => (res && res.ok ? res.json() : null))
       .then((data) => {
         if (!active || !data?.pharmacy) return;
         if (data.pharmacy.name) setPharmacyName(String(data.pharmacy.name));
@@ -422,14 +424,19 @@ export const PortalPatientLiveChat: React.FC<PortalPatientLiveChatProps> = ({
   // Live catalog search via server API with local fallback
   useEffect(() => {
     if (!isOpen || activeMode !== 'catalog') return;
+    if (!hasLocalServerBackend()) {
+      setCatalogServerResults(null);
+      setIsLoadingCatalog(false);
+      return;
+    }
     let cancelled = false;
     setIsLoadingCatalog(true);
     const timer = window.setTimeout(async () => {
       try {
-        const res = await fetch(
+        const res = await safeBackendFetch(
           `/api/public-chat-context/medicines?q=${encodeURIComponent(catalogQuery.trim())}`
         );
-        if (!res.ok) throw new Error('Catalog fetch error');
+        if (!res || !res.ok) throw new Error('Catalog fetch error');
         const data = await res.json();
         if (cancelled) return;
         if (Array.isArray(data?.medicines) && (data.medicines.length > 0 || Number(data.total || 0) > 0)) {
@@ -569,12 +576,12 @@ export const PortalPatientLiveChat: React.FC<PortalPatientLiveChatProps> = ({
             sessionId: targetSid
           })
         );
-      } else {
-        fetch(`/api/live-chat/sessions/${encodeURIComponent(targetSid)}/read`, {
+      } else if (hasLocalServerBackend()) {
+        void safeBackendFetch(`/api/live-chat/sessions/${encodeURIComponent(targetSid)}/read`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ reader: 'patient' })
-        }).catch(() => {});
+        });
       }
     },
     [obrolanSessionId, pasienSessionId]
@@ -613,10 +620,10 @@ export const PortalPatientLiveChat: React.FC<PortalPatientLiveChatProps> = ({
         wsRef.current.send(
           JSON.stringify({ type: 'chat:delete_session', sessionId: channelSid })
         );
-      } else {
-        fetch(`/api/live-chat/sessions/${encodeURIComponent(channelSid)}`, {
+      } else if (hasLocalServerBackend()) {
+        void safeBackendFetch(`/api/live-chat/sessions/${encodeURIComponent(channelSid)}`, {
           method: 'DELETE'
-        }).catch(() => {});
+        });
       }
       if (bc) {
         try {
@@ -650,10 +657,13 @@ export const PortalPatientLiveChat: React.FC<PortalPatientLiveChatProps> = ({
     };
 
     const fetchSessionState = async () => {
+      checkLocalInactivity();
+      if (!hasLocalServerBackend()) return;
       try {
-        checkLocalInactivity();
-        const res = await fetch(`/api/live-chat/sessions/${encodeURIComponent(baseSessionId)}`);
-        if (!res.ok) return;
+        const res = await safeBackendFetch(
+          `/api/live-chat/sessions/${encodeURIComponent(baseSessionId)}`
+        );
+        if (!res || !res.ok) return;
         const data = await res.json();
         if (isDisposed) return;
         if (typeof data.staffOnlineCount === 'number') {
@@ -682,8 +692,11 @@ export const PortalPatientLiveChat: React.FC<PortalPatientLiveChatProps> = ({
       } catch {}
     };
 
-    fetchSessionState();
-    const pollTimer = window.setInterval(fetchSessionState, 3500);
+    const backendAvailable = hasLocalServerBackend();
+    if (backendAvailable) {
+      fetchSessionState();
+    }
+    const pollTimer = backendAvailable ? window.setInterval(fetchSessionState, 3500) : null;
     const inactivityTimer = window.setInterval(checkLocalInactivity, 15000);
 
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -719,7 +732,7 @@ export const PortalPatientLiveChat: React.FC<PortalPatientLiveChatProps> = ({
     document.addEventListener('visibilitychange', handleVisibility);
 
     const connectWs = () => {
-      if (isDisposed) return;
+      if (isDisposed || !hasLocalServerBackend()) return;
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/ws/patient-chat?role=patient&sessionId=${encodeURIComponent(
         baseSessionId
@@ -836,11 +849,13 @@ export const PortalPatientLiveChat: React.FC<PortalPatientLiveChatProps> = ({
       }
     };
 
-    connectWs();
+    if (backendAvailable) {
+      connectWs();
+    }
 
     return () => {
       isDisposed = true;
-      clearInterval(pollTimer);
+      if (pollTimer !== null) clearInterval(pollTimer);
       clearInterval(inactivityTimer);
       document.removeEventListener('visibilitychange', handleVisibility);
       if (bc) bc.close();
@@ -857,10 +872,10 @@ export const PortalPatientLiveChat: React.FC<PortalPatientLiveChatProps> = ({
       wsRef.current.send(
         JSON.stringify({ type: 'chat:delete_session', sessionId: obrolanSessionId })
       );
-    } else {
-      fetch(`/api/live-chat/sessions/${encodeURIComponent(obrolanSessionId)}`, {
+    } else if (hasLocalServerBackend()) {
+      void safeBackendFetch(`/api/live-chat/sessions/${encodeURIComponent(obrolanSessionId)}`, {
         method: 'DELETE'
-      }).catch(() => {});
+      });
     }
   };
 
@@ -920,8 +935,8 @@ export const PortalPatientLiveChat: React.FC<PortalPatientLiveChatProps> = ({
       try {
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
           wsRef.current.send(JSON.stringify(fullPacket));
-        } else {
-          await fetch('/api/live-chat/messages', {
+        } else if (hasLocalServerBackend()) {
+          await safeBackendFetch('/api/live-chat/messages', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(fullPacket)
@@ -1044,29 +1059,55 @@ export const PortalPatientLiveChat: React.FC<PortalPatientLiveChatProps> = ({
 
         const matchedMedicines = findLocalRelevantMedicines(cleanPrompt);
 
-        const response = await fetch('/api/gemini/patient-chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message: cleanPrompt,
-            history: historySnapshot,
-            context: {
-              todayDayName,
-              todayDateLabel,
-              patientName: resolvedName,
-              patientPhone: resolvedPhone,
-              ...(schedules.length > 0 ? { schedules } : {}),
-              ...(matchedMedicines && matchedMedicines.length > 0 ? { matchedMedicines } : {})
-            }
-          })
-        });
+        let replyText = '';
+        if (!hasLocalServerBackend()) {
+          const todaySchedules = (schedules || []).filter(
+            (s) => s.day?.toLowerCase() === todayDayName.toLowerCase()
+          );
+          const parts = [
+            `Terima kasih telah menghubungi **${pharmacyName}**.`,
+            todaySchedules.length > 0
+              ? `- Jadwal praktik (${todayDayName}): ${todaySchedules
+                  .slice(0, 4)
+                  .map((s) => `${s.staffName} (${s.startTime}-${s.endTime})`)
+                  .join('; ')}`
+              : '',
+            matchedMedicines && matchedMedicines.length > 0
+              ? `- Info stok obat terkait: ${matchedMedicines
+                  .slice(0, 4)
+                  .map((m) => `${m.name} (Stok: ${m.stock} ${m.unit}, Rp ${Number(m.sellPrice || 0).toLocaleString('id-ID')})`)
+                  .join('; ')}`
+              : '',
+            pharmacyPhone && pharmacyPhone !== '-'
+              ? `Untuk konfirmasi langsung dengan Petugas Apotek, silakan hubungi telepon / WhatsApp resmi **${pharmacyPhone}**.`
+              : ''
+          ].filter(Boolean);
+          replyText = parts.join('\n');
+        } else {
+          const response = await safeBackendFetch('/api/gemini/patient-chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              message: cleanPrompt,
+              history: historySnapshot,
+              context: {
+                todayDayName,
+                todayDateLabel,
+                patientName: resolvedName,
+                patientPhone: resolvedPhone,
+                ...(schedules.length > 0 ? { schedules } : {}),
+                ...(matchedMedicines && matchedMedicines.length > 0 ? { matchedMedicines } : {})
+              }
+            })
+          });
 
-        const data = await response.json().catch(() => ({}));
-        const replyText =
-          response.ok && data?.reply
-            ? String(data.reply)
-            : data?.error ||
-              'Maaf, layanan jawaban otomatis sedang sibuk. Pertanyaan Anda sudah diteruskan ke Petugas Apotek.';
+          const data = response ? await response.json().catch(() => ({})) : {};
+          replyText =
+            response && response.ok && data?.reply
+              ? String(data.reply)
+              : data?.error ||
+                'Maaf, layanan jawaban otomatis sedang sibuk. Pertanyaan Anda sudah diteruskan ke Petugas Apotek.';
+        }
 
         await dispatchMessageToServer(channel, {
           id: `ast-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,

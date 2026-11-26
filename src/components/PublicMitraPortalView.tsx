@@ -44,6 +44,7 @@ import {
   Eye,
   KeyRound
 } from 'lucide-react';
+import { safeBackendFetch } from '../utils/serverBridgeHelper';
 import {
   Medicine,
   Mitra,
@@ -512,8 +513,8 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
           return;
         }
       }
-      const res = await fetch('/api/facility-profile');
-      if (res.ok) {
+      const res = await safeBackendFetch('/api/facility-profile');
+      if (res && res.ok) {
         const data = await res.json();
         const serverBanks = data?.pharmacy?.bankAccounts;
         if (Array.isArray(serverBanks) && serverBanks.length > 0) {
