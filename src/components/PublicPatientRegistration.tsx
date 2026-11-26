@@ -35,6 +35,7 @@ import {
   supabaseRowToOnlineReg
 } from '../utils/supabaseClient';
 import { demoGetItem, demoSetItem, getDemoBroadcastChannelName, isDemoMode } from '../utils/demoSandbox';
+import { buildPortalUrl } from '../utils/portalUrlHelper';
 import { PortalPatientLiveChat } from './PortalPatientLiveChat';
 
 interface PublicPatientRegistrationProps {
@@ -528,8 +529,8 @@ export const PublicPatientRegistration: React.FC<PublicPatientRegistrationProps>
 
   const handleCopyPublicLink = () => {
     const fullUrl = unifiedMode
-      ? `${window.location.origin}/?view=portal-pelanggan&tab=pasien${isDemoMode() ? '&mode=demo' : ''}`
-      : `${window.location.origin}/?view=daftar${isDemoMode() ? '&mode=demo' : ''}`;
+      ? buildPortalUrl({ view: 'portal-pelanggan', tab: 'pasien' })
+      : buildPortalUrl({ view: 'daftar' });
     navigator.clipboard?.writeText(fullUrl).then(() => {
       setCopiedLink(true);
       setTimeout(() => setCopiedLink(false), 3000);

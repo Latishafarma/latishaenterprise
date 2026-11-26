@@ -43,7 +43,7 @@ import {
   SUPABASE_MEDICINES_SQL_SCHEMA
 } from '../utils/supabaseClient';
 import { useIsOwnerAdmin } from '../utils/roleAccess';
-import { isDemoMode } from '../utils/demoSandbox';
+import { buildPortalUrl } from '../utils/portalUrlHelper';
 import { PortalQRGeneratorModal } from './PortalQRGeneratorModal';
 
 export interface ConvertMitraOrderOptions {
@@ -157,9 +157,7 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
   const [showQrModal, setShowQrModal] = useState(false);
 
   const portalUrl = useMemo(() => {
-    if (typeof window === 'undefined') return '/?view=portal-pelanggan';
-    const demoQuery = isDemoMode() ? '&mode=demo' : '';
-    return `${window.location.origin}/?view=portal-pelanggan${demoQuery}`;
+    return buildPortalUrl({ view: 'portal-pelanggan' });
   }, []);
 
   const detailOrder = useMemo(

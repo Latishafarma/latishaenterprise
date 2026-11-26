@@ -83,6 +83,7 @@ import {
 } from '../utils/deletionRegistry';
 import { useIsOwnerAdmin } from '../utils/roleAccess';
 import { useFacilityProfiles, formatPharmacyAddress } from './PharmacySettingsModal';
+import { isPrescriptionInPosQueue } from '../utils/prescriptionQueueHelper';
 
 interface EPrescriptionQueueViewProps {
   prescriptions: EPrescription[];
@@ -91,6 +92,7 @@ interface EPrescriptionQueueViewProps {
   medicines?: Medicine[];
   branchId?: string;
   onApproveToPOS: (rx: EPrescription) => void;
+  onGoToPOSCashier?: () => void;
   onRejectPrescription: (rxId: string, reason: string, extra?: Partial<EPrescription>) => void;
   onSaveExternalPrescription?: (rx: EPrescription) => void;
   onSyncPrescriptionsFromSupabase?: (list: EPrescription[]) => void;
@@ -130,6 +132,7 @@ export const EPrescriptionQueueView: React.FC<EPrescriptionQueueViewProps> = ({
   medicines = [],
   branchId = 'BR-01',
   onApproveToPOS,
+  onGoToPOSCashier,
   onRejectPrescription,
   onSaveExternalPrescription,
   onSyncPrescriptionsFromSupabase,
@@ -314,6 +317,7 @@ export const EPrescriptionQueueView: React.FC<EPrescriptionQueueViewProps> = ({
   const [extInteractionResult, setExtInteractionResult] = useState<InteractionCheckResult | null>(null);
   const [extFormError, setExtFormError] = useState<string | null>(null);
   const [savedExtRxBanner, setSavedExtRxBanner] = useState<EPrescription | null>(null);
+  const [sentToPosBanner, setSentToPosBanner] = useState<EPrescription | null>(null);
   const [previewPrintRx, setPreviewPrintRx] = useState<EPrescription | null>(null);
   const [previewPrintMode, setPreviewPrintMode] = useState<'salinan' | 'etiket'>('salinan');
   const [etiketLabels, setEtiketLabels] = useState<MedicationLabelItem[]>([]);
@@ -625,7 +629,16 @@ export const EPrescriptionQueueView: React.FC<EPrescriptionQueueViewProps> = ({
           originFacility: extOriginFacility.trim(),
           patientAge: extPatientAge.trim(),
           patientAddress: extPatientAddress.trim()
-        }
+        },
+        ...(extActionStatus === 'Diterima (Tidak Ada DRPs)'
+          ? {
+              posQueueMeta: {
+                sentToPos: true,
+                sentToPosAt: nowFormatted,
+                sentToPosBy: apjProfile.name
+              }
+            }
+          : {})
       },
       branchId
     };
@@ -1238,6 +1251,7 @@ export const EPrescriptionQueueView: React.FC<EPrescriptionQueueViewProps> = ({
       screenedBy: apjProfile.name,
       screenedAt: new Date().toLocaleString('id-ID'),
       screeningChecks: {
+        ...(rx.screeningChecks || {}),
         admin: {
           namaDokter: Boolean(sc.admin.namaDokter),
           sip: Boolean(sc.admin.sip),
@@ -1262,9 +1276,20 @@ export const EPrescriptionQueueView: React.FC<EPrescriptionQueueViewProps> = ({
               ? overrides.interaksiOk
               : Boolean(sc.klinis.interaksi),
           duplikasi: Boolean(sc.klinis.duplikasi ?? true)
+        },
+        posQueueMeta: {
+          ...(rx.screeningChecks?.posQueueMeta || {}),
+          sentToPos: true,
+          sentToPosAt: new Date().toLocaleString('id-ID'),
+          sentToPosBy: apjProfile.name
         }
       }
     };
+  };
+
+  const handleSendRxToPosQueue = (enrichedRx: EPrescription) => {
+    onApproveToPOS(enrichedRx);
+    setSentToPosBanner(enrichedRx);
   };
 
   const handleSyncPrescriptionsSupabase = async () => {
@@ -1550,6 +1575,41 @@ export const EPrescriptionQueueView: React.FC<EPrescriptionQueueViewProps> = ({
           </button>
         </div>
       </div>
+
+      {sentToPosBanner && (
+        <div className="p-4 rounded-2xl border border-emerald-300 bg-emerald-50 text-emerald-950 flex flex-wrap items-center justify-between gap-3 text-xs shadow-xs">
+          <div className="flex items-center gap-2.5">
+            <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0" />
+            <div>
+              <strong className="font-black block">
+                Resep #{sentToPosBanner.id} ({sentToPosBanner.patientName}) Disimpan ke Antrian E-Resep POS Kasir!
+              </strong>
+              <span className="text-[11px] text-emerald-800">
+                Belum masuk tabel transaksi POS sampai kasir memprosesnya lewat tombol <strong>Antrian E-Resep</strong> di POS Kasir (otomatis tersinkron ke Supabase).
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {onGoToPOSCashier && (
+              <button
+                type="button"
+                onClick={onGoToPOSCashier}
+                className="px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-[11px] flex items-center gap-1.5 cursor-pointer"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>Buka POS Kasir</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setSentToPosBanner(null)}
+              className="p-1.5 rounded-lg hover:bg-emerald-100 text-emerald-700 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Kartu Identitas Resmi Layanan Farmasi, Kop Apotek & Profil APJ */}
       <div className="bg-gradient-to-r from-indigo-950 via-slate-900 to-indigo-950 text-white p-4 rounded-2xl border border-indigo-800/60 shadow-xs flex flex-wrap justify-between items-center gap-4 text-xs">
@@ -2062,11 +2122,12 @@ export const EPrescriptionQueueView: React.FC<EPrescriptionQueueViewProps> = ({
                         Tolak / Tidak Memenuhi Syarat
                       </button>
                       <button
-                        onClick={() => onApproveToPOS(buildEnrichedPrescription(rx))}
+                        type="button"
+                        onClick={() => handleSendRxToPosQueue(buildEnrichedPrescription(rx))}
                         className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold rounded-xl text-xs uppercase tracking-wider transition shadow-md flex items-center gap-2 cursor-pointer active:scale-95"
                       >
                         <CheckCircle className="w-4 h-4" />
-                        <span>Lolos Skrining & Teruskan ke Kasir POS</span>
+                        <span>Lolos Skrining &amp; Kirim ke Antrian POS</span>
                       </button>
                     </div>
                   </div>
@@ -2279,19 +2340,34 @@ export const EPrescriptionQueueView: React.FC<EPrescriptionQueueViewProps> = ({
                           )}
                         </td>
                         <td className="p-3.5 text-center">
-                          <span
-                            className={`px-3 py-1 rounded-full font-bold text-[10px] inline-block whitespace-nowrap ${
-                              item.status.includes('Lolos') ||
-                              item.status.includes('Selesai') ||
-                              item.status.includes('Diterima')
-                                ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                                : item.status.includes('Ganti')
-                                ? 'bg-amber-100 text-amber-800 border border-amber-200'
-                                : 'bg-rose-100 text-rose-800 border border-rose-200'
-                            }`}
-                          >
-                            {item.status}
-                          </span>
+                          <div className="flex flex-col items-center gap-1">
+                            <span
+                              className={`px-3 py-1 rounded-full font-bold text-[10px] inline-block whitespace-nowrap ${
+                                item.status.includes('Selesai')
+                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                  : item.status === 'Antrian POS' ||
+                                    item.status.includes('Lolos') ||
+                                    item.status.includes('Diterima') ||
+                                    item.status === 'Disiapkan'
+                                  ? 'bg-sky-100 text-sky-800 border border-sky-200'
+                                  : item.status.includes('Ganti')
+                                  ? 'bg-amber-100 text-amber-800 border border-amber-200'
+                                  : 'bg-rose-100 text-rose-800 border border-rose-200'
+                              }`}
+                            >
+                              {item.status}
+                            </span>
+                            {isPrescriptionInPosQueue(item) && (
+                              <span className="text-[9px] font-bold text-sky-700">
+                                Menunggu di Antrian E-Resep POS
+                              </span>
+                            )}
+                            {item.screeningChecks?.posQueueMeta?.processedPosTrxId && (
+                              <span className="text-[9px] font-mono text-emerald-700">
+                                Trx: {item.screeningChecks.posQueueMeta.processedPosTrxId}
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="p-3.5 text-center">
                           <div className="flex items-center justify-center gap-1.5">
@@ -2792,7 +2868,7 @@ export const EPrescriptionQueueView: React.FC<EPrescriptionQueueViewProps> = ({
                         (m) => m.severity === 'contraindicated' || m.severity === 'major'
                       );
                       handleApplyInteractionToScreening();
-                      onApproveToPOS(
+                      handleSendRxToPosQueue(
                         buildEnrichedPrescription(interactionResult.rx, {
                           notes: noteText,
                           interaksiOk: matches.length === 0,
@@ -2804,7 +2880,7 @@ export const EPrescriptionQueueView: React.FC<EPrescriptionQueueViewProps> = ({
                     className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-black rounded-xl text-xs flex items-center gap-1.5 cursor-pointer shadow-md"
                   >
                     <CheckCircle className="w-4 h-4" />
-                    <span>Simpan Hasil & Loloskan ke POS</span>
+                    <span>Simpan Hasil &amp; Kirim ke Antrian POS</span>
                   </button>
                 )}
               </div>

@@ -39,7 +39,7 @@ jobs:
         run: npm run build
 
       - name: Add SPA 404 fallback for GitHub Pages
-        run: cp dist/index.html dist/404.html
+        run: cp dist/index.html dist/404.html && touch dist/.nojekyll
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

@@ -3,6 +3,41 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <script>
+      // Normalize clean subpath portal URLs (e.g. /latishaenterprise/portal-mitra -> /latishaenterprise/?view=portal-mitra)
+      // so GitHub Pages 404.html fallback resolves relative ./assets/* bundles and PWA manifest cleanly.
+      (function() {
+        try {
+          var path = window.location.pathname || '/';
+          var trimmed = path.length > 1 ? path.replace(/\/+$/, '') : path;
+          var routes = {
+            '/portal-pelanggan': 'portal-pelanggan',
+            '/portal-mitra': 'portal-mitra',
+            '/registrasi-pegawai': 'registrasi-pegawai',
+            '/daftar-online': 'daftar',
+            '/pendaftaran': 'daftar'
+          };
+          var matchedSuffix = null;
+          var matchedView = null;
+          for (var suffix in routes) {
+            if (trimmed === suffix || trimmed.endsWith(suffix)) {
+              matchedSuffix = suffix;
+              matchedView = routes[suffix];
+              break;
+            }
+          }
+          if (matchedSuffix && matchedView) {
+            var basePath = trimmed.slice(0, trimmed.length - matchedSuffix.length) || '';
+            if (!basePath.endsWith('/')) basePath += '/';
+            var sp = new URLSearchParams(window.location.search || '');
+            if (!sp.get('view')) sp.set('view', matchedView);
+            var qs = sp.toString();
+            var targetUrl = basePath + (qs ? '?' + qs : '') + (window.location.hash || '');
+            window.location.replace(targetUrl);
+          }
+        } catch (e) {}
+      })();
+    </script>
     <meta name="theme-color" content="#059669" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />

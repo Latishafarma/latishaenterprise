@@ -38,6 +38,7 @@ import {
 import { formatPharmacyAddress, useFacilityProfiles } from './PharmacySettingsModal';
 import { MedicineCategorySymbol } from './MedicineCategorySymbol';
 import { hasLocalServerBackend, safeBackendFetch } from '../utils/serverBridgeHelper';
+import { buildPublicAssetPortalUrl } from '../utils/portalUrlHelper';
 
 interface ChatMessage {
   id: string;
@@ -82,7 +83,8 @@ interface PatientServiceChatWidgetProps {
   onOpenPatientPortal?: () => void;
 }
 
-const PATIENT_REGISTRATION_PORTAL_URL = `${import.meta.env.BASE_URL}pendaftaran-pasien.html`;
+const getPatientRegistrationPortalUrl = () =>
+  buildPublicAssetPortalUrl('pendaftaran-pasien.html', {}, false);
 const LIVE_CHAT_BC_NAME = 'latisha_live_chat_sync_v1';
 const STAFF_QUICK_REPLIES = [
   'Halo, dengan petugas Apotek Latisha Farma. Ada yang bisa kami bantu?',
@@ -1389,7 +1391,7 @@ export const PatientServiceChatWidget: React.FC<PatientServiceChatWidgetProps> =
                             Saat pelanggan atau pasien mengirim pesan melalui Tab Pasien di portal pendaftaran pasien, percakapan hanya muncul di sini secara real-time.
                           </p>
                           <a
-                            href={PATIENT_REGISTRATION_PORTAL_URL}
+                            href={getPatientRegistrationPortalUrl()}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-[11px] font-bold transition"

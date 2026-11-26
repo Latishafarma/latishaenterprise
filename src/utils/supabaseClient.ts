@@ -6827,17 +6827,45 @@ export function prescriptionToSupabaseRow(rx: EPrescription): Record<string, any
     Boolean(rx.patientAddress) ||
     Boolean(baseChecks.externalMeta);
 
-  const enrichedChecks = hasExternalMeta
-    ? {
-        ...baseChecks,
-        externalMeta: {
-          isExternalRx: Boolean(rx.isExternalRx ?? baseChecks.externalMeta?.isExternalRx),
-          originFacility: rx.originFacility ?? baseChecks.externalMeta?.originFacility ?? '',
-          patientAge: rx.patientAge ?? baseChecks.externalMeta?.patientAge ?? '',
-          patientAddress: rx.patientAddress ?? baseChecks.externalMeta?.patientAddress ?? ''
+  const hasPosQueueMeta =
+    Boolean(baseChecks.posQueueMeta) ||
+    rx.status === 'Antrian POS' ||
+    rx.status === 'Lolos Skrining' ||
+    rx.status === 'Selesai di POS';
+
+  const enrichedChecks = {
+    ...baseChecks,
+    ...(hasExternalMeta
+      ? {
+          externalMeta: {
+            isExternalRx: Boolean(rx.isExternalRx ?? baseChecks.externalMeta?.isExternalRx),
+            originFacility: rx.originFacility ?? baseChecks.externalMeta?.originFacility ?? '',
+            patientAge: rx.patientAge ?? baseChecks.externalMeta?.patientAge ?? '',
+            patientAddress: rx.patientAddress ?? baseChecks.externalMeta?.patientAddress ?? ''
+          }
         }
-      }
-    : baseChecks;
+      : {}),
+    ...(hasPosQueueMeta
+      ? {
+          posQueueMeta: {
+            sentToPos: Boolean(
+              baseChecks.posQueueMeta?.sentToPos ??
+                (rx.status === 'Antrian POS' ||
+                  rx.status === 'Lolos Skrining' ||
+                  rx.status === 'Selesai di POS')
+            ),
+            sentToPosAt: baseChecks.posQueueMeta?.sentToPosAt || rx.screenedAt || '',
+            sentToPosBy: baseChecks.posQueueMeta?.sentToPosBy || rx.screenedBy || '',
+            ...(baseChecks.posQueueMeta?.processedPosTrxId
+              ? { processedPosTrxId: baseChecks.posQueueMeta.processedPosTrxId }
+              : {}),
+            ...(baseChecks.posQueueMeta?.processedPosAt
+              ? { processedPosAt: baseChecks.posQueueMeta.processedPosAt }
+              : {})
+          }
+        }
+      : {})
+  };
 
   return {
     id: rx.id,

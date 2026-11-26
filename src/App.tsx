@@ -422,6 +422,7 @@ import {
   saveRolePermissionsLocally,
   saveStaffListLocally
 } from './utils/staffRegistrationHelper';
+import { buildPortalUrl } from './utils/portalUrlHelper';
 
 const stripTitles = (name: string): string => {
   return name
@@ -5953,11 +5954,35 @@ export default function App() {
       })
     );
 
-    // Jika transaksi berasal dari E-Resep Klinik aktif, perbarui status resep ke 'Selesai di POS' dan sinkronkan ke Supabase
-    if (enrichedTrx.type === 'KLINIK' && activePrescriptionForPOS) {
+    // Jika transaksi berasal dari E-Resep aktif (dari Antrian E-Resep POS), perbarui status resep ke 'Selesai di POS' dan sinkronkan ke Supabase
+    if (activePrescriptionForPOS) {
       const completedRx: EPrescription = {
         ...activePrescriptionForPOS,
-        status: 'Selesai di POS'
+        status: 'Selesai di POS',
+        screeningChecks: {
+          ...(activePrescriptionForPOS.screeningChecks || {
+            admin: { namaDokter: true, sip: true, tglResep: true, paraf: true },
+            farmasetik: {
+              bentukSediaan: true,
+              dosis: true,
+              stabilitas: true,
+              kompatibilitas: true
+            },
+            klinis: {
+              tepatDosis: true,
+              tepatWaktu: true,
+              kontraIndikasi: true,
+              interaksi: true,
+              duplikasi: true
+            }
+          }),
+          posQueueMeta: {
+            ...(activePrescriptionForPOS.screeningChecks?.posQueueMeta || {}),
+            sentToPos: true,
+            processedPosTrxId: enrichedTrx.id,
+            processedPosAt: enrichedTrx.date
+          }
+        }
       };
       setPrescriptions((prev) => {
         const next = prev.map((p) => (p.id === completedRx.id ? completedRx : p));
@@ -5972,6 +5997,7 @@ export default function App() {
           })
           .catch((err) => console.warn('Supabase prescription POS completion sync error:', err));
       }
+      setActivePrescriptionForPOS(null);
     }
 
     if (!isDemoActive && !isDemoMode()) {
@@ -6781,14 +6807,40 @@ export default function App() {
     );
   };
 
-  // Handler: Approve Prescription to POS
+  // Handler: Approve Prescription into POS E-Resep Queue (without directly creating POS transaction or auto-redirecting)
   const handleApprovePrescriptionToPOS = (rx: EPrescription) => {
+    const nowFormatted = rx.screenedAt || new Date().toLocaleString('id-ID');
+    const verifier = rx.screenedBy || userName;
     const updatedRx: EPrescription = {
       ...rx,
-      status: 'Lolos Skrining',
+      status: 'Antrian POS',
       screeningNotes: rx.screeningNotes || 'Memenuhi standar administratif, farmasetik & klinis.',
-      screenedBy: rx.screenedBy || userName,
-      screenedAt: rx.screenedAt || new Date().toLocaleString('id-ID')
+      screenedBy: verifier,
+      screenedAt: nowFormatted,
+      screeningChecks: {
+        ...(rx.screeningChecks || {
+          admin: { namaDokter: true, sip: true, tglResep: true, paraf: true },
+          farmasetik: {
+            bentukSediaan: true,
+            dosis: true,
+            stabilitas: true,
+            kompatibilitas: true
+          },
+          klinis: {
+            tepatDosis: true,
+            tepatWaktu: true,
+            kontraIndikasi: true,
+            interaksi: true,
+            duplikasi: true
+          }
+        }),
+        posQueueMeta: {
+          ...(rx.screeningChecks?.posQueueMeta || {}),
+          sentToPos: true,
+          sentToPosAt: nowFormatted,
+          sentToPosBy: verifier
+        }
+      }
     };
     setPrescriptions((prev) => {
       const next = prev.map((p) => (p.id === updatedRx.id ? updatedRx : p));
@@ -6803,9 +6855,15 @@ export default function App() {
         })
         .catch((err) => console.warn('Supabase prescription approve sync error:', err));
     }
-    setActivePrescriptionForPOS(updatedRx);
-    setActiveTab('pos-kasir');
-    addAuditLog('Skrining Resep', `Resep #${rx.id} pasien ${rx.patientName} lolos skrining dan diteruskan ke Kasir POS.`);
+    addAuditLog(
+      'Skrining Resep',
+      `Resep #${rx.id} pasien ${rx.patientName} lolos skrining dan disimpan ke Antrian E-Resep POS Kasir (Supabase tersinkron).`
+    );
+  };
+
+  // Handler: Cashier picks a prescription from Antrian E-Resep inside POS Kasir
+  const handleSelectPrescriptionForPOS = (rx: EPrescription) => {
+    setActivePrescriptionForPOS(rx);
   };
 
   // Handler: Reject Prescription
@@ -12126,7 +12184,7 @@ export default function App() {
                   </button>
                   <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 px-1 pt-0.5">
                     <a
-                      href="./?view=portal-pelanggan"
+                      href={buildPortalUrl({ view: 'portal-pelanggan' }, isDemoActive)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-sky-600 hover:text-sky-800 font-bold hover:underline py-1"
@@ -12134,7 +12192,7 @@ export default function App() {
                       ?view=portal-pelanggan ↗
                     </a>
                     <a
-                      href="./?view=portal-mitra"
+                      href={buildPortalUrl({ view: 'portal-mitra' }, isDemoActive)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-emerald-700 hover:text-emerald-900 font-bold hover:underline py-1"
@@ -12142,7 +12200,7 @@ export default function App() {
                       /portal-mitra ↗
                     </a>
                     <a
-                      href={`./?view=registrasi-pegawai${isDemoActive ? '&mode=demo' : ''}`}
+                      href={getStaffRegistrationShareUrl(isDemoActive)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-violet-700 hover:text-violet-900 font-bold hover:underline py-1 inline-flex items-center gap-0.5"
@@ -13117,6 +13175,9 @@ export default function App() {
                   shiftsNeedsTableSetup={cashierShiftsNeedsTableSetup}
                   isDemoSandbox={isDemoActive}
                   salesDiscounts={salesDiscounts}
+                  prescriptions={prescriptions}
+                  onSelectPrescriptionFromQueue={handleSelectPrescriptionForPOS}
+                  onSyncPrescriptionsSupabase={handleSyncPrescriptionsSupabase}
                 />
               )}
 
@@ -13128,6 +13189,7 @@ export default function App() {
                   medicines={medicines}
                   branchId={currentBranch.id}
                   onApproveToPOS={handleApprovePrescriptionToPOS}
+                  onGoToPOSCashier={() => handleNavigateTab('pos-kasir')}
                   onRejectPrescription={handleRejectPrescription}
                   onSaveExternalPrescription={(newExternalRx) => {
                     setPrescriptions((prev) => {

@@ -663,6 +663,7 @@ export interface EPrescription {
   items: PrescriptionItem[];
   status:
     | 'Pending Skrining'
+    | 'Antrian POS'
     | 'Lolos Skrining'
     | 'Ditolak'
     | 'Disiapkan'
@@ -691,6 +692,13 @@ export interface EPrescription {
       originFacility?: string;
       patientAge?: number | string;
       patientAddress?: string;
+    };
+    posQueueMeta?: {
+      sentToPos?: boolean;
+      sentToPosAt?: string;
+      sentToPosBy?: string;
+      processedPosTrxId?: string;
+      processedPosAt?: string;
     };
   };
   branchId: string;

@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { getSavedPharmacyProfile } from './PharmacySettingsModal';
 import { isDemoMode } from '../utils/demoSandbox';
+import { getAppBaseUrlWithoutTrailingSlash } from '../utils/portalUrlHelper';
 
 export type QRPortalTargetType = 'unified' | 'reguler' | 'mitra' | 'pasien';
 
@@ -72,7 +73,7 @@ export const PortalQRGeneratorModal: React.FC<PortalQRGeneratorModalProps> = ({
 }) => {
   const [targetType, setTargetType] = useState<QRPortalTargetType>(defaultTarget);
   const [baseOrigin, setBaseOrigin] = useState<string>(() =>
-    typeof window !== 'undefined' ? window.location.origin : ''
+    typeof window !== 'undefined' ? getAppBaseUrlWithoutTrailingSlash() : ''
   );
   const [includeDemoParam, setIncludeDemoParam] = useState<boolean>(() => isDemoMode());
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
@@ -98,18 +99,18 @@ export const PortalQRGeneratorModal: React.FC<PortalQRGeneratorModalProps> = ({
     if (isOpen) {
       setTargetType(defaultTarget);
       if (typeof window !== 'undefined' && !baseOrigin) {
-        setBaseOrigin(window.location.origin);
+        setBaseOrigin(getAppBaseUrlWithoutTrailingSlash());
       }
     }
-  }, [isOpen, defaultTarget]);
+  }, [isOpen, defaultTarget, baseOrigin]);
 
   const finalPortalUrl = useMemo(() => {
-    const cleanBase = (baseOrigin || (typeof window !== 'undefined' ? window.location.origin : ''))
+    const cleanBase = (baseOrigin || (typeof window !== 'undefined' ? getAppBaseUrlWithoutTrailingSlash() : ''))
       .trim()
       .replace(/\/+$/, '');
     const meta = TARGET_META[targetType];
     const demoSuffix = includeDemoParam ? '&mode=demo' : '';
-    return `${cleanBase}/${meta.query}${demoSuffix}`;
+    return cleanBase ? `${cleanBase}/${meta.query}${demoSuffix}` : `./${meta.query}${demoSuffix}`;
   }, [baseOrigin, targetType, includeDemoParam]);
 
   useEffect(() => {
@@ -346,23 +347,23 @@ export const PortalQRGeneratorModal: React.FC<PortalQRGeneratorModalProps> = ({
               <div>
                 <div className="flex items-center justify-between gap-2 mb-1">
                   <label className="font-extrabold text-slate-800">
-                    2. Alamat Domain / Origin Aplikasi
+                    2. Alamat Domain / Base URL Aplikasi
                   </label>
                   <button
                     type="button"
                     onClick={() =>
-                      typeof window !== 'undefined' && setBaseOrigin(window.location.origin)
+                      typeof window !== 'undefined' && setBaseOrigin(getAppBaseUrlWithoutTrailingSlash())
                     }
                     className="text-[11px] font-bold text-sky-700 hover:underline inline-flex items-center gap-1 cursor-pointer"
                   >
-                    <RefreshCw className="w-3 h-3" /> Gunakan Origin Aktif
+                    <RefreshCw className="w-3 h-3" /> Gunakan URL Aktif
                   </button>
                 </div>
                 <input
                   type="url"
                   value={baseOrigin}
                   onChange={(e) => setBaseOrigin(e.target.value)}
-                  placeholder="https://domain-apotek-anda.com"
+                  placeholder="https://latishafarma.github.io/latishaenterprise"
                   className="w-full min-h-[40px] px-3 border border-slate-300 rounded-xl font-mono text-xs font-bold bg-slate-50 focus:bg-white outline-none focus:ring-2 focus:ring-emerald-500"
                 />
                 {isLocalOrigin && (

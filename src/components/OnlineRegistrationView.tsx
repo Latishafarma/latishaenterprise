@@ -25,6 +25,7 @@ import {
 import { useIsOwnerAdmin } from '../utils/roleAccess';
 import { Database, RefreshCw, Check, AlertTriangle, Code } from 'lucide-react';
 import { getDemoBroadcastChannelName, isDemoMode } from '../utils/demoSandbox';
+import { buildPortalUrl } from '../utils/portalUrlHelper';
 import { PortalQRGeneratorModal } from './PortalQRGeneratorModal';
 
 interface OnlineRegistrationViewProps {
@@ -111,8 +112,7 @@ export const OnlineRegistrationView: React.FC<OnlineRegistrationViewProps> = ({
   };
 
   const handleCopyPortalLink = () => {
-    const demoQuery = isDemoMode() ? '&mode=demo' : '';
-    const fullUrl = `${window.location.origin}/?view=portal-pelanggan&tab=pasien${demoQuery}`;
+    const fullUrl = buildPortalUrl({ view: 'portal-pelanggan', tab: 'pasien' });
     navigator.clipboard?.writeText(fullUrl).then(() => {
       setCopiedLink(true);
       setTimeout(() => setCopiedLink(false), 3000);
@@ -210,7 +210,7 @@ export const OnlineRegistrationView: React.FC<OnlineRegistrationViewProps> = ({
           </button>
 
           <a
-            href={`/?view=portal-pelanggan&tab=pasien${isDemoMode() ? '&mode=demo' : ''}`}
+            href={buildPortalUrl({ view: 'portal-pelanggan', tab: 'pasien' })}
             target="_blank"
             rel="noreferrer"
             className="px-3 py-2 bg-gradient-to-r from-emerald-600 to-teal-700 hover:from-emerald-700 hover:to-teal-800 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-xs"

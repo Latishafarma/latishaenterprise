@@ -35,7 +35,9 @@ import {
   TicketPercent,
   ChevronDown,
   Camera,
-  ScanBarcode
+  ScanBarcode,
+  ClipboardList,
+  Pill
 } from 'lucide-react';
 import {
   Medicine,
@@ -88,6 +90,7 @@ import {
   resolveAllTariffsWithRules
 } from '../utils/serviceFeeHelper';
 import { isJasaCartItem } from '../utils/transactionPrintHelper';
+import { isPrescriptionInPosQueue } from '../utils/prescriptionQueueHelper';
 
 const normalizeTrxDateToYMD = (dateStr: string): string => {
   if (!dateStr) return '';
@@ -142,6 +145,17 @@ interface POSCashierViewProps {
   shiftsNeedsTableSetup?: boolean;
   isDemoSandbox?: boolean;
   salesDiscounts?: SalesDiscount[];
+  prescriptions?: EPrescription[];
+  onSelectPrescriptionFromQueue?: (rx: EPrescription) => void;
+  onSyncPrescriptionsSupabase?: () => Promise<{
+    success: boolean;
+    count?: number;
+    uploadedCount?: number;
+    deletedFlushedCount?: number;
+    needsTableSetup?: boolean;
+    isDemo?: boolean;
+    error?: string;
+  }>;
 }
 
 export const POSCashierView: React.FC<POSCashierViewProps> = ({
@@ -168,7 +182,10 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
   onSyncShiftsSupabase,
   shiftsNeedsTableSetup = false,
   isDemoSandbox = false,
-  salesDiscounts = []
+  salesDiscounts = [],
+  prescriptions = [],
+  onSelectPrescriptionFromQueue,
+  onSyncPrescriptionsSupabase
 }) => {
   const { pharmacyProfile } = useFacilityProfiles();
   const [posJalur, setPosJalur] = useState<'REGULER' | 'KLINIK' | 'MITRA'>('REGULER');
@@ -789,6 +806,76 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
 
   const [checkoutValidationError, setCheckoutValidationError] = useState<string | null>(null);
 
+  // State Modal Antrian E-Resep di POS Kasir (Terintegrasi 2-arah dengan Supabase)
+  const [showPrescriptionQueueModal, setShowPrescriptionQueueModal] = useState(false);
+  const [rxQueueSearch, setRxQueueSearch] = useState('');
+  const [isSyncingRxQueue, setIsSyncingRxQueue] = useState(false);
+  const [rxQueueSyncNotice, setRxQueueSyncNotice] = useState<string | null>(null);
+  const [pendingConfirmLoadRx, setPendingConfirmLoadRx] = useState<EPrescription | null>(null);
+
+  const posPrescriptionQueue = useMemo(
+    () => prescriptions.filter((rx) => isPrescriptionInPosQueue(rx)),
+    [prescriptions]
+  );
+
+  const filteredPosPrescriptionQueue = useMemo(() => {
+    const q = rxQueueSearch.trim().toLowerCase();
+    if (!q) return posPrescriptionQueue;
+    return posPrescriptionQueue.filter(
+      (rx) =>
+        rx.id.toLowerCase().includes(q) ||
+        rx.patientName.toLowerCase().includes(q) ||
+        (rx.rmId || '').toLowerCase().includes(q) ||
+        (rx.doctorName || '').toLowerCase().includes(q) ||
+        (rx.originFacility || '').toLowerCase().includes(q) ||
+        rx.items.some((it) => it.name.toLowerCase().includes(q))
+    );
+  }, [posPrescriptionQueue, rxQueueSearch]);
+
+  const handleSyncRxQueueFromSupabase = async (silent = false) => {
+    if (!onSyncPrescriptionsSupabase) return;
+    if (isDemoSandbox || isDemoMode()) {
+      if (!silent) {
+        setRxQueueSyncNotice('Mode Demo aktif: antrian E-Resep menggunakan data sandbox lokal.');
+      }
+      return;
+    }
+    setIsSyncingRxQueue(true);
+    try {
+      const res = await onSyncPrescriptionsSupabase();
+      if (!silent) {
+        if (res.needsTableSetup) {
+          setRxQueueSyncNotice('Tabel riwayat_skrining_resep belum siap di Supabase.');
+        } else if (!res.success) {
+          setRxQueueSyncNotice(`Gagal sinkronisasi Supabase: ${res.error || 'Koneksi terganggu'}`);
+        } else {
+          setRxQueueSyncNotice(
+            `Tersinkron dengan Supabase (${posPrescriptionQueue.length} resep siap diproses di POS).`
+          );
+        }
+      }
+    } finally {
+      setIsSyncingRxQueue(false);
+    }
+  };
+
+  const handleOpenPrescriptionQueueModal = () => {
+    setPendingConfirmLoadRx(null);
+    setRxQueueSyncNotice(null);
+    setShowPrescriptionQueueModal(true);
+    void handleSyncRxQueueFromSupabase(true);
+  };
+
+  const handlePickRxFromQueue = (rx: EPrescription, forceReplace = false) => {
+    if (!forceReplace && cart.length > 0 && activePrescription?.id !== rx.id) {
+      setPendingConfirmLoadRx(rx);
+      return;
+    }
+    setPendingConfirmLoadRx(null);
+    setShowPrescriptionQueueModal(false);
+    onSelectPrescriptionFromQueue?.(rx);
+  };
+
   const missingRequiredStaffServices = useMemo(() => {
     return cart.filter((item) => {
       if (!isJasaCartItem(item)) return false;
@@ -1136,16 +1223,17 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
     setShowServiceDropdown(false);
   };
 
-  // Load Incoming E-Prescription from Doctor's SOAP
+  // Load Incoming E-Prescription from POS Antrian E-Resep / Doctor's SOAP
   useEffect(() => {
     if (activePrescription) {
-      setPosJalur('KLINIK');
+      setPosJalur(activePrescription.isExternalRx ? 'REGULER' : 'KLINIK');
       setCustomer(activePrescription.patientName || 'Pasien Klinik');
       setDoctor(activePrescription.doctorName || 'dr. Anis Prima Dewi');
+      setDescription(`E-Resep #${activePrescription.id}`);
 
       if (activePrescription.assignedStaff && activePrescription.assignedStaff.length > 0) {
         setAssignedStaff(activePrescription.assignedStaff);
-      } else {
+      } else if (!activePrescription.isExternalRx) {
         const foundDoc = staffList.find(
           (s) => s.role === 'Dokter' || s.name.toLowerCase().includes('dr.')
         );
@@ -1157,25 +1245,31 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
             fee: currentFees.doctorFee || 20000
           }
         ]);
+      } else {
+        setAssignedStaff([]);
       }
 
-      const loadedCart: CartItem[] = activePrescription.items.flatMap((it) => {
+      const loadedCart: CartItem[] = activePrescription.items.flatMap((it, itemIdx) => {
         if (it.isRacikan && it.racikanIngredients && it.racikanIngredients.length > 0) {
           const racikanTitle = it.racikanName || it.racikanType || 'Racikan';
           return it.racikanIngredients.map((ing, ingIdx) => {
-            const med =
-              medicines.find(
-                (m) =>
-                  m.id === ing.medicineId ||
-                  m.name.toLowerCase().trim() === ing.name.toLowerCase().trim()
-              ) || medicines[0];
-            const targetUnit = ing.unit || med.satuanKecil || med.unit || 'Tablet';
-            const p = ing.price > 0 ? ing.price : resolvePrice(med, 'Harga Jual 2', targetUnit);
+            const med = medicines.find(
+              (m) =>
+                m.id === ing.medicineId ||
+                m.name.toLowerCase().trim() === ing.name.toLowerCase().trim()
+            );
+            const targetUnit = ing.unit || med?.satuanKecil || med?.unit || 'Tablet';
+            const p =
+              ing.price > 0
+                ? ing.price
+                : med
+                ? resolvePrice(med, 'Harga Jual 2', targetUnit)
+                : 0;
             const itemQty = Math.max(1, Number(ing.totalQty) || 1);
             const tuslahFee = ingIdx === 0 ? 2000 : 0;
 
             return {
-              id: med.id,
+              id: med?.id || ing.medicineId || `EXT-RACIK-${itemIdx}-${ingIdx}`,
               name: `${ing.name} [Racikan: ${racikanTitle}]`,
               qty: itemQty,
               unit: targetUnit,
@@ -1183,30 +1277,36 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
               price: p,
               discount: 0,
               subtotal: p * itemQty + tuslahFee,
-              hpp: ing.hpp ?? med.hpp ?? 2500
+              hpp: ing.hpp ?? med?.hpp ?? 0
             };
           });
         }
 
-        const med =
-          medicines.find(
-            (m) => m.name.toLowerCase().includes(it.name.toLowerCase()) || m.id === it.medicineId
-          ) || medicines[0];
+        const med = medicines.find(
+          (m) =>
+            m.id === it.medicineId ||
+            m.name.toLowerCase().trim() === it.name.toLowerCase().trim() ||
+            m.name.toLowerCase().includes(it.name.toLowerCase().trim())
+        );
 
-        const targetUnit = it.unit || med.satuanKecil || med.unit || 'Strip';
-        const p = resolvePrice(med, 'Harga Jual 2', targetUnit);
+        const targetUnit = it.unit || med?.satuanKecil || med?.unit || 'Strip';
+        const priceTier = activePrescription.isExternalRx ? 'Harga Jual 1' : 'Harga Jual 2';
+        const p = med
+          ? resolvePrice(med, priceTier, targetUnit)
+          : Number(it.price) || 0;
+        const itemQty = Math.max(1, Number(it.qty) || 1);
 
         return [
           {
-            id: med.id,
+            id: med?.id || it.medicineId || `EXT-MED-${itemIdx + 1}`,
             name: it.name,
-            qty: it.qty || 1,
+            qty: itemQty,
             unit: targetUnit,
             tuslah: 1000, // standard tuslah per prescription item
             price: p,
             discount: 0,
-            subtotal: p * (it.qty || 1) + 1000,
-            hpp: med.hpp || 2500
+            subtotal: p * itemQty + 1000,
+            hpp: med?.hpp || 0
           }
         ];
       });
@@ -1554,9 +1654,14 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
     const nowClock = new Date().toLocaleTimeString('id-ID');
     const newMutations: StockMutation[] = [];
 
-    // 1. Mutasi stok item penjualan obat/alkes reguler & resep
+    // 1. Mutasi stok item penjualan obat/alkes reguler & resep (hanya untuk item yang terdaftar di katalog inventori)
     cart
-      .filter((c) => !c.id.startsWith('JASA-') && !c.id.startsWith('LAB-FEE-'))
+      .filter(
+        (c) =>
+          !c.id.startsWith('JASA-') &&
+          !c.id.startsWith('LAB-FEE-') &&
+          medicines.some((m) => m.id === c.id)
+      )
       .forEach((c) => {
         newMutations.push({
           id: `MUT-${Date.now()}-${Math.random().toString().slice(2, 6)}`,
@@ -1955,10 +2060,85 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
             </button>
           </div>
 
-          <div className="text-[11px] font-bold text-sky-800 bg-sky-50 px-3 py-1 rounded-xl border border-sky-200">
-            Skema Aktif: <strong>{choosePrice}</strong>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleOpenPrescriptionQueueModal}
+              className={`px-3.5 py-1.5 rounded-xl font-extrabold text-xs flex items-center gap-2 cursor-pointer transition shadow-xs border ${
+                posPrescriptionQueue.length > 0
+                  ? 'bg-amber-500 hover:bg-amber-600 text-slate-950 border-amber-600 ring-2 ring-amber-300/70'
+                  : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'
+              }`}
+              title="Buka daftar Antrian E-Resep yang sudah lolos skrining & dikirim ke POS Kasir"
+            >
+              <ClipboardList className="w-4 h-4 shrink-0" />
+              <span>Antrian E-Resep</span>
+              <span
+                className={`px-1.5 py-0.2 rounded-full text-[10px] font-black font-mono ${
+                  posPrescriptionQueue.length > 0
+                    ? 'bg-slate-900 text-amber-300'
+                    : 'bg-slate-200 text-slate-700'
+                }`}
+              >
+                {posPrescriptionQueue.length}
+              </span>
+            </button>
+
+            <div className="text-[11px] font-bold text-sky-800 bg-sky-50 px-3 py-1 rounded-xl border border-sky-200">
+              Skema Aktif: <strong>{choosePrice}</strong>
+            </div>
           </div>
         </div>
+
+        {/* Active Loaded E-Resep Banner */}
+        {activePrescription && (
+          <div className="p-2.5 bg-gradient-to-r from-emerald-50 via-teal-50/70 to-sky-50 border border-emerald-300 rounded-xl flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2.5">
+              <span className="w-7 h-7 rounded-lg bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                <FileCheck className="w-4 h-4" />
+              </span>
+              <div>
+                <div className="font-black text-emerald-950 flex flex-wrap items-center gap-1.5">
+                  <span>Memproses E-Resep #{activePrescription.id}</span>
+                  {activePrescription.isExternalRx && (
+                    <span className="px-1.5 py-0.2 rounded bg-indigo-100 text-indigo-800 border border-indigo-200 text-[9px] uppercase">
+                      Rx Luar
+                    </span>
+                  )}
+                </div>
+                <span className="text-[11px] text-emerald-800">
+                  Pasien: <strong>{activePrescription.patientName}</strong> · Dokter:{' '}
+                  <strong>{activePrescription.doctorName}</strong> ({activePrescription.items.length} item R/)
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleOpenPrescriptionQueueModal}
+                className="px-2.5 py-1 rounded-lg bg-white hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold text-[11px] cursor-pointer transition"
+              >
+                Ganti E-Resep
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onClearActivePrescription();
+                  setCart([]);
+                  setCustomer('');
+                  setDoctor('Internal');
+                  setAssignedStaff([]);
+                  setDescription('');
+                }}
+                className="px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-[11px] flex items-center gap-1 cursor-pointer transition"
+                title="Batalkan pemuatan E-Resep ini dan kembalikan ke antrian"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>Batal / Kembalikan</span>
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Customer & Doctor Input */}
         <div className="flex flex-wrap items-center justify-between gap-4">
@@ -4029,6 +4209,227 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
                 type="button"
                 onClick={() => setShowShiftSchemaModal(false)}
                 className="px-4 py-2 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold text-xs cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL ANTRIAN E-RESEP DI POS KASIR (Terintegrasi 2-Arah Supabase) */}
+      {showPrescriptionQueueModal && (
+        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl w-full max-w-3xl shadow-2xl overflow-hidden border border-slate-200 flex flex-col max-h-[88vh]">
+            <div className="px-6 py-4 bg-slate-900 text-white flex flex-wrap justify-between items-center gap-3 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-400/40 flex items-center justify-center">
+                  <ClipboardList className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-black text-sm uppercase tracking-wide">
+                      Antrian E-Resep POS Kasir
+                    </h3>
+                    <span className="px-2 py-0.5 rounded-full bg-amber-400 text-slate-950 text-[10px] font-black font-mono">
+                      {posPrescriptionQueue.length} Antrian
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-300">
+                    Daftar resep yang sudah lolos skrining apoteker &amp; siap diproses menjadi transaksi POS (terintegrasi Supabase).
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {onSyncPrescriptionsSupabase && (
+                  <button
+                    type="button"
+                    disabled={isSyncingRxQueue}
+                    onClick={() => handleSyncRxQueueFromSupabase(false)}
+                    className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold text-[11px] flex items-center gap-1.5 cursor-pointer transition"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isSyncingRxQueue ? 'animate-spin' : ''}`} />
+                    <span>{isSyncingRxQueue ? 'Menyinkronkan...' : 'Sinkronkan Supabase'}</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPrescriptionQueueModal(false);
+                    setPendingConfirmLoadRx(null);
+                  }}
+                  className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-4 border-b border-slate-200 bg-slate-50 space-y-2.5 shrink-0">
+              <div className="relative">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={rxQueueSearch}
+                  onChange={(e) => setRxQueueSearch(e.target.value)}
+                  placeholder="Cari No. Resep, Nama Pasien, No. RM, Dokter, atau Nama Obat..."
+                  className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-300 bg-white text-xs font-medium outline-none focus:ring-2 focus:ring-amber-500"
+                />
+              </div>
+              {rxQueueSyncNotice && (
+                <div className="px-3 py-2 rounded-xl bg-sky-50 border border-sky-200 text-sky-900 text-[11px] font-semibold flex items-center justify-between gap-2">
+                  <span>{rxQueueSyncNotice}</span>
+                  <button
+                    type="button"
+                    onClick={() => setRxQueueSyncNotice(null)}
+                    className="text-sky-600 hover:text-sky-900 cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+              {pendingConfirmLoadRx && (
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span>
+                    Keranjang POS saat ini berisi <strong>{cart.length} item</strong>. Ganti isi keranjang dengan E-Resep{' '}
+                    <strong className="font-mono">#{pendingConfirmLoadRx.id}</strong> ({pendingConfirmLoadRx.patientName})?
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPendingConfirmLoadRx(null)}
+                      className="px-3 py-1 rounded-lg bg-white border border-amber-300 text-amber-900 font-bold text-[11px] cursor-pointer"
+                    >
+                      Batal
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handlePickRxFromQueue(pendingConfirmLoadRx, true)}
+                      className="px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-black text-[11px] cursor-pointer"
+                    >
+                      Ya, Muat E-Resep Ini
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 overflow-y-auto flex-1 space-y-3 bg-slate-100/70">
+              {filteredPosPrescriptionQueue.length === 0 ? (
+                <div className="p-10 text-center bg-white rounded-2xl border border-slate-200 text-slate-400 space-y-2">
+                  <ClipboardList className="w-9 h-9 mx-auto text-slate-300" />
+                  <p className="font-bold text-slate-600 text-xs">
+                    {posPrescriptionQueue.length === 0
+                      ? 'Belum ada resep di Antrian E-Resep POS saat ini.'
+                      : 'Resep tidak ditemukan dengan kata kunci tersebut.'}
+                  </p>
+                  <p className="text-[11px]">
+                    Resep yang telah lolos skrining di submenu Antrean E-Resep &amp; Skrining akan otomatis muncul di sini.
+                  </p>
+                </div>
+              ) : (
+                filteredPosPrescriptionQueue.map((rx) => {
+                  const isCurrentlyActive = activePrescription?.id === rx.id;
+                  return (
+                    <div
+                      key={rx.id}
+                      className={`p-4 rounded-2xl border bg-white shadow-2xs space-y-2.5 transition ${
+                        isCurrentlyActive
+                          ? 'border-emerald-400 ring-2 ring-emerald-200'
+                          : 'border-slate-200 hover:border-amber-300'
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="space-y-0.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-mono font-black text-sky-800 text-xs">{rx.id}</span>
+                            <span className="px-2 py-0.5 rounded-full bg-sky-100 text-sky-800 border border-sky-200 text-[10px] font-bold">
+                              {rx.status}
+                            </span>
+                            {rx.isExternalRx && (
+                              <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 border border-indigo-200 text-[10px] font-bold">
+                                Rx Luar
+                              </span>
+                            )}
+                            {isCurrentlyActive && (
+                              <span className="px-2 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-black">
+                                Sedang Aktif di Kasir
+                              </span>
+                            )}
+                          </div>
+                          <div className="font-black text-slate-900 text-sm">
+                            {rx.patientName}{' '}
+                            <span className="text-[11px] font-mono font-semibold text-slate-500">
+                              (RM: {rx.rmId})
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-600">
+                            Dokter: <strong>{rx.doctorName}</strong>
+                            {rx.screenedBy ? ` · Skrining: ${rx.screenedBy}` : ''}
+                            {rx.timestamp ? ` · ${rx.timestamp}` : ''}
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handlePickRxFromQueue(rx)}
+                          className={`px-4 py-2 rounded-xl font-black text-xs flex items-center gap-1.5 cursor-pointer transition shrink-0 ${
+                            isCurrentlyActive
+                              ? 'bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200'
+                              : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm'
+                          }`}
+                        >
+                          <CheckCircle className="w-3.5 h-3.5" />
+                          <span>{isCurrentlyActive ? 'Muat Ulang ke Kasir' : 'Proses di Kasir POS'}</span>
+                        </button>
+                      </div>
+
+                      <div className="bg-slate-50 rounded-xl p-2.5 border border-slate-200 space-y-1">
+                        <div className="text-[10px] font-bold uppercase text-slate-500 flex items-center gap-1">
+                          <Pill className="w-3 h-3 text-sky-600" />
+                          <span>Daftar Obat Resep ({rx.items.length} item):</span>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px]">
+                          {rx.items.map((it, idx) => (
+                            <div
+                              key={`${rx.id}-it-${idx}`}
+                              className="px-2.5 py-1.5 bg-white rounded-lg border border-slate-200 flex items-center justify-between gap-2"
+                            >
+                              <div className="min-w-0">
+                                <div className="font-bold text-slate-800 truncate">{it.name}</div>
+                                {it.dosage && (
+                                  <div className="text-[10px] text-slate-500 italic truncate">
+                                    ∫ {it.dosage}
+                                  </div>
+                                )}
+                              </div>
+                              <span className="font-mono font-bold text-sky-800 shrink-0">
+                                {it.qty} {it.unit}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {rx.screeningNotes && (
+                        <div className="text-[11px] text-slate-600 italic line-clamp-2">
+                          Catatan Skrining: {rx.screeningNotes}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="px-6 py-3.5 bg-slate-100 border-t border-slate-200 flex justify-end shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPrescriptionQueueModal(false);
+                  setPendingConfirmLoadRx(null);
+                }}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs cursor-pointer"
               >
                 Tutup
               </button>

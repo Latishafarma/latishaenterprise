@@ -2832,7 +2832,7 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
                           <span>{copiedStaffRegLink ? 'Link Disalin!' : 'Salin Link Registrasi'}</span>
                         </button>
                         <a
-                          href={`./?view=registrasi-pegawai${isDemoMode() ? '&mode=demo' : ''}`}
+                          href={getStaffRegistrationShareUrl(isDemoMode())}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="px-2.5 py-1 rounded-lg bg-violet-700 hover:bg-violet-800 text-white text-[10px] font-bold inline-flex items-center gap-1 transition"

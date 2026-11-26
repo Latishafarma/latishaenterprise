@@ -15,6 +15,7 @@ import {
   demoSetItem,
   getDemoBroadcastChannelName
 } from './demoSandbox';
+import { buildPortalUrl } from './portalUrlHelper';
 
 export const RBAC_BROADCAST_CHANNEL_BASE = 'latisha_rbac_sync';
 export const ROLE_PERMISSIONS_UPDATED_EVENT = 'latisha_role_permissions_updated';
@@ -239,15 +240,9 @@ export function resolveRoleDefaultPermissions(
  * (mis. /latishaenterprise/ pada GitHub Pages atau / pada localhost/Cloud Run).
  */
 export function getStaffRegistrationShareUrl(includeDemoParam = false): string {
-  if (typeof window === 'undefined') {
-    return `./?view=registrasi-pegawai${includeDemoParam ? '&mode=demo' : ''}`;
-  }
-  const url = new URL(window.location.href);
-  url.search = '';
-  url.hash = '';
-  url.searchParams.set('view', 'registrasi-pegawai');
+  const params: Record<string, string> = { view: 'registrasi-pegawai' };
   if (includeDemoParam) {
-    url.searchParams.set('mode', 'demo');
+    params.mode = 'demo';
   }
-  return url.toString();
+  return buildPortalUrl(params, includeDemoParam);
 }
