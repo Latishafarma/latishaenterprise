@@ -33,7 +33,9 @@ import {
   Copy,
   AlertCircle,
   TicketPercent,
-  ChevronDown
+  ChevronDown,
+  Camera,
+  ScanBarcode
 } from 'lucide-react';
 import {
   Medicine,
@@ -63,12 +65,14 @@ import { openPrintWindow } from '../utils/printHelper';
 import { findBestCartDiscount } from '../utils/discountHelper';
 import { RupiahInput } from './RupiahInput';
 import { useFacilityProfiles, formatPharmacyAddress } from './PharmacySettingsModal';
+import { CameraBarcodeScannerModal, playBarcodeBeep } from './CameraBarcodeScannerModal';
 import {
   SUPABASE_CASHIER_SHIFT_SQL_SCHEMA,
   DEFAULT_CASHIER_SHIFT_TABLE,
   getSupabaseConfig,
   setSupabaseConfig,
   fetchPatientsPaginatedFromSupabase,
+  fetchMedicineByBarcodeOrIdFromSupabase,
   deduplicatePatients
 } from '../utils/supabaseClient';
 import { isDemoMode } from '../utils/demoSandbox';
@@ -581,6 +585,12 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
   const [selectedMed, setSelectedMed] = useState<Medicine | null>(null);
   const [showMedDropdown, setShowMedDropdown] = useState(false);
   const medDropdownRef = useRef<HTMLDivElement>(null);
+  const [showPosBarcodeScanner, setShowPosBarcodeScanner] = useState(false);
+  const [posScanNotice, setPosScanNotice] = useState<{
+    type: 'success' | 'warning';
+    text: string;
+  } | null>(null);
+  const [extraScannedPosMeds, setExtraScannedPosMeds] = useState<Medicine[]>([]);
 
   const [staffSearchQuery, setStaffSearchQuery] = useState('');
   const staffDropdownRef = useRef<HTMLDivElement>(null);
@@ -1212,6 +1222,104 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
     setUnit(defUnit);
     setPrice(resolvePrice(med, choosePrice, defUnit));
     setShowMedDropdown(false);
+  };
+
+  const posMedPool = useMemo(() => {
+    if (extraScannedPosMeds.length === 0) return medicines;
+    const seen = new Set(medicines.map((m) => m.id));
+    return [...medicines, ...extraScannedPosMeds.filter((em) => !seen.has(em.id))];
+  }, [medicines, extraScannedPosMeds]);
+
+  const processPosBarcodeScan = async (rawCode: string, fromCamera = false) => {
+    const cleaned = rawCode.trim();
+    if (!cleaned) return;
+    const lower = cleaned.toLowerCase();
+
+    let exactFound = posMedPool.find(
+      (m) =>
+        (m.barcode && m.barcode.trim().toLowerCase() === lower) ||
+        m.id.trim().toLowerCase() === lower
+    );
+
+    if (!exactFound && !isDemoMode()) {
+      try {
+        const res = await fetchMedicineByBarcodeOrIdFromSupabase(cleaned);
+        if (res.data) {
+          exactFound = res.data;
+          setExtraScannedPosMeds((prev) =>
+            prev.some((x) => x.id === exactFound!.id) ? prev : [exactFound!, ...prev]
+          );
+        }
+      } catch {
+        // Ignore network error and fall back to text match
+      }
+    }
+
+    if (exactFound) {
+      playBarcodeBeep();
+      const targetUnit = exactFound.satuanKecil || exactFound.unit || 'Strip';
+      const resolvedUnitPrice = resolvePrice(exactFound, choosePrice, targetUnit);
+
+      setCart((prevCart) => {
+        const existingIdx = prevCart.findIndex(
+          (item) => item.id === exactFound!.id && item.unit === targetUnit && !item.id.startsWith('JASA-')
+        );
+        if (existingIdx >= 0) {
+          return prevCart.map((item, idx) => {
+            if (idx !== existingIdx) return item;
+            const nextQty = item.qty + 1;
+            return {
+              ...item,
+              qty: nextQty,
+              subtotal: Math.max(0, item.price * nextQty + item.tuslah - item.discount)
+            };
+          });
+        }
+        const newItem: CartItem = {
+          id: exactFound!.id,
+          name: exactFound!.name,
+          qty: 1,
+          unit: targetUnit,
+          tuslah: 0,
+          price: resolvedUnitPrice,
+          discount: 0,
+          subtotal: resolvedUnitPrice,
+          hpp: exactFound!.hpp || 2000
+        };
+        return [...prevCart, newItem];
+      });
+
+      setPluInput('');
+      setSelectedMed(null);
+      setShowMedDropdown(false);
+      setPosScanNotice({
+        type: 'success',
+        text: `Ditambahkan: ${exactFound.name} (+1 ${targetUnit})`
+      });
+      setTimeout(() => setPosScanNotice(null), 3200);
+      return;
+    }
+
+    if (!fromCamera) {
+      const textMatches = posMedPool.filter(
+        (m) =>
+          m.name.toLowerCase().includes(lower) ||
+          (m.kekuatan || '').toLowerCase().includes(lower) ||
+          (m.barcode || '').toLowerCase().includes(lower) ||
+          m.id.toLowerCase().includes(lower)
+      );
+      if (textMatches.length === 1) {
+        playBarcodeBeep();
+        handleMedSelect(textMatches[0]);
+        return;
+      }
+    }
+
+    setPosScanNotice({
+      type: 'warning',
+      text: `Obat dengan barcode / kode "${cleaned}" tidak ditemukan.`
+    });
+    setTimeout(() => setPosScanNotice(null), 3500);
   };
 
   const handleUnitChange = (newUnit: string) => {
@@ -2260,36 +2368,64 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
 
       {/* Item Input Row */}
       <div className="p-3 border-b border-slate-200 bg-slate-100 grid grid-cols-12 gap-2 items-end text-[11px]">
-        {/* PLU / Medicine search */}
+        {/* PLU / Medicine search & Barcode Scanner */}
         <div className="col-span-4 relative" ref={medDropdownRef}>
-          <label className="block font-bold text-slate-600 text-[10px] mb-0.5">
-            Pencarian Obat (PLU / Barcode)
-          </label>
-          <input
-            type="text"
-            placeholder="Ketik nama atau barcode..."
-            value={pluInput}
-            onChange={(e) => {
-              setPluInput(e.target.value);
-              setShowMedDropdown(true);
-            }}
-            onFocus={() => setShowMedDropdown(true)}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape') {
-                setShowMedDropdown(false);
-              }
-            }}
-            className="w-full p-2 border rounded-xl bg-white font-bold text-slate-800 outline-none"
-          />
+          <div className="flex items-center justify-between gap-2 mb-0.5">
+            <label className="block font-bold text-slate-600 text-[10px]">
+              Pencarian Obat (PLU / Barcode)
+            </label>
+            {posScanNotice && (
+              <span
+                className={`text-[10px] font-bold truncate ${
+                  posScanNotice.type === 'success' ? 'text-emerald-700' : 'text-rose-600'
+                }`}
+              >
+                {posScanNotice.text}
+              </span>
+            )}
+          </div>
+          <div className="flex gap-1.5 items-center">
+            <div className="relative flex-1 min-w-0">
+              <ScanBarcode className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5 pointer-events-none" />
+              <input
+                type="text"
+                placeholder="Ketik nama atau scan barcode + Enter..."
+                value={pluInput}
+                onChange={(e) => {
+                  setPluInput(e.target.value);
+                  setShowMedDropdown(true);
+                }}
+                onFocus={() => setShowMedDropdown(true)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    setShowMedDropdown(false);
+                  } else if (e.key === 'Enter' && pluInput.trim()) {
+                    e.preventDefault();
+                    processPosBarcodeScan(pluInput, false);
+                  }
+                }}
+                className="w-full pl-8 pr-2 py-2 border rounded-xl bg-white font-bold text-slate-800 outline-none focus:ring-2 focus:ring-sky-500"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowPosBarcodeScanner(true)}
+              title="Scan Barcode Menggunakan Kamera"
+              className="px-2.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold flex items-center gap-1 shrink-0 cursor-pointer transition"
+            >
+              <Camera className="w-3.5 h-3.5" />
+              <span className="hidden xl:inline text-[10px]">Scan</span>
+            </button>
+          </div>
 
           {showMedDropdown && (
             <div className="absolute z-30 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-48 overflow-y-auto divide-y">
-              {medicines
+              {posMedPool
                 .filter(
                   (m) =>
                     m.name.toLowerCase().includes(pluInput.toLowerCase()) ||
                     (m.kekuatan || '').toLowerCase().includes(pluInput.toLowerCase()) ||
-                    (m.barcode || '').includes(pluInput) ||
+                    (m.barcode || '').toLowerCase().includes(pluInput.toLowerCase()) ||
                     m.id.toLowerCase().includes(pluInput.toLowerCase())
                 )
                 .map((m, idx) => (
@@ -2309,6 +2445,7 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
                       </strong>
                       <span className="text-[10px] text-slate-500">
                         Stok: {m.stock} {m.unit} · {m.rack}
+                        {m.barcode ? ` · ${m.barcode}` : ''}
                       </span>
                     </div>
                     <span className="font-mono font-bold text-sky-700">
@@ -3899,6 +4036,18 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
           </div>
         </div>
       )}
+
+      <CameraBarcodeScannerModal
+        isOpen={showPosBarcodeScanner}
+        onClose={() => setShowPosBarcodeScanner(false)}
+        title="Scan Barcode Kasir POS"
+        subtitle="Arahkan kamera ke barcode obat untuk langsung memasukkan item ke keranjang belanja kasir."
+        scanMode="barcode"
+        allowContinuous={true}
+        onScanSuccess={(code) => {
+          processPosBarcodeScan(code, true);
+        }}
+      />
     </div>
   );
 };

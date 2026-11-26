@@ -17,7 +17,8 @@ import {
   Check,
   Filter,
   ChevronDown,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Camera
 } from 'lucide-react';
 import {
   Medicine,
@@ -30,6 +31,7 @@ import {
 import { useFacilityProfiles, formatPharmacyAddress } from './PharmacySettingsModal';
 import { openPrintWindow } from '../utils/printHelper';
 import { PaginationControls } from './PaginationControls';
+import { CameraBarcodeScannerModal, playBarcodeBeep } from './CameraBarcodeScannerModal';
 import {
   SUPABASE_STOCK_CARD_SQL_SCHEMA,
   DEFAULT_STOCK_CARD_TABLE,
@@ -165,6 +167,8 @@ export const StockCardView: React.FC<StockCardViewProps> = ({
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  const [showStockCardScanner, setShowStockCardScanner] = useState(false);
 
   // Ensure selectedMedId remains valid if medicines list loads asynchronously or switches demo/prod
   useEffect(() => {
@@ -869,9 +873,21 @@ export const StockCardView: React.FC<StockCardViewProps> = ({
                   }
                 }}
                 placeholder="Ketik nama obat, kode, No. Referensi, batch, keterangan, atau petugas..."
-                className="w-full pl-9 pr-14 py-2.5 border border-slate-200 rounded-xl bg-white font-bold text-xs text-slate-800 outline-none focus:ring-2 focus:ring-sky-500 transition"
+                className="w-full pl-9 pr-20 py-2.5 border border-slate-200 rounded-xl bg-white font-bold text-xs text-slate-800 outline-none focus:ring-2 focus:ring-sky-500 transition"
               />
               <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowStockCardScanner(true);
+                  }}
+                  title="Scan Barcode Kartu Stok dengan Kamera"
+                  className="p-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 cursor-pointer"
+                  aria-label="Scan barcode kartu stok"
+                >
+                  <Camera className="w-3.5 h-3.5" />
+                </button>
                 {(medSearchTerm || searchQuery || !isAllMode) && (
                   <button
                     type="button"
@@ -1769,6 +1785,33 @@ export const StockCardView: React.FC<StockCardViewProps> = ({
           </div>
         </div>
       )}
+
+      <CameraBarcodeScannerModal
+        isOpen={showStockCardScanner}
+        onClose={() => setShowStockCardScanner(false)}
+        title="Scan Barcode Kartu Stok Digital"
+        subtitle="Arahkan kamera ke barcode kemasan obat untuk langsung melihat riwayat mutasi dan saldo batch."
+        scanMode="barcode"
+        onScanSuccess={(decoded) => {
+          const lower = decoded.trim().toLowerCase();
+          const matched = medicines.find(
+            (m) =>
+              (m.barcode && m.barcode.trim().toLowerCase() === lower) ||
+              m.id.trim().toLowerCase() === lower
+          );
+          if (matched) {
+            playBarcodeBeep();
+            setSelectedMedId(matched.id);
+            setMedSearchTerm('');
+            setSearchQuery('');
+            setIsMedDropdownOpen(false);
+          } else {
+            setMedSearchTerm(decoded);
+            setSearchQuery(decoded);
+            setIsMedDropdownOpen(true);
+          }
+        }}
+      />
     </div>
   );
 };

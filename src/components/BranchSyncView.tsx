@@ -21,12 +21,14 @@ import {
   Copy,
   Check,
   Search,
-  ChevronDown
+  ChevronDown,
+  Camera
 } from 'lucide-react';
 import { Branch, Medicine, StockTransfer, Staff } from '../types';
 import { SUPABASE_MULTI_CABANG_SQL_SCHEMA } from '../utils/supabaseClient';
 import { useIsOwnerAdmin } from '../utils/roleAccess';
 import { MedicineCategorySymbol } from './MedicineCategorySymbol';
+import { CameraBarcodeScannerModal, playBarcodeBeep } from './CameraBarcodeScannerModal';
 
 interface BranchSyncViewProps {
   branches: Branch[];
@@ -96,6 +98,7 @@ export const BranchSyncView: React.FC<BranchSyncViewProps> = ({
   const isOwnerAdmin = useIsOwnerAdmin();
   const [showSqlModal, setShowSqlModal] = useState(false);
   const [copiedSql, setCopiedSql] = useState(false);
+  const [showTransferScanner, setShowTransferScanner] = useState(false);
 
   // Modals state for Add, Edit and Delete Branch
   const [showAddModal, setShowAddModal] = useState(false);
@@ -908,6 +911,15 @@ export const BranchSyncView: React.FC<BranchSyncViewProps> = ({
                       )}
                       <button
                         type="button"
+                        onClick={() => setShowTransferScanner(true)}
+                        title="Scan Barcode Obat Transfer"
+                        aria-label="Scan barcode obat transfer"
+                        className="p-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 cursor-pointer shrink-0"
+                      >
+                        <Camera className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => setIsTransferMedOpen(false)}
                         aria-label="Tutup daftar obat"
                         className="p-0.5 rounded text-slate-400 hover:text-slate-700 cursor-pointer shrink-0"
@@ -1620,6 +1632,31 @@ export const BranchSyncView: React.FC<BranchSyncViewProps> = ({
           </div>
         </div>
       )}
+
+      <CameraBarcodeScannerModal
+        isOpen={showTransferScanner}
+        onClose={() => setShowTransferScanner(false)}
+        title="Scan Barcode Obat Transfer Cabang"
+        subtitle="Arahkan kamera ke barcode kemasan obat untuk memilih item mutasi antar cabang."
+        scanMode="barcode"
+        onScanSuccess={(decoded) => {
+          const lower = decoded.trim().toLowerCase();
+          const matched = medicines.find(
+            (m) =>
+              (m.barcode && m.barcode.trim().toLowerCase() === lower) ||
+              m.id.trim().toLowerCase() === lower
+          );
+          if (matched) {
+            playBarcodeBeep();
+            setSelectedMedId(matched.id);
+            setTransferMedSearch('');
+            setIsTransferMedOpen(false);
+          } else {
+            setTransferMedSearch(decoded);
+            setIsTransferMedOpen(true);
+          }
+        }}
+      />
     </div>
   );
 };

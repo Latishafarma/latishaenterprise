@@ -37,7 +37,8 @@ import {
   Users,
   Radio,
   User,
-  Loader2
+  Loader2,
+  Camera
 } from 'lucide-react';
 import { Medicine, Transaction, StockMutation, Branch, StockOpnameRecord, StockOpnameItemRecord, StockOpnameKind, LiveOpnameItemActivity, Staff } from '../types';
 import { openPrintWindow } from '../utils/printHelper';
@@ -47,6 +48,7 @@ import {
   DEFAULT_PAGE_SIZE_OPTIONS
 } from './PaginationControls';
 import { MedicineCategorySymbol } from './MedicineCategorySymbol';
+import { CameraBarcodeScannerModal, playBarcodeBeep } from './CameraBarcodeScannerModal';
 import {
   SUPABASE_OPNAME_SQL_SCHEMA,
   DEFAULT_OPNAME_TABLE,
@@ -606,6 +608,7 @@ export const StockOpnameView: React.FC<StockOpnameViewProps> = ({
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'COUNTED' | 'UNCOUNTED' | 'DISCREPANCY' | 'MATCH' | 'BEING_COUNTED_OTHER'>('ALL');
   const [scannedBarcode, setScannedBarcode] = useState('');
   const [isBarcodeSearching, setIsBarcodeSearching] = useState(false);
+  const [showCameraScanner, setShowCameraScanner] = useState(false);
 
   const [pageSize, setPageSize] = useState<number>(() => {
     const saved = Number(demoGetItem('latisha_opname_page_size'));
@@ -1744,18 +1747,17 @@ export const StockOpnameView: React.FC<StockOpnameViewProps> = ({
     });
   };
 
-  // Barcode quick search & focus (supports direct Supabase lookup when server-paginated)
-  const handleBarcodeSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const rawCode = scannedBarcode.trim();
+  // Barcode quick search & focus (supports direct Supabase lookup when server-paginated + camera scanner)
+  const processBarcodeScan = async (inputCode: string) => {
+    const rawCode = inputCode.trim();
     if (!rawCode) return;
 
     const lowerCode = rawCode.toLowerCase();
     let found: Medicine | undefined =
       Array.from(medicineLookupMap.values()).find(
         (m) =>
-          (m.barcode && m.barcode.toLowerCase() === lowerCode) ||
-          m.id.toLowerCase() === lowerCode
+          (m.barcode && m.barcode.trim().toLowerCase() === lowerCode) ||
+          m.id.trim().toLowerCase() === lowerCode
       );
 
     if (!found && useServerPagination) {
@@ -1772,15 +1774,35 @@ export const StockOpnameView: React.FC<StockOpnameViewProps> = ({
     }
 
     if (found) {
-      setSearchTerm(found.barcode || found.name);
+      playBarcodeBeep();
+      // Reset conflicting filters so the scanned medicine is immediately visible
+      if (selectedCategory !== 'ALL' && found.category !== selectedCategory) {
+        setSelectedCategory('ALL');
+      }
+      if (selectedRack !== 'ALL' && found.rack !== selectedRack) {
+        setSelectedRack('ALL');
+      }
+      if (statusFilter !== 'ALL') {
+        setStatusFilter('ALL');
+      }
+      setSearchTerm(found.barcode || found.id || found.name);
       setCurrentPage(1);
       setScannedBarcode('');
+      setSyncToast({
+        type: 'success',
+        message: `Barcode terbaca: ${found.name} (${found.barcode || found.id})`
+      });
     } else {
       setSyncToast({
         type: 'warning',
         message: `Obat dengan barcode / kode "${rawCode}" tidak ditemukan.`
       });
     }
+  };
+
+  const handleBarcodeSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await processBarcodeScan(scannedBarcode);
   };
 
   // Apply Reconciliation to System (Applies ALL counted/modified items across all pages!)
@@ -2703,9 +2725,9 @@ export const StockOpnameView: React.FC<StockOpnameViewProps> = ({
             />
           </div>
 
-          {/* Quick Barcode Scanner Form */}
+          {/* Quick Barcode Scanner Form + Camera Button */}
           <form onSubmit={handleBarcodeSubmit} className="sm:col-span-3 flex gap-1.5">
-            <div className="relative flex-1">
+            <div className="relative flex-1 min-w-0">
               <Barcode className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
               <input
                 type="text"
@@ -2715,6 +2737,15 @@ export const StockOpnameView: React.FC<StockOpnameViewProps> = ({
                 className="w-full pl-9 pr-2 py-2 border rounded-xl text-xs font-mono font-bold bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 outline-none"
               />
             </div>
+            <button
+              type="button"
+              onClick={() => setShowCameraScanner(true)}
+              title="Scan Barcode Menggunakan Kamera"
+              className="px-2.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shrink-0 cursor-pointer transition inline-flex items-center gap-1"
+            >
+              <Camera className="w-3.5 h-3.5" />
+              <span className="hidden xl:inline">Scan</span>
+            </button>
             <button
               type="submit"
               disabled={isBarcodeSearching}
@@ -3823,6 +3854,17 @@ export const StockOpnameView: React.FC<StockOpnameViewProps> = ({
           </div>
         </div>
       )}
+
+      <CameraBarcodeScannerModal
+        isOpen={showCameraScanner}
+        onClose={() => setShowCameraScanner(false)}
+        title="Scan Barcode Stok Opname"
+        subtitle="Arahkan kamera ke barcode kemasan obat untuk langsung menampilkan obat dan menghitung stok fisik."
+        scanMode="barcode"
+        onScanSuccess={(code) => {
+          processBarcodeScan(code);
+        }}
+      />
     </div>
   );
 };

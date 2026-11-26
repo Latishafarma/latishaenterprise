@@ -38,7 +38,9 @@ import {
   LogOut,
   CalendarOff,
   Flame,
-  MapPin
+  MapPin,
+  ScanBarcode,
+  Camera
 } from 'lucide-react';
 import {
   Patient,
@@ -47,6 +49,7 @@ import {
   RMERecord,
   Transaction,
   StockOpnameRecord,
+  StockOpnameKind,
   StockMutation,
   LiveOpnameItemActivity,
   Staff,
@@ -63,10 +66,12 @@ import {
   subscribeLiveOpnameActivityChannel,
   LiveOpnameActivityController,
   fetchPatientsPaginatedFromSupabase,
+  fetchMedicineByBarcodeOrIdFromSupabase,
   getSupabaseConfig,
   deduplicatePatients
 } from '../utils/supabaseClient';
-import { isDemoMode } from '../utils/demoSandbox';
+import { isDemoMode, demoGetItem, demoSetItem } from '../utils/demoSandbox';
+import { CameraBarcodeScannerModal, playBarcodeBeep } from './CameraBarcodeScannerModal';
 import { useIsOwnerAdmin } from '../utils/roleAccess';
 import {
   ATTENDANCE_UPDATED_EVENT,
@@ -132,7 +137,10 @@ interface MobileFieldStaffViewProps {
         stock?: number;
         difference?: number;
       }[];
-    }[]
+    }[],
+    notes?: string,
+    customPetugas?: string,
+    opnameKind?: StockOpnameKind
   ) => void;
   onCloseMobileMode: () => void;
   onSaveMobileRME: (record: RMERecord) => void;
@@ -398,6 +406,15 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
   
   // ================= STOK OPNAME (LIVE) STATE =================
   const [sessionStartTime] = useState<string>(() => new Date().toISOString());
+  const [opnameKind, setOpnameKind] = useState<StockOpnameKind>(() => {
+    const saved = demoGetItem('latisha_opname_kind');
+    return saved === 'STOK_AWAL' ? 'STOK_AWAL' : 'PENYESUAIAN_STOK';
+  });
+
+  useEffect(() => {
+    demoSetItem('latisha_opname_kind', opnameKind);
+  }, [opnameKind]);
+
   const [opnameSearch, setOpnameSearch] = useState('');
   const [selectedRack, setSelectedRack] = useState<string>('ALL');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'UNCOUNTED' | 'COUNTED' | 'DIFF' | 'BEING_COUNTED_OTHER'>('ALL');
@@ -406,6 +423,12 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
   const [mobileCounts, setMobileCounts] = useState<Record<string, MobileCountState>>({});
   const [showPostingConfirmModal, setShowPostingConfirmModal] = useState(false);
   const [postingSuccessMessage, setPostingSuccessMessage] = useState<string | null>(null);
+  const [scannerTargetTab, setScannerTargetTab] = useState<'opname' | 'cekstok' | null>(null);
+  const [mobileScanBanner, setMobileScanBanner] = useState<{
+    type: 'success' | 'warning';
+    text: string;
+  } | null>(null);
+  const [extraScannedMeds, setExtraScannedMeds] = useState<Medicine[]>([]);
 
   // Real-Time Multi-User Opname Activity (Anti Double-Opname)
   const myMobileSessionId = useMemo(() => `${getClientOpnameSessionId()}-MOB`, []);
@@ -461,13 +484,19 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
     return map;
   }, [transactions, sessionStartTime]);
 
+  const combinedMobileMedicines = useMemo(() => {
+    if (extraScannedMeds.length === 0) return medicines;
+    const seen = new Set(medicines.map((m) => m.id));
+    return [...medicines, ...extraScannedMeds.filter((em) => !seen.has(em.id))];
+  }, [medicines, extraScannedMeds]);
+
   const getMutableMobileBatchEntries = (
     medId: string,
     prevCounts: Record<string, MobileCountState>
   ): MobileBatchEntry[] => {
     const existing = prevCounts[medId]?.batchEntries;
     if (existing && existing.length > 0) return existing.map((b) => ({ ...b }));
-    const med = medicines.find((m) => m.id === medId);
+    const med = combinedMobileMedicines.find((m) => m.id === medId);
     if (!med) return [];
     return getNormalizedBatches(med).map((b) => ({
       id: b.id,
@@ -803,7 +832,7 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
 
   // Reconciled items for mobile (Multi-Batch & Dual-Satuan)
   const reconciledItems = useMemo(() => {
-    return medicines.map((med) => {
+    return combinedMobileMedicines.map((med) => {
       const liveSales = liveSalesMap[med.id] || 0;
       const systemStock = med.stock;
       const countState = mobileCounts[med.id];
@@ -907,7 +936,7 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
         status
       };
     });
-  }, [medicines, mobileCounts, liveSalesMap, medicineOpnameHistoryMap]);
+  }, [combinedMobileMedicines, mobileCounts, liveSalesMap, medicineOpnameHistoryMap]);
 
   // Filtered items based on search, rack, and status
   const filteredOpnameItems = useMemo(() => {
@@ -916,7 +945,8 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
       const matchSearch =
         !q ||
         item.name.toLowerCase().includes(q) ||
-        item.barcode.toLowerCase().includes(q) ||
+        (item.barcode || '').toLowerCase().includes(q) ||
+        item.id.toLowerCase().includes(q) ||
         (item.rack && item.rack.toLowerCase().includes(q)) ||
         item.batchEntries.some((b) => b.batchNo.toLowerCase().includes(q));
 
@@ -994,19 +1024,26 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
     };
   }, [medicines.length, reconciledItems, remoteOpnameActivities]);
 
-  // Execute Posting Opname from Mobile (with Multi-Batch & FEFO Auto-Adjust)
+  // Execute Posting Opname from Mobile (with Multi-Batch, FEFO & Jenis Stok Opname)
   const handleExecutePostingOpname = () => {
     if (!onApplyStockOpname) {
-      alert('Fungsi posting stok opname belum terhubung.');
+      setMobileScanBanner({
+        type: 'warning',
+        text: 'Fungsi posting stok opname belum terhubung.'
+      });
       return;
     }
 
     const countedItems = reconciledItems.filter((i) => i.hasCounted);
     if (countedItems.length === 0) {
-      alert('Belum ada item obat yang dihitung atau diubah Batch/ED-nya.');
+      setMobileScanBanner({
+        type: 'warning',
+        text: 'Belum ada item obat yang dihitung atau diubah Batch/ED-nya.'
+      });
       return;
     }
 
+    const isStokAwal = opnameKind === 'STOK_AWAL';
     const adjustments = countedItems.map((item) => {
       const finalBatchPayload = item.batchEntries.map((b) => {
         const pStock =
@@ -1050,24 +1087,86 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
         batches: finalBatchPayload,
         reason:
           item.notes ||
-          (finalDiff === 0
-            ? 'Stok opname cocok'
+          (isStokAwal
+            ? `Stok Awal SO Mobile (${resolvedFEFO.stock} ${item.unit})`
+            : finalDiff === 0
+            ? 'Stok opname cocok (SO Mobile)'
             : `Penyesuaian SO Mobile (${finalDiff > 0 ? '+' : ''}${finalDiff} ${item.unit})`)
       };
     });
 
-    onApplyStockOpname(adjustments);
+    onApplyStockOpname(adjustments, undefined, staffName, opnameKind);
     setMobileCounts({});
     setFocusedMedicineId(null);
     setOverriddenLocks({});
     activityControllerRef.current?.clearMyActivities();
     setShowPostingConfirmModal(false);
     setPostingSuccessMessage(
-      `Berhasil memposting ${adjustments.length} item (stok & Batch/ED FEFO otomatis diperbarui)!`
+      `Berhasil memposting ${adjustments.length} item (${isStokAwal ? 'Stok Awal' : 'Penyesuaian Stok'} — stok & Batch/ED FEFO diperbarui)!`
     );
     setTimeout(() => {
       setPostingSuccessMessage(null);
     }, 4500);
+  };
+
+  // Barcode scan handler for Mobile Opname & Cek Stok (Camera & HID Physical Scanner)
+  const handleMobileBarcodeScan = async (
+    rawCode: string,
+    target: 'opname' | 'cekstok'
+  ) => {
+    const cleaned = rawCode.trim();
+    if (!cleaned) return;
+    const lower = cleaned.toLowerCase();
+
+    const pool = [...medicines, ...extraScannedMeds];
+    let found = pool.find(
+      (m) =>
+        (m.barcode && m.barcode.trim().toLowerCase() === lower) ||
+        m.id.trim().toLowerCase() === lower
+    );
+
+    if (!found && !isDemoMode()) {
+      try {
+        const res = await fetchMedicineByBarcodeOrIdFromSupabase(cleaned);
+        if (res.data) {
+          found = res.data;
+          setExtraScannedMeds((prev) =>
+            prev.some((x) => x.id === found!.id) ? prev : [found!, ...prev]
+          );
+        }
+      } catch {
+        // Fallback to text filter below
+      }
+    }
+
+    if (found) {
+      playBarcodeBeep();
+      if (target === 'opname') {
+        setSelectedRack('ALL');
+        setStatusFilter('ALL');
+        setOpnameSearch(found.barcode || found.id || found.name);
+        setFocusedMedicineId(found.id);
+      } else {
+        setStockSearch(found.barcode || found.id || found.name);
+      }
+      setMobileScanBanner({
+        type: 'success',
+        text: `Barcode cocok: ${found.name} (${found.barcode || found.id})`
+      });
+    } else {
+      if (target === 'opname') {
+        setOpnameSearch(cleaned);
+      } else {
+        setStockSearch(cleaned);
+      }
+      setMobileScanBanner({
+        type: 'warning',
+        text: `Kode "${cleaned}" tidak ditemukan di master obat.`
+      });
+    }
+    setTimeout(() => {
+      setMobileScanBanner(null);
+    }, 4000);
   };
 
   // ================= HOME VISIT STATE =================
@@ -1177,11 +1276,21 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
     setSoapS('');
   };
 
-  const filteredMeds = medicines.filter(
-    (m) =>
-      m.name.toLowerCase().includes(stockSearch.toLowerCase()) ||
-      m.barcode.includes(stockSearch)
-  );
+  const filteredMeds = useMemo(() => {
+    const combined = [...medicines];
+    extraScannedMeds.forEach((em) => {
+      if (!combined.some((m) => m.id === em.id)) combined.push(em);
+    });
+    const q = stockSearch.trim().toLowerCase();
+    if (!q) return combined;
+    return combined.filter(
+      (m) =>
+        m.name.toLowerCase().includes(q) ||
+        (m.barcode || '').toLowerCase().includes(q) ||
+        m.id.toLowerCase().includes(q) ||
+        (m.batchNo || '').toLowerCase().includes(q)
+    );
+  }, [medicines, extraScannedMeds, stockSearch]);
 
   return (
     <div className="max-w-md mx-auto bg-slate-100 min-h-[780px] rounded-3xl border-4 border-slate-800 shadow-2xl overflow-hidden flex flex-col font-sans relative">
@@ -1387,17 +1496,98 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
               </div>
             </div>
 
-            {/* Search & Rack Filter Row */}
+            {/* Jenis Stok Opname Selector (Stok Awal vs Penyesuaian Stok) */}
+            <div className="p-3 bg-white rounded-2xl border border-indigo-200 shadow-xs space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <label
+                  htmlFor="mobile-jenis-stok-opname"
+                  className="text-[10px] font-black text-slate-700 uppercase tracking-wide"
+                >
+                  Jenis Stok Opname
+                </label>
+                <span
+                  className={`text-[9px] font-extrabold px-2 py-0.5 rounded-full ${
+                    opnameKind === 'STOK_AWAL'
+                      ? 'bg-indigo-100 text-indigo-800'
+                      : 'bg-emerald-100 text-emerald-800'
+                  }`}
+                >
+                  {opnameKind === 'STOK_AWAL' ? 'Stok Awal' : 'Penyesuaian Stok'}
+                </span>
+              </div>
+              <select
+                id="mobile-jenis-stok-opname"
+                value={opnameKind}
+                onChange={(e) => setOpnameKind(e.target.value as StockOpnameKind)}
+                className="w-full px-3 py-2 border border-indigo-300 rounded-xl text-xs font-extrabold bg-indigo-50 text-indigo-950 focus:bg-white focus:ring-2 focus:ring-indigo-500 outline-none cursor-pointer"
+              >
+                <option value="STOK_AWAL">Stok Awal</option>
+                <option value="PENYESUAIAN_STOK">Penyesuaian Stok</option>
+              </select>
+              <p className="text-[10px] text-slate-500 leading-snug">
+                {opnameKind === 'STOK_AWAL'
+                  ? 'Memperbarui Stok di Master Obat & tercatat di Kartu Stok sebagai mutasi Stok Awal.'
+                  : 'Memperbarui Stok di Master Obat & mencatat selisihnya sebagai Penyesuaian Stok (Stok Opname).'}
+              </p>
+            </div>
+
+            {mobileScanBanner && (
+              <div
+                className={`p-2.5 rounded-xl text-[11px] font-bold flex items-center justify-between gap-2 border ${
+                  mobileScanBanner.type === 'success'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                    : 'bg-amber-50 border-amber-200 text-amber-900'
+                }`}
+              >
+                <span className="truncate">{mobileScanBanner.text}</span>
+                <button
+                  type="button"
+                  onClick={() => setMobileScanBanner(null)}
+                  className="shrink-0 p-0.5"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* Search, Barcode Scan & Rack Filter Row */}
             <div className="space-y-2">
-              <div className="relative">
-                <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Cari obat / barcode rak..."
-                  value={opnameSearch}
-                  onChange={(e) => setOpnameSearch(e.target.value)}
-                  className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl font-medium text-xs outline-none focus:ring-2 focus:ring-emerald-500 shadow-xs"
-                />
+              <div className="flex gap-1.5 items-center">
+                <div className="relative flex-1">
+                  <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Cari obat / scan barcode..."
+                    value={opnameSearch}
+                    onChange={(e) => setOpnameSearch(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && opnameSearch.trim()) {
+                        e.preventDefault();
+                        handleMobileBarcodeScan(opnameSearch, 'opname');
+                      }
+                    }}
+                    className="w-full pl-9 pr-7 py-2 bg-white border border-slate-200 rounded-xl font-medium text-xs outline-none focus:ring-2 focus:ring-emerald-500 shadow-xs"
+                  />
+                  {opnameSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setOpnameSearch('')}
+                      aria-label="Hapus pencarian opname"
+                      className="absolute right-2 top-2 text-slate-400 hover:text-slate-600 p-0.5"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setScannerTargetTab('opname')}
+                  className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-extrabold text-[11px] flex items-center gap-1.5 shadow-xs shrink-0 transition active:scale-95"
+                  title="Scan Barcode dengan Kamera HP"
+                >
+                  <Camera className="w-4 h-4" />
+                  <span>Scan</span>
+                </button>
               </div>
 
               <div className="flex gap-2 items-center">
@@ -1852,24 +2042,78 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
         {/* ================= TAB 2: CEK STOK OBAT ================= */}
         {mobileTab === 'cekstok' && (
           <div className="space-y-3">
-            <div className="relative">
-              <Search className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
-              <input
-                type="text"
-                placeholder="Cari obat di apotek..."
-                value={stockSearch}
-                onChange={(e) => setStockSearch(e.target.value)}
-                className="w-full pl-9 pr-3 py-2.5 border rounded-xl bg-white font-semibold outline-none"
-              />
+            {mobileScanBanner && (
+              <div
+                className={`p-2.5 rounded-xl text-[11px] font-bold flex items-center justify-between gap-2 border ${
+                  mobileScanBanner.type === 'success'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                    : 'bg-amber-50 border-amber-200 text-amber-900'
+                }`}
+              >
+                <span className="truncate">{mobileScanBanner.text}</span>
+                <button
+                  type="button"
+                  onClick={() => setMobileScanBanner(null)}
+                  className="shrink-0 p-0.5"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            <div className="flex gap-1.5 items-center">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 absolute left-3 top-3 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Cari obat / scan barcode..."
+                  value={stockSearch}
+                  onChange={(e) => setStockSearch(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && stockSearch.trim()) {
+                      e.preventDefault();
+                      handleMobileBarcodeScan(stockSearch, 'cekstok');
+                    }
+                  }}
+                  className="w-full pl-9 pr-7 py-2.5 border rounded-xl bg-white font-semibold outline-none"
+                />
+                {stockSearch && (
+                  <button
+                    type="button"
+                    onClick={() => setStockSearch('')}
+                    aria-label="Hapus pencarian stok"
+                    className="absolute right-2 top-2.5 text-slate-400 hover:text-slate-600 p-0.5"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setScannerTargetTab('cekstok')}
+                className="px-3 py-2.5 bg-sky-600 hover:bg-sky-700 text-white rounded-xl font-extrabold text-[11px] flex items-center gap-1.5 shadow-xs shrink-0 transition active:scale-95"
+                title="Scan Barcode Obat dengan Kamera"
+              >
+                <Camera className="w-4 h-4" />
+                <span>Scan</span>
+              </button>
             </div>
 
             <div className="space-y-2 max-h-[500px] overflow-y-auto custom-scrollbar">
               {filteredMeds.map((m) => (
                 <div key={m.id} className="p-3 bg-white rounded-2xl border border-slate-200 shadow-xs space-y-1">
-                  <div className="flex justify-between items-start">
-                    <strong className="text-slate-900">{m.name}</strong>
+                  <div className="flex justify-between items-start gap-2">
+                    <div className="min-w-0">
+                      <strong className="text-slate-900 block">{m.name}</strong>
+                      {m.barcode && (
+                        <span className="text-[10px] font-mono text-slate-400 flex items-center gap-1">
+                          <ScanBarcode className="w-3 h-3" />
+                          {m.barcode}
+                        </span>
+                      )}
+                    </div>
                     <span
-                      className={`font-black font-mono px-2 py-0.5 rounded-full text-[10px] ${
+                      className={`font-black font-mono px-2 py-0.5 rounded-full text-[10px] shrink-0 ${
                         m.stock <= m.minStock ? 'bg-rose-100 text-rose-800' : 'bg-emerald-50 text-emerald-800'
                       }`}
                     >
@@ -2419,9 +2663,30 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
               <span>Konfirmasi Posting Stok Opname</span>
             </div>
 
+            <div className="p-2.5 rounded-2xl bg-indigo-50 border border-indigo-200 space-y-1">
+              <label
+                htmlFor="mobile-confirm-jenis-opname"
+                className="block text-[10px] font-black uppercase text-indigo-900"
+              >
+                Jenis Stok Opname
+              </label>
+              <select
+                id="mobile-confirm-jenis-opname"
+                value={opnameKind}
+                onChange={(e) => setOpnameKind(e.target.value as StockOpnameKind)}
+                className="w-full px-2.5 py-1.5 border border-indigo-300 rounded-xl text-xs font-extrabold bg-white text-indigo-950 outline-none"
+              >
+                <option value="STOK_AWAL">Stok Awal</option>
+                <option value="PENYESUAIAN_STOK">Penyesuaian Stok</option>
+              </select>
+            </div>
+
             <p className="text-slate-600 text-[11px] leading-relaxed">
-              Anda akan memposting hasil hitung fisik untuk{' '}
-              <strong className="text-slate-900">{opnameMetrics.countedItems} item obat</strong>.
+              Anda akan memposting{' '}
+              <strong className="text-indigo-800">
+                {opnameKind === 'STOK_AWAL' ? 'Stok Awal' : 'Penyesuaian Stok'}
+              </strong>{' '}
+              untuk <strong className="text-slate-900">{opnameMetrics.countedItems} item obat</strong>.
               Sistem akan otomatis memperbarui master stok dan mencatat kartu mutasi stok (FEFO).
             </p>
 
@@ -2464,6 +2729,23 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Camera Barcode Scanner Modal for Mobile Opname / Cek Stok */}
+      <CameraBarcodeScannerModal
+        isOpen={scannerTargetTab !== null}
+        onClose={() => setScannerTargetTab(null)}
+        title={
+          scannerTargetTab === 'opname'
+            ? 'Scan Barcode Stok Opname'
+            : 'Scan Barcode Cek Stok Obat'
+        }
+        subtitle="Arahkan kamera ke barcode kemasan obat untuk langsung mencari dan membuka data stoknya."
+        scanMode="barcode"
+        onScanSuccess={(code) => {
+          const target = scannerTargetTab || 'opname';
+          handleMobileBarcodeScan(code, target);
+        }}
+      />
     </div>
   );
 };

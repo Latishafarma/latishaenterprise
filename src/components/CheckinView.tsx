@@ -8,9 +8,11 @@ import {
   Scale,
   QrCode,
   Sparkles,
-  CheckCircle2
+  CheckCircle2,
+  Camera
 } from 'lucide-react';
 import { Patient, PatientQueue, Doctor, Staff } from '../types';
+import { CameraBarcodeScannerModal } from './CameraBarcodeScannerModal';
 import {
   checkPatientInSupabase,
   fetchPatientsPaginatedFromSupabase,
@@ -43,6 +45,7 @@ export const CheckinView: React.FC<CheckinViewProps> = ({
   const [selectedPatientObj, setSelectedPatientObj] = useState<Patient | null>(null);
   const [showDropdown, setShowDropdown] = useState(false);
   const [remoteSearchPatients, setRemoteSearchPatients] = useState<Patient[]>([]);
+  const [showCameraQrScanner, setShowCameraQrScanner] = useState(false);
 
   // Debounced live Supabase search when typing 2+ chars so 5000+ patients are searchable without loading all into RAM
   useEffect(() => {
@@ -697,27 +700,50 @@ export const CheckinView: React.FC<CheckinViewProps> = ({
                   </span>
                 </div>
 
-                <div className="flex justify-end gap-2 pt-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
                   <button
                     type="button"
-                    onClick={() => setShowQrModal(false)}
-                    className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl"
+                    onClick={() => setShowCameraQrScanner(true)}
+                    className="px-3.5 py-2 bg-sky-600 hover:bg-sky-700 text-white font-bold rounded-xl flex items-center gap-1.5 shadow-xs cursor-pointer"
                   >
-                    Batal
+                    <Camera className="w-4 h-4" />
+                    <span>Scan Kamera QR / Barcode</span>
                   </button>
-                  <button
-                    type="submit"
-                    className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl flex items-center gap-1.5 shadow-xs"
-                  >
-                    <CheckCircle2 className="w-4 h-4" />
-                    <span>Validasi Pasien</span>
-                  </button>
+
+                  <div className="flex items-center gap-2 ml-auto">
+                    <button
+                      type="button"
+                      onClick={() => setShowQrModal(false)}
+                      className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl"
+                    >
+                      Batal
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl flex items-center gap-1.5 shadow-xs"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>Validasi Pasien</span>
+                    </button>
+                  </div>
                 </div>
               </form>
             </div>
           </div>
         </div>
       )}
+
+      <CameraBarcodeScannerModal
+        isOpen={showCameraQrScanner}
+        onClose={() => setShowCameraQrScanner(false)}
+        title="Scan Kamera QR / Barcode Pasien"
+        subtitle="Arahkan kamera ke QR Code atau Barcode pada Kartu Rekam Medis / E-Tiket pasien."
+        scanMode="both"
+        onScanSuccess={(decoded) => {
+          setQrInputCode(decoded);
+          handleProcessQrScan(decoded);
+        }}
+      />
     </div>
   );
 };

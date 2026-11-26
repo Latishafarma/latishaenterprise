@@ -28,7 +28,9 @@ import {
   ChevronDown,
   RotateCcw,
   Palette,
-  SlidersHorizontal
+  SlidersHorizontal,
+  Camera,
+  ScanBarcode
 } from 'lucide-react';
 import { Medicine, MedicineBatch, isOwnerAdminRole } from '../types';
 import { getNormalizedBatches, resolvePrimaryBatchAndStock } from '../utils/batchHelper';
@@ -53,10 +55,12 @@ import {
   getSupabaseConfig,
   setSupabaseConfig,
   fetchMedicinesPaginatedFromSupabase,
+  fetchMedicineByBarcodeOrIdFromSupabase,
   isMedicineFormColumnMissingInSupabase
 } from '../utils/supabaseClient';
 import { PaginationControls, DEFAULT_PAGE_SIZE_OPTIONS } from './PaginationControls';
 import { MedicineCategorySymbol } from './MedicineCategorySymbol';
+import { CameraBarcodeScannerModal, playBarcodeBeep } from './CameraBarcodeScannerModal';
 
 const PAGE_SIZE_OPTIONS = DEFAULT_PAGE_SIZE_OPTIONS;
 
@@ -286,6 +290,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [serverTotalPages, setServerTotalPages] = useState<number>(1);
   const [isServerLoading, setIsServerLoading] = useState<boolean>(false);
   const [serverRefreshTick, setServerRefreshTick] = useState<number>(0);
+  const [inventoryScannerTarget, setInventoryScannerTarget] = useState<'search' | 'form' | null>(
+    null
+  );
 
   const supabaseConf = getSupabaseConfig();
   const useServerPagination = Boolean(
@@ -756,6 +763,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
   const [form, setForm] = useState({
     name: '',
+    barcode: '',
     category: '' as Medicine['category'],
     kelas: '',
     nappza: 'Non-NAPPZA',
@@ -970,7 +978,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         (m.statusResep && m.statusResep.toLowerCase().includes(q)) ||
         (m.kekuatan && m.kekuatan.toLowerCase().includes(q)) ||
         (m.form && m.form.toLowerCase().includes(q)) ||
-        m.barcode.includes(q);
+        (m.barcode || '').toLowerCase().includes(q);
 
       const matchCat = categoryFilter === 'SEMUA' || m.category === categoryFilter;
 
@@ -1061,6 +1069,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     statusResepManuallyEditedRef.current = false;
     setForm({
       name: '',
+      barcode: '',
       category: '' as Medicine['category'],
       kelas: '',
       nappza: 'Non-NAPPZA',
@@ -1148,6 +1157,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
     setForm({
       name: m.name,
+      barcode: m.barcode || '',
       category: m.category,
       kelas: m.kelas || 'Analgesik / Antipiretik',
       nappza: m.nappza || 'Non-NAPPZA',
@@ -1265,13 +1275,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     const nextIdentity = isEditMode
       ? {
           id: existingMedForEdit?.id ?? resolvedEditId!,
-          barcode: existingMedForEdit?.barcode ?? ''
+          barcode: form.barcode.trim() || existingMedForEdit?.barcode || ''
         }
       : getNextUniqueIdentity();
 
     const payload: Medicine = {
       id: nextIdentity.id,
-      barcode: nextIdentity.barcode,
+      barcode: form.barcode.trim() || nextIdentity.barcode,
       name: form.name.trim(),
       category: form.category,
       kelas: form.kelas || 'Umum',
@@ -1954,15 +1964,57 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
           {/* Search + Filters */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:flex lg:flex-wrap items-center gap-2.5 flex-1 min-w-0">
-            <div className="relative sm:col-span-2 lg:flex-1 lg:min-w-[220px] lg:max-w-sm">
-              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
-                type="text"
-                placeholder="Cari obat (Nama / Zat Aktif & Kekuatan / Barcode / Batch)..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full min-h-[40px] pl-9 pr-3 py-2 border border-slate-200 rounded-xl text-xs font-semibold bg-slate-50 focus:bg-white focus:border-sky-400 outline-none transition"
-              />
+            <div className="flex items-center gap-1.5 sm:col-span-2 lg:flex-1 lg:min-w-[240px] lg:max-w-md">
+              <div className="relative flex-1 min-w-0">
+                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Cari obat (Nama / Zat Aktif / Barcode / Batch)..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  onKeyDown={async (e) => {
+                    if (e.key === 'Enter' && searchTerm.trim()) {
+                      const code = searchTerm.trim();
+                      const lower = code.toLowerCase();
+                      const localMatch = [...serverMedicines, ...medicines].find(
+                        (m) =>
+                          (m.barcode && m.barcode.trim().toLowerCase() === lower) ||
+                          m.id.trim().toLowerCase() === lower
+                      );
+                      if (localMatch) {
+                        playBarcodeBeep();
+                        setSearchTerm(localMatch.barcode || localMatch.id);
+                      } else if (useServerPagination) {
+                        const res = await fetchMedicineByBarcodeOrIdFromSupabase(code);
+                        if (res.data) {
+                          playBarcodeBeep();
+                          setSearchTerm(res.data.barcode || res.data.id);
+                        }
+                      }
+                    }
+                  }}
+                  className="w-full min-h-[40px] pl-9 pr-8 py-2 border border-slate-200 rounded-xl text-xs font-semibold bg-slate-50 focus:bg-white focus:border-sky-400 outline-none transition"
+                />
+                {searchTerm && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchTerm('')}
+                    aria-label="Hapus pencarian obat"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setInventoryScannerTarget('search')}
+                title="Scan Barcode Obat dengan Kamera"
+                className="min-h-[40px] px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center gap-1.5 cursor-pointer shrink-0"
+              >
+                <Camera className="w-4 h-4" />
+                <span className="hidden sm:inline">Scan</span>
+              </button>
             </div>
 
             <div className="w-full lg:w-auto flex items-center gap-1.5">
@@ -2852,6 +2904,32 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     onChange={(e) => setForm({ ...form, name: e.target.value })}
                     className="w-full p-2.5 border rounded-xl font-bold bg-white focus:ring-2 focus:ring-sky-500 outline-none"
                   />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Barcode / Kode EAN
+                  </label>
+                  <div className="flex gap-1.5">
+                    <div className="relative flex-1 min-w-0">
+                      <ScanBarcode className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-3 pointer-events-none" />
+                      <input
+                        type="text"
+                        placeholder="Scan / otomatis jika kosong"
+                        value={form.barcode}
+                        onChange={(e) => setForm({ ...form, barcode: e.target.value })}
+                        className="w-full pl-8 pr-2 py-2.5 border rounded-xl font-mono font-bold bg-white focus:ring-2 focus:ring-sky-500 outline-none"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setInventoryScannerTarget('form')}
+                      title="Scan Barcode dari Kemasan Obat"
+                      className="px-2.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold flex items-center gap-1 cursor-pointer shrink-0 transition"
+                    >
+                      <Camera className="w-4 h-4" />
+                      <span>Scan</span>
+                    </button>
+                  </div>
                 </div>
                 <div ref={categoryDropdownRef} className="relative">
                   <label className="block font-bold text-slate-700 mb-1">Kategori / Golongan *</label>
@@ -4534,6 +4612,32 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           </div>
         </div>
       )}
+
+      <CameraBarcodeScannerModal
+        isOpen={inventoryScannerTarget !== null}
+        onClose={() => setInventoryScannerTarget(null)}
+        title={
+          inventoryScannerTarget === 'form'
+            ? 'Scan Barcode Kemasan Obat'
+            : 'Scan Barcode Master Obat'
+        }
+        subtitle={
+          inventoryScannerTarget === 'form'
+            ? 'Arahkan kamera ke barcode kemasan pabrik untuk mengisinya ke form obat.'
+            : 'Arahkan kamera ke barcode obat untuk langsung mencari di daftar Master Obat.'
+        }
+        scanMode="barcode"
+        onScanSuccess={(decoded) => {
+          if (inventoryScannerTarget === 'form') {
+            setForm((prev) => ({ ...prev, barcode: decoded }));
+          } else {
+            setCategoryFilter('SEMUA');
+            setStockStatusFilter('SEMUA');
+            setSearchTerm(decoded);
+            setCurrentPage(1);
+          }
+        }}
+      />
     </div>
   );
 };
