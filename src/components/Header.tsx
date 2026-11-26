@@ -118,7 +118,7 @@ export const Header: React.FC<HeaderProps> = React.memo(({
           title="LatishaEnterprise"
         >
           <img
-            src="/assets/aistudio/logo_resmi_apotek_673c56f0.png"
+            src={`${import.meta.env.BASE_URL}assets/aistudio/logo_resmi_apotek_673c56f0.png`}
             alt="Logo Aplikasi LatishaEnterprise"
             className="w-full h-full object-contain"
           />

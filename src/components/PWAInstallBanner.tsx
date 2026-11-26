@@ -123,7 +123,7 @@ export const PWAInstallGuideModal: React.FC<PWAInstallGuideModalProps> = ({
           <div className="flex items-center gap-2.5">
             <div className="w-10 h-10 rounded-xl bg-white p-1 flex items-center justify-center shrink-0 shadow-xs overflow-hidden">
               <img
-                src="/assets/aistudio/logo_resmi_apotek_673c56f0.png"
+                src={`${import.meta.env.BASE_URL}assets/aistudio/logo_resmi_apotek_673c56f0.png`}
                 alt="Ikon Aplikasi Latisha Farma"
                 className="w-full h-full object-contain"
               />

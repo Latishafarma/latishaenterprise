@@ -185,7 +185,7 @@ export const UnifiedCustomerPortalView: React.FC<UnifiedCustomerPortalViewProps>
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-9 h-9 rounded-xl bg-white p-1 flex items-center justify-center shrink-0 shadow-xs border border-white/20 overflow-hidden">
               <img
-                src="/assets/aistudio/logo_resmi_apotek_673c56f0.png"
+                src={`${import.meta.env.BASE_URL}assets/aistudio/logo_resmi_apotek_673c56f0.png`}
                 alt="Logo Aplikasi Latisha Farma"
                 className="w-full h-full object-contain"
               />

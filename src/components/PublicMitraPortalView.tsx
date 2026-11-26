@@ -1889,7 +1889,7 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
           <div className="flex items-center gap-3 min-w-0">
             <div className="w-10 h-10 rounded-xl bg-white p-1 border border-slate-200 flex items-center justify-center shrink-0 shadow-xs overflow-hidden">
               <img
-                src="/assets/aistudio/logo_resmi_apotek_673c56f0.png"
+                src={`${import.meta.env.BASE_URL}assets/aistudio/logo_resmi_apotek_673c56f0.png`}
                 alt="Logo Apotek Latisha Farma"
                 className="w-full h-full object-contain"
               />

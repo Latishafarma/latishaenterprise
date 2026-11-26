@@ -175,7 +175,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg bg-white p-0.5 border border-slate-700 flex items-center justify-center overflow-hidden shrink-0">
               <img
-                src="/assets/aistudio/logo_resmi_apotek_673c56f0.png"
+                src={`${import.meta.env.BASE_URL}assets/aistudio/logo_resmi_apotek_673c56f0.png`}
                 alt="Logo Latisha Farma"
                 className="w-full h-full object-contain"
               />

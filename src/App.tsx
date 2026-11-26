@@ -11294,7 +11294,7 @@ export default function App() {
               <div className="flex flex-col sm:flex-row items-center gap-3">
                 <div className="w-12 h-12 sm:w-14 sm:h-14 bg-white p-1.5 rounded-2xl flex items-center justify-center shadow-lg shrink-0 overflow-hidden">
                   <img
-                    src="/assets/aistudio/logo_resmi_apotek_673c56f0.png"
+                    src={`${import.meta.env.BASE_URL}assets/aistudio/logo_resmi_apotek_673c56f0.png`}
                     alt="Logo Aplikasi Latisha Farma"
                     className="w-full h-full object-contain"
                   />
@@ -11614,7 +11614,7 @@ export default function App() {
                   </button>
                   <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 px-1 pt-0.5">
                     <a
-                      href="/?view=portal-pelanggan"
+                      href="./?view=portal-pelanggan"
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-sky-600 hover:text-sky-800 font-bold hover:underline py-1"
@@ -11622,7 +11622,7 @@ export default function App() {
                       ?view=portal-pelanggan ↗
                     </a>
                     <a
-                      href="/?view=portal-mitra"
+                      href="./?view=portal-mitra"
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-emerald-700 hover:text-emerald-900 font-bold hover:underline py-1"

@@ -206,7 +206,7 @@ export const PortalQRGeneratorModal: React.FC<PortalQRGeneratorModalProps> = ({
 
       const [qrImg, logoImg] = await Promise.all([
         loadImageSafe(highResQr),
-        loadImageSafe('/assets/aistudio/logo_resmi_apotek_673c56f0.png'),
+        loadImageSafe(`${import.meta.env.BASE_URL}assets/aistudio/logo_resmi_apotek_673c56f0.png`),
       ]);
 
       if (logoImg) {
@@ -466,7 +466,7 @@ export const PortalQRGeneratorModal: React.FC<PortalQRGeneratorModalProps> = ({
                   <div className="flex items-center justify-center gap-3 mb-1.5">
                     <div className="w-11 h-11 rounded-xl bg-white p-1 shadow-xs flex items-center justify-center shrink-0">
                       <img
-                        src="/assets/aistudio/logo_resmi_apotek_673c56f0.png"
+                        src={`${import.meta.env.BASE_URL}assets/aistudio/logo_resmi_apotek_673c56f0.png`}
                         alt="Logo Apotek Latisha Farma"
                         className="w-full h-full object-contain"
                       />

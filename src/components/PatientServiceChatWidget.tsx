@@ -81,7 +81,7 @@ interface PatientServiceChatWidgetProps {
   onOpenPatientPortal?: () => void;
 }
 
-const PATIENT_REGISTRATION_PORTAL_URL = '/pendaftaran-pasien.html';
+const PATIENT_REGISTRATION_PORTAL_URL = `${import.meta.env.BASE_URL}pendaftaran-pasien.html`;
 const LIVE_CHAT_BC_NAME = 'latisha_live_chat_sync_v1';
 const STAFF_QUICK_REPLIES = [
   'Halo, dengan petugas Apotek Latisha Farma. Ada yang bisa kami bantu?',
