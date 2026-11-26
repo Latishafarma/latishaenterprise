@@ -319,6 +319,8 @@ export type PtkpStatus =
 
 export type StaffTaxCategory = 'pegawai_tetap' | 'bukan_pegawai';
 
+export type StaffStatus = 'Aktif' | 'Non-Aktif' | 'Menunggu Validasi';
+
 export interface Staff {
   id: string;
   name: string;
@@ -326,11 +328,18 @@ export interface Staff {
   roles?: StaffRole[]; // Multi-role checkbox support
   permissions?: string[]; // Custom module access checkboxes per staff
   phone: string;
-  status: 'Aktif' | 'Non-Aktif';
+  status: StaffStatus;
   branchId: string;
   npwpNik?: string;
   ptkpStatus?: PtkpStatus;
   taxCategory?: StaffTaxCategory;
+  sipNumber?: string; // No. SIP (Dokter) atau No. SIP / SIPA (Apoteker)
+  sipbNumber?: string; // No. SIPB / E-STR (Bidan / Perawat)
+  estrNumber?: string; // No. E-STR (Dokter / Apoteker)
+  isDpj?: boolean; // Checkbox Dokter Penanggung Jawab (khusus role Dokter)
+  registeredAt?: string; // Timestamp pendaftaran mandiri pegawai
+  validatedAt?: string; // Timestamp validasi oleh APJ / Owner
+  validatedBy?: string; // Nama APJ / Owner yang memvalidasi
 }
 
 export interface PermissionItem {

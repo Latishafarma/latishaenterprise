@@ -27,9 +27,21 @@ import {
   Copy,
   CreditCard,
   Clock,
-  LocateFixed
+  LocateFixed,
+  UserPlus,
+  ExternalLink,
+  Check,
+  Bell
 } from 'lucide-react';
 import { safeBackendFetch } from '../utils/serverBridgeHelper';
+import {
+  generateNextStaffId,
+  getSavedRolePermissions,
+  getStaffRegistrationShareUrl,
+  normalizeRolePermissionsMap,
+  resolveRoleDefaultPermissions,
+  saveRolePermissionsLocally
+} from '../utils/staffRegistrationHelper';
 import {
   PharmacyProfile,
   PharmacyBankAccount,
@@ -37,6 +49,7 @@ import {
   DPJProfile,
   Staff,
   StaffRole,
+  StaffStatus,
   PtkpStatus,
   StaffTaxCategory,
   Branch,
@@ -524,10 +537,23 @@ export const applyRemoteFacilityProfiles = (bundle: FacilityProfileBundle): {
   pharmacy: PharmacyProfile;
   apj: APJProfile;
   dpj: DPJProfile;
+  rolePermissions?: Record<string, string[]>;
 } => {
   const currentPharm = getSavedPharmacyProfile();
   const currentApj = getSavedAPJProfile();
   const currentDpj = getSavedDPJProfile();
+
+  let rolePermissionsChanged = false;
+  let resolvedRolePerms: Record<string, string[]> | undefined;
+  if (bundle.rolePermissions && typeof bundle.rolePermissions === 'object') {
+    const currentRolePerms = getSavedRolePermissions();
+    const incomingRolePerms = normalizeRolePermissionsMap(bundle.rolePermissions);
+    resolvedRolePerms = incomingRolePerms;
+    if (JSON.stringify(currentRolePerms) !== JSON.stringify(incomingRolePerms)) {
+      saveRolePermissionsLocally(incomingRolePerms, { broadcast: true });
+      rolePermissionsChanged = true;
+    }
+  }
 
   const beforeHash = computeFacilityBundleHash(currentPharm, currentApj, currentDpj);
   const incomingPharm = bundle.pharmacy || {};
@@ -560,26 +586,41 @@ export const applyRemoteFacilityProfiles = (bundle: FacilityProfileBundle): {
   }
 
   const afterHash = computeFacilityBundleHash(nextPharm, nextApj, nextDpj);
-  if (beforeHash === afterHash) {
-    return { changed: false, pharmacy: currentPharm, apj: currentApj, dpj: currentDpj };
+  const profilesChanged = beforeHash !== afterHash;
+  if (!profilesChanged && !rolePermissionsChanged) {
+    return {
+      changed: false,
+      pharmacy: currentPharm,
+      apj: currentApj,
+      dpj: currentDpj,
+      ...(resolvedRolePerms ? { rolePermissions: resolvedRolePerms } : {})
+    };
   }
 
-  try {
-    if (nextPharm.logoUrl) {
-      demoSetItem('latisha_facility_logo', nextPharm.logoUrl);
-    } else if (incomingPharm.logoUrl !== undefined) {
-      demoRemoveItem('latisha_facility_logo');
-    }
-    demoSetItem('latisha_pharmacy_profile', JSON.stringify(nextPharm));
-    demoSetItem('latisha_apj_profile', JSON.stringify(nextApj));
-    demoSetItem('latisha_dpj_profile', JSON.stringify(nextDpj));
-    syncFacilityProfileToServer({ pharmacy: nextPharm, apj: nextApj, dpj: nextDpj });
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('latisha_profile_updated', { detail: { source: 'supabase' } }));
-    }
-  } catch {}
+  if (profilesChanged) {
+    try {
+      if (nextPharm.logoUrl) {
+        demoSetItem('latisha_facility_logo', nextPharm.logoUrl);
+      } else if (incomingPharm.logoUrl !== undefined) {
+        demoRemoveItem('latisha_facility_logo');
+      }
+      demoSetItem('latisha_pharmacy_profile', JSON.stringify(nextPharm));
+      demoSetItem('latisha_apj_profile', JSON.stringify(nextApj));
+      demoSetItem('latisha_dpj_profile', JSON.stringify(nextDpj));
+      syncFacilityProfileToServer({ pharmacy: nextPharm, apj: nextApj, dpj: nextDpj });
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('latisha_profile_updated', { detail: { source: 'supabase' } }));
+      }
+    } catch {}
+  }
 
-  return { changed: true, pharmacy: nextPharm, apj: nextApj, dpj: nextDpj };
+  return {
+    changed: true,
+    pharmacy: profilesChanged ? nextPharm : currentPharm,
+    apj: profilesChanged ? nextApj : currentApj,
+    dpj: profilesChanged ? nextDpj : currentDpj,
+    ...(resolvedRolePerms ? { rolePermissions: resolvedRolePerms } : {})
+  };
 };
 
 export const useFacilityProfiles = () => {
@@ -687,10 +728,15 @@ interface PharmacySettingsModalProps {
   branches?: Branch[];
   onAddStaff?: (staff: Staff) => void;
   onUpdateStaff?: (staff: Staff) => void;
+  onValidateStaff?: (staff: Staff) => void;
+  onRejectStaff?: (staff: Staff) => void;
   onDeleteStaff?: (id: string) => void;
   onSyncStaffFromSupabase?: (staffList: Staff[]) => void;
   rolePermissions?: Record<string, string[]>;
-  onUpdateRolePermissions?: (updated: Record<string, string[]>) => void;
+  onUpdateRolePermissions?: (
+    updated: Record<string, string[]>,
+    changedMeta?: { role: StaffRole; permId: string; enabled: boolean }
+  ) => void;
 }
 
 export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
@@ -705,6 +751,8 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
   branches = [],
   onAddStaff,
   onUpdateStaff,
+  onValidateStaff,
+  onRejectStaff,
   onDeleteStaff,
   onSyncStaffFromSupabase,
   rolePermissions = DEFAULT_ROLE_PERMISSIONS,
@@ -732,6 +780,7 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
   const [expandedStaffId, setExpandedStaffId] = useState<string | null>(null);
   const [showStaffSqlModal, setShowStaffSqlModal] = useState(false);
   const [copiedStaffSql, setCopiedStaffSql] = useState(false);
+  const [copiedStaffRegLink, setCopiedStaffRegLink] = useState(false);
   const [showFacilitySqlModal, setShowFacilitySqlModal] = useState(false);
   const [copiedFacilitySql, setCopiedFacilitySql] = useState(false);
   const [syncFacilityLoading, setSyncFacilityLoading] = useState(false);
@@ -740,15 +789,20 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
   >(() => (isDemoMode() ? 'demo' : 'idle'));
   const [facilitySyncMessage, setFacilitySyncMessage] = useState<string>('');
   const [syncStaffLoading, setSyncStaffLoading] = useState(false);
+  const [confirmRejectStaffId, setConfirmRejectStaffId] = useState<string | null>(null);
   const [editingStaffId, setEditingStaffId] = useState<string | null>(null);
   const [editStaffForm, setEditStaffForm] = useState<{
     name: string;
     phone: string;
     branchId: string;
-    status: 'Aktif' | 'Non-Aktif';
+    status: StaffStatus;
     npwpNik: string;
     ptkpStatus: PtkpStatus;
     taxCategory: StaffTaxCategory;
+    sipNumber: string;
+    estrNumber: string;
+    sipbNumber: string;
+    isDpj: boolean;
   }>({
     name: '',
     phone: '',
@@ -756,7 +810,11 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
     status: 'Aktif',
     npwpNik: '',
     ptkpStatus: 'TK/0',
-    taxCategory: 'pegawai_tetap'
+    taxCategory: 'pegawai_tetap',
+    sipNumber: '',
+    estrNumber: '',
+    sipbNumber: '',
+    isDpj: false
   });
   const [newStaffForm, setNewStaffForm] = useState({
     name: '',
@@ -766,7 +824,11 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
     branchId: defaultBranchId,
     npwpNik: '',
     ptkpStatus: 'TK/0' as PtkpStatus,
-    taxCategory: 'pegawai_tetap' as StaffTaxCategory
+    taxCategory: 'pegawai_tetap' as StaffTaxCategory,
+    sipNumber: '',
+    estrNumber: '',
+    sipbNumber: '',
+    isDpj: false
   });
 
   const debounceSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -793,7 +855,8 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
     const res = await syncFacilityProfilesToSupabase({
       pharmacy: nextPharm,
       apj: nextApj,
-      dpj: nextDpj
+      dpj: nextDpj,
+      rolePermissions: normalizeRolePermissionsMap(rolePermissions)
     });
     if (res.success) {
       setFacilitySyncStatus('synced');
@@ -1141,18 +1204,23 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
           phone: apj.phone.trim() || apjStaff.phone
         });
       }
-      const dpjStaff = staffList.find(
-        (s) =>
-          s.id === 'STF-002' ||
-          s.id === 'STF-02' ||
-          s.id.endsWith('-02') ||
-          s.role === 'Dokter'
-      );
+      const dpjStaff =
+        staffList.find((s) => s.isDpj === true && s.status === 'Aktif') ||
+        staffList.find((s) => s.isDpj === true) ||
+        staffList.find(
+          (s) =>
+            s.id === 'STF-002' ||
+            s.id === 'STF-02' ||
+            s.id.endsWith('-02') ||
+            (s.role === 'Dokter' && s.isDpj !== false)
+        );
       if (dpjStaff && dpj.name.trim()) {
         onUpdateStaff({
           ...dpjStaff,
           name: dpj.name.trim(),
-          phone: dpj.phone.trim() || dpjStaff.phone
+          phone: dpj.phone.trim() || dpjStaff.phone,
+          ...(dpj.sip?.trim() ? { sipNumber: dpj.sip.trim() } : {}),
+          ...(dpj.idi?.trim() ? { estrNumber: dpj.idi.trim() } : {})
         });
       }
     }
@@ -1172,12 +1240,22 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
       status: st.status,
       npwpNik: st.npwpNik || '',
       ptkpStatus: st.ptkpStatus || 'TK/0',
-      taxCategory: st.taxCategory || (st.role === 'Dokter' ? 'bukan_pegawai' : 'pegawai_tetap')
+      taxCategory: st.taxCategory || (st.role === 'Dokter' ? 'bukan_pegawai' : 'pegawai_tetap'),
+      sipNumber: st.sipNumber || '',
+      estrNumber: st.estrNumber || '',
+      sipbNumber: st.sipbNumber || '',
+      isDpj: Boolean(st.isDpj)
     });
   };
 
   const handleSaveEditStaff = (st: Staff) => {
     if (!onUpdateStaff || !editStaffForm.name.trim()) return;
+    const stRoles = getStaffRoles(st);
+    const hasDoctor = stRoles.includes('Dokter');
+    const hasPharmacist = stRoles.includes('Apoteker');
+    const hasNurseOrMidwife =
+      stRoles.includes('Perawat / Bidan') || stRoles.includes('Perawat / Nakes Lapangan');
+
     const updated: Staff = {
       ...st,
       name: editStaffForm.name.trim(),
@@ -1186,11 +1264,21 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
       status: editStaffForm.status,
       npwpNik: editStaffForm.npwpNik.trim() || undefined,
       ptkpStatus: editStaffForm.ptkpStatus,
-      taxCategory: editStaffForm.taxCategory
+      taxCategory: editStaffForm.taxCategory,
+      ...(hasDoctor || hasPharmacist
+        ? {
+            sipNumber: editStaffForm.sipNumber.trim() || undefined,
+            estrNumber: editStaffForm.estrNumber.trim() || undefined
+          }
+        : {}),
+      ...(hasDoctor ? { isDpj: Boolean(editStaffForm.isDpj) } : {}),
+      ...(hasNurseOrMidwife
+        ? { sipbNumber: editStaffForm.sipbNumber.trim() || undefined }
+        : {})
     };
     onUpdateStaff(updated);
 
-    // If this staff member is the primary APJ or DPJ, sync to localStorage & Supabase profile as well
+    // If this staff member is the primary APJ, or a Dokter checked as DPJ, sync to localStorage & Supabase profile
     if (
       st.id === 'STF-001' ||
       st.id === 'STF-01' ||
@@ -1202,13 +1290,14 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
       demoSetItem('latisha_apj_profile', JSON.stringify(nextApj));
       syncFacilityProfileToServer({ pharmacy, apj: nextApj, dpj });
       void pushProfilesToSupabase(pharmacy, nextApj, dpj);
-    } else if (
-      st.id === 'STF-002' ||
-      st.id === 'STF-02' ||
-      st.id.endsWith('-02') ||
-      st.role === 'Dokter'
-    ) {
-      const nextDpj = { ...dpj, name: updated.name, phone: updated.phone };
+    } else if (hasDoctor && updated.isDpj === true) {
+      const nextDpj: DPJProfile = {
+        ...dpj,
+        name: updated.name,
+        phone: updated.phone,
+        ...(updated.sipNumber ? { sip: updated.sipNumber } : {}),
+        ...(updated.estrNumber ? { idi: updated.estrNumber } : {})
+      };
       setDpj(nextDpj);
       demoSetItem('latisha_dpj_profile', JSON.stringify(nextDpj));
       syncFacilityProfileToServer({ pharmacy, apj, dpj: nextDpj });
@@ -1224,6 +1313,56 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
   // Helper to get active roles for a staff member
   const getStaffRoles = (st: Staff): StaffRole[] => {
     return getStaffActiveRoles(st, st.role);
+  };
+
+  const pendingValidationStaff = staffList.filter((s) => s.status === 'Menunggu Validasi');
+
+  const handleApprovePendingStaff = (st: Staff) => {
+    const stRoles = getStaffRoles(st);
+    const hasDoctor = stRoles.includes('Dokter');
+
+    if (onValidateStaff) {
+      onValidateStaff(st);
+    } else if (onUpdateStaff) {
+      onUpdateStaff({
+        ...st,
+        status: 'Aktif',
+        validatedAt: new Date().toISOString(),
+        validatedBy: userName || 'APJ / Owner'
+      });
+    }
+
+    if (hasDoctor && st.isDpj === true) {
+      const nextDpj: DPJProfile = {
+        ...dpj,
+        name: st.name.trim(),
+        phone: st.phone.trim() || dpj.phone,
+        ...(st.sipNumber?.trim() ? { sip: st.sipNumber.trim() } : {}),
+        ...(st.estrNumber?.trim() ? { idi: st.estrNumber.trim() } : {})
+      };
+      setDpj(nextDpj);
+      demoSetItem('latisha_dpj_profile', JSON.stringify(nextDpj));
+      syncFacilityProfileToServer({ pharmacy, apj, dpj: nextDpj });
+      void pushProfilesToSupabase(pharmacy, apj, nextDpj);
+      onProfileUpdate?.();
+    }
+    setConfirmRejectStaffId(null);
+    setSaveSuccess(true);
+    setTimeout(() => setSaveSuccess(false), 2500);
+  };
+
+  const handleRejectPendingStaffAction = (st: Staff) => {
+    if (onRejectStaff) {
+      onRejectStaff(st);
+    } else if (onUpdateStaff) {
+      onUpdateStaff({
+        ...st,
+        status: 'Non-Aktif',
+        validatedAt: new Date().toISOString(),
+        validatedBy: userName || 'APJ / Owner'
+      });
+    }
+    setConfirmRejectStaffId(null);
   };
 
   // Helper to get active permissions for a staff member
@@ -1318,30 +1457,15 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
       ? currentList.filter((id) => id !== permId)
       : [...currentList, permId];
 
-    const updatedMap = {
+    const updatedMap = normalizeRolePermissionsMap({
       ...rolePermissions,
       [role]: nextList
-    };
-    onUpdateRolePermissions(updatedMap);
-
-    // Also sync to staff whose primary role matches and who don't have APJ / Owner
-    if (onUpdateStaff) {
-      staffList.forEach((st) => {
-        const stRoles = getStaffRoles(st);
-        if (stRoles.includes(role) && !stRoles.some((r) => isOwnerAdminRole(r))) {
-          const currentStPerms = new Set(getStaffPermissions(st));
-          if (exists) {
-            currentStPerms.delete(permId);
-          } else {
-            currentStPerms.add(permId);
-          }
-          onUpdateStaff({
-            ...st,
-            permissions: Array.from(currentStPerms)
-          });
-        }
-      });
-    }
+    });
+    onUpdateRolePermissions(updatedMap, {
+      role,
+      permId,
+      enabled: !exists
+    });
   };
 
   const handleAddNewStaffInline = (e: React.FormEvent) => {
@@ -1355,16 +1479,19 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
 
     const defaultPerms = new Set<string>();
     roles.forEach((r) => {
-      (rolePermissions[r] || DEFAULT_ROLE_PERMISSIONS[r] || []).forEach((id) =>
-        defaultPerms.add(id)
-      );
+      resolveRoleDefaultPermissions(r, rolePermissions).forEach((id) => defaultPerms.add(id));
     });
     if (!roles.some((r) => isOwnerAdminRole(r))) {
       defaultPerms.delete('sys-profil-fasilitas');
     }
 
+    const hasDoctorRole = roles.includes('Dokter');
+    const hasPharmacistRole = roles.includes('Apoteker');
+    const hasNurseOrMidwifeRole =
+      roles.includes('Perawat / Bidan') || roles.includes('Perawat / Nakes Lapangan');
+
     const created: Staff = {
-      id: `STF-${String(staffList.length + 1).padStart(3, '0')}`,
+      id: generateNextStaffId(staffList),
       name: newStaffForm.name.trim(),
       phone: newStaffForm.phone.trim(),
       role: primaryRole,
@@ -1374,9 +1501,35 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
       branchId: newStaffForm.branchId || branches[0]?.id || 'BR-01',
       npwpNik: newStaffForm.npwpNik.trim() || undefined,
       ptkpStatus: newStaffForm.ptkpStatus,
-      taxCategory: newStaffForm.taxCategory
+      taxCategory: newStaffForm.taxCategory,
+      ...(hasDoctorRole || hasPharmacistRole
+        ? {
+            sipNumber: newStaffForm.sipNumber.trim() || undefined,
+            estrNumber: newStaffForm.estrNumber.trim() || undefined
+          }
+        : {}),
+      ...(hasDoctorRole ? { isDpj: Boolean(newStaffForm.isDpj) } : {}),
+      ...(hasNurseOrMidwifeRole
+        ? { sipbNumber: newStaffForm.sipbNumber.trim() || undefined }
+        : {})
     };
     onAddStaff(created);
+
+    if (hasDoctorRole && newStaffForm.isDpj) {
+      const nextDpj: DPJProfile = {
+        ...dpj,
+        name: created.name,
+        phone: created.phone,
+        ...(created.sipNumber ? { sip: created.sipNumber } : {}),
+        ...(created.estrNumber ? { idi: created.estrNumber } : {})
+      };
+      setDpj(nextDpj);
+      demoSetItem('latisha_dpj_profile', JSON.stringify(nextDpj));
+      syncFacilityProfileToServer({ pharmacy, apj, dpj: nextDpj });
+      void pushProfilesToSupabase(pharmacy, apj, nextDpj);
+      onProfileUpdate?.();
+    }
+
     setNewStaffForm({
       name: '',
       phone: '',
@@ -1385,7 +1538,11 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
       branchId: branches[0]?.id || 'BR-01',
       npwpNik: '',
       ptkpStatus: 'TK/0',
-      taxCategory: 'pegawai_tetap'
+      taxCategory: 'pegawai_tetap',
+      sipNumber: '',
+      estrNumber: '',
+      sipbNumber: '',
+      isDpj: false
     });
     setSaveSuccess(true);
     setTimeout(() => setSaveSuccess(false), 2500);
@@ -1467,6 +1624,11 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
           >
             <Users className="w-4 h-4 text-violet-600" />
             <span>Peran User (Pegawai) & Hak Akses</span>
+            {pendingValidationStaff.length > 0 && (
+              <span className="px-1.5 py-0.5 rounded-full bg-amber-500 text-white text-[10px] font-black leading-none animate-pulse">
+                {pendingValidationStaff.length}
+              </span>
+            )}
           </button>
         </div>
 
@@ -2596,7 +2758,175 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
                     <p className="text-[11px] text-slate-600">
                       Centang kotak (checkbox) pada daftar pegawai di bawah untuk mengaktifkan peran jabatan maupun rincian hak akses modul masing-masing pegawai. Data terhubung dua arah secara <strong>Realtime ke Supabase (`pegawai`)</strong>. Khusus halaman <strong>Pengaturan Sistem &amp; Profil Fasilitas</strong> hanya dapat diakses oleh <strong>APJ / Owner</strong>.
                     </p>
+                    <div className="pt-2 border-t border-violet-200/80 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <UserPlus className="w-3.5 h-3.5 text-violet-700 shrink-0" />
+                        <span className="text-[11px] font-bold text-violet-900 truncate">
+                          Link Registrasi Mandiri Pegawai Baru:{' '}
+                          <code className="bg-white px-1.5 py-0.5 rounded border border-violet-200 font-mono text-[10px] text-sky-800">
+                            ?view=registrasi-pegawai
+                          </code>
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const url = getStaffRegistrationShareUrl(isDemoMode());
+                            navigator.clipboard?.writeText(url).then(() => {
+                              setCopiedStaffRegLink(true);
+                              setTimeout(() => setCopiedStaffRegLink(false), 2200);
+                            });
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-white hover:bg-violet-100 text-violet-900 border border-violet-300 text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition"
+                        >
+                          {copiedStaffRegLink ? (
+                            <Check className="w-3 h-3 text-emerald-600" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
+                          <span>{copiedStaffRegLink ? 'Link Disalin!' : 'Salin Link Registrasi'}</span>
+                        </button>
+                        <a
+                          href={`./?view=registrasi-pegawai${isDemoMode() ? '&mode=demo' : ''}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-2.5 py-1 rounded-lg bg-violet-700 hover:bg-violet-800 text-white text-[10px] font-bold inline-flex items-center gap-1 transition"
+                        >
+                          <span>Buka Form</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      </div>
+                    </div>
                   </div>
+
+                  {/* Notifikasi Antrean Validasi Pegawai Baru (APJ / Owner) */}
+                  {pendingValidationStaff.length > 0 && (
+                    <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 space-y-3 shadow-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="p-1.5 rounded-xl bg-amber-500 text-white shrink-0">
+                            <Bell className="w-4 h-4 animate-bounce" />
+                          </span>
+                          <div>
+                            <h4 className="font-black text-amber-950 text-xs uppercase tracking-wide">
+                              Validasi Pendaftaran Pegawai Baru ({pendingValidationStaff.length} Menunggu Persetujuan)
+                            </h4>
+                            <p className="text-[11px] text-amber-900">
+                              Pegawai yang mendaftar mandiri belum dapat login ke sistem sebelum divalidasi oleh APJ / Owner.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        {pendingValidationStaff.map((pendingSt) => {
+                          const pendingRoles = getStaffRoles(pendingSt);
+                          const branchName =
+                            branches.find((b) => b.id === pendingSt.branchId)?.name ||
+                            pendingSt.branchId;
+                          const isConfirmingReject = confirmRejectStaffId === pendingSt.id;
+                          return (
+                            <div
+                              key={pendingSt.id}
+                              className="p-3 rounded-xl bg-white border border-amber-200 flex flex-col md:flex-row md:items-center justify-between gap-3"
+                            >
+                              <div className="space-y-1 min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-mono font-black text-sky-700 bg-sky-50 px-2 py-0.5 rounded border border-sky-200 text-[11px]">
+                                    {pendingSt.id}
+                                  </span>
+                                  <span className="font-extrabold text-slate-900 text-xs">
+                                    {pendingSt.name}
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded-full bg-violet-100 text-violet-900 border border-violet-200 text-[10px] font-bold">
+                                    {pendingRoles.join(', ')}
+                                  </span>
+                                  {pendingSt.isDpj && pendingRoles.includes('Dokter') && (
+                                    <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-300 text-[10px] font-extrabold">
+                                      Calon Profil DPJ
+                                    </span>
+                                  )}
+                                  <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold inline-flex items-center gap-1">
+                                    <Clock className="w-3 h-3" /> Menunggu Validasi
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-slate-600 break-words">
+                                  Kontak: <span className="font-mono">{pendingSt.phone}</span> · Cabang:{' '}
+                                  <strong>{branchName}</strong>
+                                  {pendingSt.npwpNik && (
+                                    <>
+                                      {' · '}NIK/NPWP: <span className="font-mono">{pendingSt.npwpNik}</span>
+                                    </>
+                                  )}
+                                  {pendingSt.sipNumber && (
+                                    <>
+                                      {' · '}SIP: <span className="font-mono font-bold">{pendingSt.sipNumber}</span>
+                                    </>
+                                  )}
+                                  {pendingSt.estrNumber && (
+                                    <>
+                                      {' · '}E-STR: <span className="font-mono font-bold">{pendingSt.estrNumber}</span>
+                                    </>
+                                  )}
+                                  {pendingSt.sipbNumber && (
+                                    <>
+                                      {' · '}SIPB/E-STR: <span className="font-mono font-bold">{pendingSt.sipbNumber}</span>
+                                    </>
+                                  )}
+                                </p>
+                              </div>
+
+                              <div className="flex items-center gap-2 flex-wrap shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() => handleApprovePendingStaff(pendingSt)}
+                                  className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-[11px] flex items-center gap-1.5 shadow-sm cursor-pointer transition"
+                                >
+                                  <CheckCircle className="w-3.5 h-3.5" />
+                                  <span>Validasi &amp; Aktifkan</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleStartEditStaff(pendingSt)}
+                                  className="px-2.5 py-2 rounded-xl bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 font-bold text-[11px] flex items-center gap-1 cursor-pointer transition"
+                                >
+                                  <Edit2 className="w-3.5 h-3.5" />
+                                  <span>Edit Data</span>
+                                </button>
+                                {isConfirmingReject ? (
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRejectPendingStaffAction(pendingSt)}
+                                      className="px-2.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-black text-[11px] cursor-pointer transition"
+                                    >
+                                      Yakin Tolak
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setConfirmRejectStaffId(null)}
+                                      className="px-2 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-[11px] cursor-pointer transition"
+                                    >
+                                      Batal
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmRejectStaffId(pendingSt.id)}
+                                    className="px-2.5 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-[11px] cursor-pointer transition"
+                                  >
+                                    Tolak
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Form Tambah User (Pegawai) Cepat */}
                   {onAddStaff && (
@@ -2733,7 +3063,8 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
                                     setNewStaffForm({
                                       ...newStaffForm,
                                       roles: nextRoles,
-                                      role: nextRoles[0]
+                                      role: nextRoles[0],
+                                      isDpj: nextRoles.includes('Dokter') ? newStaffForm.isDpj : false
                                     });
                                   }}
                                   className="w-3.5 h-3.5 accent-violet-600 rounded cursor-pointer"
@@ -2744,6 +3075,90 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
                           })}
                         </div>
                       </div>
+
+                      {/* Kolom Khusus Role: Dokter, Apoteker, Bidan / Perawat */}
+                      {(newStaffForm.roles.includes('Dokter') ||
+                        newStaffForm.roles.includes('Apoteker')) && (
+                        <div className="p-3.5 rounded-2xl bg-emerald-50/70 border border-emerald-200 space-y-2.5">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                            <div>
+                              <label className="block text-[10px] font-extrabold text-emerald-950 uppercase mb-1">
+                                {newStaffForm.roles.includes('Dokter')
+                                  ? 'No. SIP Dokter'
+                                  : 'No. SIP / SIPA Apoteker'}
+                              </label>
+                              <input
+                                type="text"
+                                placeholder={
+                                  newStaffForm.roles.includes('Dokter')
+                                    ? 'Contoh: SIP/2025/001-KNA'
+                                    : 'Contoh: 1993/SIPA/MSJ/2025'
+                                }
+                                value={newStaffForm.sipNumber}
+                                onChange={(e) =>
+                                  setNewStaffForm({ ...newStaffForm, sipNumber: e.target.value })
+                                }
+                                className="w-full p-2 border border-emerald-300 rounded-xl font-mono text-xs font-bold bg-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-extrabold text-emerald-950 uppercase mb-1">
+                                {newStaffForm.roles.includes('Dokter')
+                                  ? 'No. E-STR Dokter'
+                                  : 'No. E-STR Apoteker'}
+                              </label>
+                              <input
+                                type="text"
+                                placeholder="Masukkan Nomor E-STR"
+                                value={newStaffForm.estrNumber}
+                                onChange={(e) =>
+                                  setNewStaffForm({ ...newStaffForm, estrNumber: e.target.value })
+                                }
+                                className="w-full p-2 border border-emerald-300 rounded-xl font-mono text-xs font-bold bg-white"
+                              />
+                            </div>
+                          </div>
+
+                          {newStaffForm.roles.includes('Dokter') && (
+                            <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-white border border-emerald-300 cursor-pointer select-none">
+                              <input
+                                type="checkbox"
+                                checked={newStaffForm.isDpj}
+                                onChange={(e) =>
+                                  setNewStaffForm({ ...newStaffForm, isDpj: e.target.checked })
+                                }
+                                className="w-4 h-4 mt-0.5 accent-emerald-600 rounded cursor-pointer"
+                              />
+                              <div>
+                                <span className="block font-extrabold text-emerald-950 text-[11px]">
+                                  Dokter Penanggung Jawab (DPJ)
+                                </span>
+                                <span className="block text-[10px] text-slate-600">
+                                  Jika dicentang, data dokter (Nama, No. SIP, No. E-STR, Kontak) otomatis tersimpan ke Profil DPJ.
+                                </span>
+                              </div>
+                            </label>
+                          )}
+                        </div>
+                      )}
+
+                      {(newStaffForm.roles.includes('Perawat / Bidan') ||
+                        newStaffForm.roles.includes('Perawat / Nakes Lapangan')) && (
+                        <div className="p-3.5 rounded-2xl bg-sky-50/70 border border-sky-200">
+                          <label className="block text-[10px] font-extrabold text-sky-950 uppercase mb-1">
+                            No. SIPB / E-STR (Bidan / Perawat)
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="Masukkan Nomor SIPB atau E-STR Bidan / Perawat"
+                            value={newStaffForm.sipbNumber}
+                            onChange={(e) =>
+                              setNewStaffForm({ ...newStaffForm, sipbNumber: e.target.value })
+                            }
+                            className="w-full p-2 border border-sky-300 rounded-xl font-mono text-xs font-bold bg-white"
+                          />
+                        </div>
+                      )}
 
                       <div className="flex justify-end">
                         <button
@@ -2795,6 +3210,10 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
                                     type="checkbox"
                                     checked={st.status === 'Aktif'}
                                     onChange={(e) => {
+                                      if (e.target.checked && st.status === 'Menunggu Validasi') {
+                                        handleApprovePendingStaff(st);
+                                        return;
+                                      }
                                       onUpdateStaff?.({
                                         ...st,
                                         status: e.target.checked ? 'Aktif' : 'Non-Aktif'
@@ -2816,6 +3235,8 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
                                       className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
                                         st.status === 'Aktif'
                                           ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                          : st.status === 'Menunggu Validasi'
+                                          ? 'bg-amber-100 text-amber-900 border border-amber-300'
                                           : 'bg-slate-100 text-slate-500 border border-slate-200'
                                       }`}
                                     >
@@ -2831,6 +3252,11 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
                                         <ShieldCheck className="w-3 h-3 text-amber-700" /> Akses Penuh (APJ / Owner)
                                       </span>
                                     )}
+                                    {st.isDpj && activeRoles.includes('Dokter') && (
+                                      <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-300 text-[10px] font-extrabold">
+                                        DPJ Klinis
+                                      </span>
+                                    )}
                                   </div>
                                   <p className="text-[11px] text-slate-500 mt-0.5">
                                     Kontak: <span className="font-mono">{st.phone}</span> · Peran Aktif:{' '}
@@ -2838,11 +3264,37 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
                                     <span className="text-violet-700 font-bold">
                                       {activePerms.length} Modul Hak Akses Aktif
                                     </span>
+                                    {st.sipNumber && (
+                                      <>
+                                        {' · '}SIP: <span className="font-mono font-bold text-slate-700">{st.sipNumber}</span>
+                                      </>
+                                    )}
+                                    {st.estrNumber && (
+                                      <>
+                                        {' · '}E-STR: <span className="font-mono font-bold text-slate-700">{st.estrNumber}</span>
+                                      </>
+                                    )}
+                                    {st.sipbNumber && (
+                                      <>
+                                        {' · '}SIPB/E-STR: <span className="font-mono font-bold text-slate-700">{st.sipbNumber}</span>
+                                      </>
+                                    )}
                                   </p>
                                 </div>
                               </div>
 
                               <div className="flex items-center gap-2 flex-wrap">
+                                {st.status === 'Menunggu Validasi' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleApprovePendingStaff(st)}
+                                    className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-[11px] flex items-center gap-1 shadow-xs cursor-pointer transition"
+                                    title="Validasi & Aktifkan akun agar pegawai dapat login"
+                                  >
+                                    <CheckCircle className="w-3.5 h-3.5" />
+                                    <span>Validasi &amp; Aktifkan</span>
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   onClick={() =>
@@ -2942,7 +3394,26 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
                                     </select>
                                   </div>
                                 </div>
-                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
+                                  <div>
+                                    <label className="block text-[10px] font-bold text-slate-600 uppercase mb-1">
+                                      Status Akun
+                                    </label>
+                                    <select
+                                      value={editStaffForm.status}
+                                      onChange={(e) =>
+                                        setEditStaffForm({
+                                          ...editStaffForm,
+                                          status: e.target.value as StaffStatus
+                                        })
+                                      }
+                                      className="w-full p-2 border border-slate-300 rounded-xl font-bold bg-white"
+                                    >
+                                      <option value="Aktif">Aktif (Dapat Login)</option>
+                                      <option value="Menunggu Validasi">Menunggu Validasi</option>
+                                      <option value="Non-Aktif">Non-Aktif (Terkunci)</option>
+                                    </select>
+                                  </div>
                                   <div>
                                     <label className="block text-[10px] font-bold text-slate-600 uppercase mb-1">
                                       NPWP / NIK (PPh 21)
@@ -2997,6 +3468,87 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
                                     </select>
                                   </div>
                                 </div>
+                                {(activeRoles.includes('Dokter') ||
+                                  activeRoles.includes('Apoteker')) && (
+                                  <div className="p-3 bg-white rounded-xl border border-emerald-200 space-y-2">
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                                      <div>
+                                        <label className="block text-[10px] font-bold text-emerald-900 uppercase mb-1">
+                                          {activeRoles.includes('Dokter')
+                                            ? 'No. SIP Dokter'
+                                            : 'No. SIP / SIPA Apoteker'}
+                                        </label>
+                                        <input
+                                          type="text"
+                                          placeholder="Nomor SIP"
+                                          value={editStaffForm.sipNumber}
+                                          onChange={(e) =>
+                                            setEditStaffForm({
+                                              ...editStaffForm,
+                                              sipNumber: e.target.value
+                                            })
+                                          }
+                                          className="w-full p-2 border border-slate-300 rounded-xl font-mono text-xs bg-white"
+                                        />
+                                      </div>
+                                      <div>
+                                        <label className="block text-[10px] font-bold text-emerald-900 uppercase mb-1">
+                                          No. E-STR
+                                        </label>
+                                        <input
+                                          type="text"
+                                          placeholder="Nomor E-STR"
+                                          value={editStaffForm.estrNumber}
+                                          onChange={(e) =>
+                                            setEditStaffForm({
+                                              ...editStaffForm,
+                                              estrNumber: e.target.value
+                                            })
+                                          }
+                                          className="w-full p-2 border border-slate-300 rounded-xl font-mono text-xs bg-white"
+                                        />
+                                      </div>
+                                    </div>
+                                    {activeRoles.includes('Dokter') && (
+                                      <label className="flex items-center gap-2 cursor-pointer select-none pt-1">
+                                        <input
+                                          type="checkbox"
+                                          checked={editStaffForm.isDpj}
+                                          onChange={(e) =>
+                                            setEditStaffForm({
+                                              ...editStaffForm,
+                                              isDpj: e.target.checked
+                                            })
+                                          }
+                                          className="w-3.5 h-3.5 accent-emerald-600 rounded cursor-pointer"
+                                        />
+                                        <span className="text-[11px] font-bold text-emerald-950">
+                                          Dokter Penanggung Jawab (DPJ) — Otomatis simpan ke Profil DPJ
+                                        </span>
+                                      </label>
+                                    )}
+                                  </div>
+                                )}
+                                {(activeRoles.includes('Perawat / Bidan') ||
+                                  activeRoles.includes('Perawat / Nakes Lapangan')) && (
+                                  <div className="p-3 bg-white rounded-xl border border-sky-200">
+                                    <label className="block text-[10px] font-bold text-sky-900 uppercase mb-1">
+                                      No. SIPB / E-STR
+                                    </label>
+                                    <input
+                                      type="text"
+                                      placeholder="Nomor SIPB / E-STR"
+                                      value={editStaffForm.sipbNumber}
+                                      onChange={(e) =>
+                                        setEditStaffForm({
+                                          ...editStaffForm,
+                                          sipbNumber: e.target.value
+                                        })
+                                      }
+                                      className="w-full p-2 border border-slate-300 rounded-xl font-mono text-xs bg-white"
+                                    />
+                                  </div>
+                                )}
                                 <div className="flex justify-end gap-2">
                                   <button
                                     type="button"

@@ -12,7 +12,8 @@ import {
   FlaskConical,
   RotateCcw,
   Menu,
-  X
+  X,
+  Bell
 } from 'lucide-react';
 import { Branch, Staff, StaffRole, getStaffActiveRoles, isOwnerAdminRole } from '../types';
 
@@ -33,6 +34,8 @@ interface HeaderProps {
   onOpenSettings?: (tab?: 'apotek' | 'apj' | 'dpj' | 'pegawai') => void;
   pendingShiftApprovalCount?: number;
   onNavigateToCashierShiftApproval?: () => void;
+  pendingStaffValidationCount?: number;
+  onOpenStaffValidation?: () => void;
   isDemoMode?: boolean;
   onResetDemo?: () => void;
   onExitDemo?: () => void;
@@ -59,6 +62,8 @@ export const Header: React.FC<HeaderProps> = React.memo(({
   onOpenSettings,
   pendingShiftApprovalCount = 0,
   onNavigateToCashierShiftApproval,
+  pendingStaffValidationCount = 0,
+  onOpenStaffValidation,
   isDemoMode = false,
   onResetDemo,
   onExitDemo,
@@ -196,6 +201,20 @@ export const Header: React.FC<HeaderProps> = React.memo(({
 
       {/* Zone 3: Demo Controls, Mobile Mode Toggle, Logged-in User Display & Settings */}
       <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+        {hasSuperAdminRole && pendingStaffValidationCount > 0 && (
+          <button
+            type="button"
+            onClick={onOpenStaffValidation || (() => onOpenSettings?.('pegawai'))}
+            title={`${pendingStaffValidationCount} pegawai baru menunggu validasi APJ / Owner`}
+            className="flex items-center justify-center gap-1.5 min-h-[38px] px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-extrabold bg-amber-100 hover:bg-amber-200 text-amber-950 border border-amber-400 transition-all shadow-xs cursor-pointer whitespace-nowrap"
+          >
+            <Bell className="w-4 h-4 text-amber-700 shrink-0 animate-bounce" />
+            <span className="hidden sm:inline">Validasi Pegawai</span>
+            <span className="px-1.5 py-0.5 rounded-full bg-rose-600 text-white text-[10px] font-black leading-none">
+              {pendingStaffValidationCount}
+            </span>
+          </button>
+        )}
         {isDemoMode && onResetDemo && (
           <button
             type="button"

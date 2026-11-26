@@ -111,7 +111,8 @@ import {
   DrugInteractionRecord,
   PortalActivityEvent,
   StaffAttendanceRecord,
-  StaffFeeLedgerEntry
+  StaffFeeLedgerEntry,
+  DPJProfile
 } from './types';
 import { INITIAL_INTERAKSI_OBAT } from './data/drugInteractions';
 import { RoleAccessProvider } from './utils/roleAccess';
@@ -137,7 +138,8 @@ import {
   getSavedAPJProfile,
   getSavedDPJProfile,
   applyRemoteFacilityProfiles,
-  formatPharmacyAddress
+  formatPharmacyAddress,
+  syncFacilityProfileToServer
 } from './components/PharmacySettingsModal';
 
 import type { ConvertMitraOrderOptions } from './components/MitraOrdersView';
@@ -174,6 +176,7 @@ const DatabaseBackupView = lazy(() => import('./components/DatabaseBackupView').
 const PublicPatientRegistration = lazy(() => import('./components/PublicPatientRegistration').then((m) => ({ default: m.PublicPatientRegistration })));
 const PublicMitraPortalView = lazy(() => import('./components/PublicMitraPortalView').then((m) => ({ default: m.PublicMitraPortalView })));
 const UnifiedCustomerPortalView = lazy(() => import('./components/UnifiedCustomerPortalView').then((m) => ({ default: m.UnifiedCustomerPortalView })));
+const PublicStaffRegistrationView = lazy(() => import('./components/PublicStaffRegistrationView').then((m) => ({ default: m.PublicStaffRegistrationView })));
 const PortalQRGeneratorModal = lazy(() => import('./components/PortalQRGeneratorModal').then((m) => ({ default: m.PortalQRGeneratorModal })));
 const MitraOrdersView = lazy(() => import('./components/MitraOrdersView').then((m) => ({ default: m.MitraOrdersView })));
 const DutyScheduleView = lazy(() => import('./components/DutyScheduleView').then((m) => ({ default: m.DutyScheduleView })));
@@ -404,7 +407,19 @@ import {
   PORTAL_ACTIVITY_CHANNEL_NAME,
   PORTAL_ACTIVITY_STORAGE_KEY
 } from './utils/portalActivityLogger';
-import { Lock, ShieldCheck, KeyRound, IdCard, User, AlertCircle, CheckCircle, Globe, Store, FlaskConical, RotateCcw, Copy, Check, LogOut, Sparkles, Siren, Volume2, VolumeX, Eye, FolderArchive, X, QrCode, LogIn } from 'lucide-react';
+import { Lock, ShieldCheck, KeyRound, IdCard, User, AlertCircle, CheckCircle, Globe, Store, FlaskConical, RotateCcw, Copy, Check, LogOut, Sparkles, Siren, Volume2, VolumeX, Eye, FolderArchive, X, QrCode, LogIn, UserPlus, ExternalLink, Bell, Clock } from 'lucide-react';
+import {
+  RBAC_BROADCAST_CHANNEL_BASE,
+  ROLE_PERMISSIONS_UPDATED_EVENT,
+  generateNextStaffId,
+  getSavedRolePermissions,
+  getStaffRegistrationShareUrl,
+  normalizeRolePermissionsMap,
+  reconcileStaffPermissionsWithRoleChange,
+  resolveRoleDefaultPermissions,
+  saveRolePermissionsLocally,
+  saveStaffListLocally
+} from './utils/staffRegistrationHelper';
 
 const stripTitles = (name: string): string => {
   return name
@@ -671,27 +686,12 @@ export default function App() {
   });
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<'apotek' | 'apj' | 'dpj' | 'pegawai'>('apotek');
+  const [confirmRejectPendingStaffId, setConfirmRejectPendingStaffId] = useState<string | null>(null);
+  const [staffValidationToast, setStaffValidationToast] = useState<string | null>(null);
 
-  const [rolePermissions, setRolePermissions] = useState<Record<string, string[]>>(() => {
-    const saved = demoGetItem('latisha_role_permissions');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved) as Record<string, string[]>;
-        if (parsed && typeof parsed === 'object') {
-          const normalized: Record<string, string[]> = { ...DEFAULT_ROLE_PERMISSIONS, ...parsed };
-          if (normalized['Super Admin / APJ'] && !normalized['APJ / Owner']) {
-            normalized['APJ / Owner'] = normalized['Super Admin / APJ'];
-          }
-          delete normalized['Super Admin / APJ'];
-          normalized['APJ / Owner'] = DEFAULT_ROLE_PERMISSIONS['APJ / Owner'];
-          return normalized;
-        }
-      } catch (e) {
-        return DEFAULT_ROLE_PERMISSIONS;
-      }
-    }
-    return DEFAULT_ROLE_PERMISSIONS;
-  });
+  const [rolePermissions, setRolePermissions] = useState<Record<string, string[]>>(() =>
+    getSavedRolePermissions()
+  );
 
   // Core Data State (Loaded from LocalStorage if available, with AI dummy simulation purged)
   const [branches, setBranches] = useState<Branch[]>(() => {
@@ -1448,6 +1448,21 @@ export default function App() {
   });
 
   const [showQrPortalModal, setShowQrPortalModal] = useState<boolean>(false);
+  const [copiedStaffRegUrl, setCopiedStaffRegUrl] = useState<boolean>(false);
+  const [showStaffRegistration, setShowStaffRegistration] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      const search = window.location.search || '';
+      const pathname = window.location.pathname || '';
+      const hash = window.location.hash || '';
+      const sp = new URLSearchParams(search);
+      return (
+        sp.get('view')?.toLowerCase() === 'registrasi-pegawai' ||
+        pathname.includes('/registrasi-pegawai') ||
+        hash.includes('registrasi-pegawai')
+      );
+    }
+    return false;
+  });
 
   const [showPublicPortal, setShowPublicPortal] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
@@ -2374,10 +2389,13 @@ export default function App() {
       getSavedPharmacyProfile();
     } catch {}
 
-    // 0. Initial Inbound Sync: Pull Profil Apotek, APJ & DPJ dari Supabase
+    // 0. Initial Inbound Sync: Pull Profil Apotek, APJ, DPJ & Standar Hak Akses Peran dari Supabase
     fetchFacilityProfilesFromSupabase().then((res) => {
       if (res.data) {
         const applied = applyRemoteFacilityProfiles(res.data);
+        if (applied.rolePermissions) {
+          setRolePermissions(applied.rolePermissions);
+        }
         if (applied.changed) {
           syncAppStatesFromProfiles();
         }
@@ -2385,7 +2403,8 @@ export default function App() {
         syncFacilityProfilesToSupabase({
           pharmacy: getSavedPharmacyProfile(),
           apj: getSavedAPJProfile(),
-          dpj: getSavedDPJProfile()
+          dpj: getSavedDPJProfile(),
+          rolePermissions: getSavedRolePermissions()
         });
       }
     });
@@ -2488,13 +2507,22 @@ export default function App() {
         }
         const remoteClean = res.data.filter((s) => s.id && !deletedStaffSet.has(String(s.id).trim()));
         if (remoteClean.length > 0) {
+          const pendingSyncStaffSet = getPendingSyncIdsSet('staff');
+          markInitialCloudSyncCompleted('staff');
           setStaffList((prev) => {
             const map = new Map<string, Staff>();
-            prev
-              .filter((s) => s.id && !deletedStaffSet.has(String(s.id).trim()))
-              .forEach((s) => map.set(s.id, ensurePrimaryOwnerStaffRole(s).staff));
             remoteClean.forEach((s) => map.set(s.id, ensurePrimaryOwnerStaffRole(s).staff));
-            return Array.from(map.values());
+            prev
+              .filter(
+                (s) =>
+                  s.id &&
+                  !deletedStaffSet.has(String(s.id).trim()) &&
+                  pendingSyncStaffSet.has(String(s.id).trim())
+              )
+              .forEach((s) => map.set(s.id, ensurePrimaryOwnerStaffRole(s).staff));
+            const nextList = Array.from(map.values());
+            saveStaffListLocally(nextList, { broadcast: false });
+            return nextList;
           });
         }
       }
@@ -4763,38 +4791,52 @@ export default function App() {
     // 8. Real-time Inbound Sync: Listen to INSERT, UPDATE, DELETE for Pegawai (tombstone-safe)
     const staffChannel = subscribeStaffRealtime(
       (newStaff) => {
-        if (!newStaff?.id || getDeletedIdsSet('staff').has(String(newStaff.id).trim())) return;
+        const cleanId = String(newStaff?.id || '').trim();
+        if (!cleanId) return;
+        if (getPendingDeleteIds('staff').includes(cleanId)) return;
+        markIdsPendingSync('staff', [cleanId]);
+        confirmCloudSync('staff', [cleanId]);
         const safeStaff = ensurePrimaryOwnerStaffRole(newStaff).staff;
         setStaffList((prev) => {
           const exists = prev.some((s) => s.id === safeStaff.id);
-          if (exists) {
-            return prev.map((s) => (s.id === safeStaff.id ? safeStaff : s));
-          }
-          return [...prev, safeStaff];
+          const nextList = exists
+            ? prev.map((s) => (s.id === safeStaff.id ? safeStaff : s))
+            : [...prev, safeStaff];
+          saveStaffListLocally(nextList, { broadcast: false });
+          return nextList;
         });
       },
       (updatedStaff) => {
-        if (!updatedStaff?.id || getDeletedIdsSet('staff').has(String(updatedStaff.id).trim())) return;
+        const cleanId = String(updatedStaff?.id || '').trim();
+        if (!cleanId || getDeletedIdsSet('staff').has(cleanId)) return;
         const safeStaff = ensurePrimaryOwnerStaffRole(updatedStaff).staff;
         setStaffList((prev) => {
           const exists = prev.some((s) => s.id === safeStaff.id);
-          if (exists) {
-            return prev.map((s) => (s.id === safeStaff.id ? safeStaff : s));
-          }
-          return [...prev, safeStaff];
+          const nextList = exists
+            ? prev.map((s) => (s.id === safeStaff.id ? safeStaff : s))
+            : [...prev, safeStaff];
+          saveStaffListLocally(nextList, { broadcast: false });
+          return nextList;
         });
       },
       (deletedId) => {
         const cleanId = String(deletedId || '').trim();
         if (!cleanId) return;
         recordRemoteDeletedId('staff', cleanId);
-        setStaffList((prev) => prev.filter((s) => s.id !== cleanId));
+        setStaffList((prev) => {
+          const nextList = prev.filter((s) => s.id !== cleanId);
+          saveStaffListLocally(nextList, { broadcast: false });
+          return nextList;
+        });
       }
     );
 
-    // 9. Real-time Inbound Sync: Listen to INSERT / UPDATE for Profil Fasilitas (Apotek, APJ & DPJ)
+    // 9. Real-time Inbound Sync: Listen to INSERT / UPDATE for Profil Fasilitas (Apotek, APJ, DPJ & Role Permissions)
     const facilityProfileChannel = subscribeFacilityProfileRealtime((bundle) => {
       const applied = applyRemoteFacilityProfiles(bundle);
+      if (applied.rolePermissions) {
+        setRolePermissions(applied.rolePermissions);
+      }
       if (applied.changed) {
         syncAppStatesFromProfiles();
       }
@@ -5032,6 +5074,70 @@ export default function App() {
           if (feeConfigChannel) activeClient.removeChannel(feeConfigChannel);
           if (feeLedgerChannel) activeClient.removeChannel(feeLedgerChannel);
         }
+    };
+  }, [isDemoActive]);
+
+  // Cross-tab instant sync for staffList & rolePermissions (including ?view=registrasi-pegawai in another tab)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const staffStorageKey = getScopedStorageKey('latisha_staff');
+    const rolePermStorageKey = getScopedStorageKey('latisha_role_permissions');
+
+    const applySyncedStaffList = (parsed: unknown) => {
+      if (!Array.isArray(parsed) || parsed.length === 0) return;
+      const deletedSet = getDeletedIdsSet('staff');
+      const valid = parsed
+        .filter((st: Staff) => st?.id && !deletedSet.has(String(st.id).trim()))
+        .map((st: Staff) => ensurePrimaryOwnerStaffRole(st).staff);
+      if (valid.length > 0) setStaffList(valid);
+    };
+
+    const handleStaffStorageSync = (e: StorageEvent) => {
+      if (e.key === staffStorageKey && e.newValue) {
+        try {
+          applySyncedStaffList(JSON.parse(e.newValue));
+        } catch {}
+      } else if (e.key === rolePermStorageKey && e.newValue) {
+        try {
+          const parsed = JSON.parse(e.newValue);
+          if (parsed && typeof parsed === 'object') {
+            setRolePermissions(normalizeRolePermissionsMap(parsed));
+          }
+        } catch {}
+      }
+    };
+
+    const handleLocalRolePermEvent = (ev: Event) => {
+      const customEv = ev as CustomEvent<Record<string, string[]>>;
+      if (customEv?.detail && typeof customEv.detail === 'object') {
+        setRolePermissions(normalizeRolePermissionsMap(customEv.detail));
+      }
+    };
+
+    let rbacChannel: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        rbacChannel = new BroadcastChannel(getDemoBroadcastChannelName(RBAC_BROADCAST_CHANNEL_BASE));
+        rbacChannel.onmessage = (event: MessageEvent) => {
+          const msg = event?.data as { type?: string; payload?: unknown } | null;
+          if (!msg) return;
+          if (msg.type === 'role_permissions' && msg.payload && typeof msg.payload === 'object') {
+            setRolePermissions(normalizeRolePermissionsMap(msg.payload as Record<string, string[]>));
+          } else if (msg.type === 'staff_list') {
+            applySyncedStaffList(msg.payload);
+          }
+        };
+      } catch {}
+    }
+
+    window.addEventListener('storage', handleStaffStorageSync);
+    window.addEventListener(ROLE_PERMISSIONS_UPDATED_EVENT, handleLocalRolePermEvent);
+    return () => {
+      window.removeEventListener('storage', handleStaffStorageSync);
+      window.removeEventListener(ROLE_PERMISSIONS_UPDATED_EVENT, handleLocalRolePermEvent);
+      try {
+        rbacChannel?.close();
+      } catch {}
     };
   }, [isDemoActive]);
 
@@ -11082,7 +11188,11 @@ export default function App() {
 
   // Active Staff, Effective Doctors, Alarms, and Badge Counts memoized BEFORE early portal/login returns (Rules of Hooks)
   const activeStaffList = useMemo(
-    () => staffList.filter((s) => s.status !== 'Non-Aktif'),
+    () => staffList.filter((s) => s.status === 'Aktif'),
+    [staffList]
+  );
+  const pendingValidationStaff = useMemo(
+    () => staffList.filter((s) => s.status === 'Menunggu Validasi'),
     [staffList]
   );
   const effectiveStaffList = useMemo(
@@ -11281,6 +11391,226 @@ export default function App() {
     );
   }
 
+  const syncDoctorStaffToDpjProfile = async (
+    savedStaff: Staff,
+    liveRolePerms: Record<string, string[]> = rolePermissions
+  ) => {
+    const staffRoles = getStaffActiveRoles(savedStaff, savedStaff.role);
+    if (!staffRoles.includes('Dokter') || savedStaff.isDpj !== true) {
+      return;
+    }
+    const currentDpj = getSavedDPJProfile();
+    const nextDpj: DPJProfile = {
+      ...currentDpj,
+      name: savedStaff.name.trim(),
+      phone: savedStaff.phone.trim() || currentDpj.phone,
+      ...(savedStaff.sipNumber?.trim() ? { sip: savedStaff.sipNumber.trim() } : {}),
+      ...(savedStaff.estrNumber?.trim() ? { idi: savedStaff.estrNumber.trim() } : {})
+    };
+    try {
+      demoSetItem('latisha_dpj_profile', JSON.stringify(nextDpj));
+      syncFacilityProfileToServer({
+        pharmacy: getSavedPharmacyProfile(),
+        apj: getSavedAPJProfile(),
+        dpj: nextDpj
+      });
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('latisha_profile_updated', { detail: { source: 'dpj_registration' } })
+        );
+      }
+    } catch {}
+
+    setDoctors((prev) =>
+      prev.map((doc, idx) =>
+        idx === 0
+          ? {
+              ...doc,
+              name: nextDpj.name,
+              sip: nextDpj.sip || doc.sip,
+              phone: nextDpj.phone || doc.phone,
+              specialization: nextDpj.specialization || doc.specialization,
+              schedule: nextDpj.schedule || doc.schedule
+            }
+          : doc
+      )
+    );
+
+    if (!isDemoActive && !isDemoMode() && getSupabaseClient()) {
+      await syncFacilityProfilesToSupabase({
+        pharmacy: getSavedPharmacyProfile(),
+        apj: getSavedAPJProfile(),
+        dpj: nextDpj,
+        rolePermissions: normalizeRolePermissionsMap(liveRolePerms)
+      }).catch(() => {});
+    }
+  };
+
+  const handleSelfRegisterStaff = async (incomingStaff: Staff): Promise<Staff> => {
+    const finalRole = normalizeStaffRole(incomingStaff.role, 'Apoteker');
+    const liveRolePermissions = demoGetItem('latisha_role_permissions')
+      ? getSavedRolePermissions()
+      : normalizeRolePermissionsMap(rolePermissions);
+    const assignedPermissions = resolveRoleDefaultPermissions(finalRole, liveRolePermissions);
+    const uniqueId = staffList.some((s) => s.id.toLowerCase() === incomingStaff.id.toLowerCase())
+      ? generateNextStaffId(staffList)
+      : incomingStaff.id;
+    const savedStaff = ensurePrimaryOwnerStaffRole({
+      ...incomingStaff,
+      id: uniqueId,
+      role: finalRole,
+      roles: [finalRole],
+      permissions: assignedPermissions,
+      status: 'Menunggu Validasi',
+      registeredAt: incomingStaff.registeredAt || new Date().toISOString()
+    }).staff;
+
+    markIdsPendingSync('staff', [savedStaff.id]);
+    setStaffList((prev) => {
+      if (prev.some((s) => s.id.toLowerCase() === savedStaff.id.toLowerCase())) {
+        return prev;
+      }
+      const nextList = [...prev, savedStaff];
+      saveStaffListLocally(nextList);
+      return nextList;
+    });
+
+    if (!isDemoActive && !isDemoMode()) {
+      await syncStaffToSupabase(savedStaff)
+        .then((res) => {
+          if (res.success) confirmCloudSync('staff', [savedStaff.id]);
+        })
+        .catch(() => {});
+    } else {
+      confirmCloudSync('staff', [savedStaff.id]);
+    }
+
+    addAuditLog(
+      'Pegawai',
+      `Registrasi mandiri akun pegawai ${savedStaff.name} (ID: ${savedStaff.id}, Role: ${savedStaff.role}, ${savedStaff.permissions?.length || 0} modul${savedStaff.isDpj ? ', Calon DPJ' : ''}) — menunggu validasi APJ / Owner`
+    );
+    return savedStaff;
+  };
+
+  const handleValidateStaffAccount = async (targetStaff: Staff) => {
+    const validatedStaff: Staff = ensurePrimaryOwnerStaffRole({
+      ...targetStaff,
+      status: 'Aktif',
+      validatedAt: new Date().toISOString(),
+      validatedBy: userName || 'APJ / Owner'
+    }).staff;
+
+    markIdsPendingSync('staff', [validatedStaff.id]);
+    setStaffList((prev) => {
+      const nextList = prev.map((s) => (s.id === validatedStaff.id ? validatedStaff : s));
+      saveStaffListLocally(nextList);
+      return nextList;
+    });
+
+    if (!isDemoActive && !isDemoMode()) {
+      await syncStaffToSupabase(validatedStaff)
+        .then((res) => {
+          if (res.success) confirmCloudSync('staff', [validatedStaff.id]);
+        })
+        .catch(() => {});
+    } else {
+      confirmCloudSync('staff', [validatedStaff.id]);
+    }
+
+    const validatedRoles = getStaffActiveRoles(validatedStaff, validatedStaff.role);
+    if (validatedRoles.includes('Dokter') && validatedStaff.isDpj === true) {
+      const liveRolePerms = demoGetItem('latisha_role_permissions')
+        ? getSavedRolePermissions()
+        : normalizeRolePermissionsMap(rolePermissions);
+      await syncDoctorStaffToDpjProfile(validatedStaff, liveRolePerms);
+    }
+
+    setConfirmRejectPendingStaffId(null);
+    addAuditLog(
+      'Validasi Pegawai',
+      `APJ / Owner (${userName}) memvalidasi & mengaktifkan akun pegawai ${validatedStaff.name} (ID: ${validatedStaff.id}, Role: ${validatedStaff.role}). Pegawai kini dapat login ke sistem.`
+    );
+    setStaffValidationToast(
+      `Akun ${validatedStaff.name} (${validatedStaff.id}) telah divalidasi dan sekarang dapat login ke sistem.`
+    );
+    setTimeout(() => {
+      setStaffValidationToast((prev) =>
+        prev && prev.includes(validatedStaff.id) ? null : prev
+      );
+    }, 5000);
+  };
+
+  const handleRejectPendingStaff = async (targetStaff: Staff) => {
+    const rejectedStaff: Staff = {
+      ...targetStaff,
+      status: 'Non-Aktif',
+      validatedAt: new Date().toISOString(),
+      validatedBy: userName || 'APJ / Owner'
+    };
+
+    markIdsPendingSync('staff', [rejectedStaff.id]);
+    setStaffList((prev) => {
+      const nextList = prev.map((s) => (s.id === rejectedStaff.id ? rejectedStaff : s));
+      saveStaffListLocally(nextList);
+      return nextList;
+    });
+
+    if (!isDemoActive && !isDemoMode()) {
+      await syncStaffToSupabase(rejectedStaff)
+        .then((res) => {
+          if (res.success) confirmCloudSync('staff', [rejectedStaff.id]);
+        })
+        .catch(() => {});
+    } else {
+      confirmCloudSync('staff', [rejectedStaff.id]);
+    }
+
+    setConfirmRejectPendingStaffId(null);
+    addAuditLog(
+      'Validasi Pegawai',
+      `APJ / Owner (${userName}) menolak / menonaktifkan pendaftaran akun pegawai ${rejectedStaff.name} (ID: ${rejectedStaff.id}).`
+    );
+    setStaffValidationToast(
+      `Pendaftaran ${rejectedStaff.name} (${rejectedStaff.id}) ditolak (status Non-Aktif).`
+    );
+    setTimeout(() => {
+      setStaffValidationToast((prev) =>
+        prev && prev.includes(rejectedStaff.id) ? null : prev
+      );
+    }, 4500);
+  };
+
+  if (showStaffRegistration) {
+    return (
+      <Suspense fallback={<TabLoadingFallback />}>
+        <PublicStaffRegistrationView
+          staffList={staffList}
+          branches={branches}
+          rolePermissions={rolePermissions}
+          isDemoSandbox={isDemoActive}
+          onRegisterStaff={handleSelfRegisterStaff}
+          onBackToLogin={(prefillStaff) => {
+            setShowStaffRegistration(false);
+            if (typeof window !== 'undefined') {
+              try {
+                const url = new URL(window.location.href);
+                if (url.searchParams.get('view')?.toLowerCase() === 'registrasi-pegawai') {
+                  url.searchParams.delete('view');
+                  window.history.replaceState({}, '', url.toString());
+                }
+              } catch {}
+            }
+            if (prefillStaff) {
+              setLoginNameInput(prefillStaff.name);
+              setLoginIdInput(prefillStaff.id);
+              setLoginErrorMessage('');
+            }
+          }}
+        />
+      </Suspense>
+    );
+  }
+
   // Login Screen if logged out
   const matchedLoginStaff = verifyStaffCredentials(loginNameInput, loginIdInput, staffList);
 
@@ -11326,7 +11656,13 @@ export default function App() {
                     );
                     return;
                   }
-                  if (matched.status === 'Non-Aktif') {
+                  if (matched.status === 'Menunggu Validasi') {
+                    setLoginErrorMessage(
+                      `Akun pegawai ${matched.name} (${matched.id}) sedang menunggu validasi oleh APJ / Owner. Anda baru dapat login ke sistem setelah data divalidasi.`
+                    );
+                    return;
+                  }
+                  if (matched.status !== 'Aktif') {
                     setLoginErrorMessage(
                       `Akun pegawai ${matched.name} (${matched.id}) saat ini berstatus Non-Aktif. Silakan hubungi APJ / Owner.`
                     );
@@ -11455,7 +11791,11 @@ export default function App() {
                       disabled
                       className={`w-full min-h-[44px] py-2.5 pr-3 pl-9 border rounded-xl font-bold cursor-not-allowed select-none transition text-xs ${
                         matchedLoginStaff
-                          ? 'bg-emerald-50 text-emerald-900 border-emerald-300'
+                          ? matchedLoginStaff.status === 'Aktif'
+                            ? 'bg-emerald-50 text-emerald-900 border-emerald-300'
+                            : matchedLoginStaff.status === 'Menunggu Validasi'
+                            ? 'bg-amber-50 text-amber-900 border-amber-300'
+                            : 'bg-rose-50 text-rose-800 border-rose-200'
                           : loginNameInput.trim() && loginIdInput.trim()
                           ? 'bg-rose-50 text-rose-800 border-rose-200'
                           : 'bg-slate-100 text-slate-500 border-slate-200'
@@ -11463,25 +11803,50 @@ export default function App() {
                     />
                     <ShieldCheck
                       className={`w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 ${
-                        matchedLoginStaff ? 'text-emerald-600' : 'text-slate-400'
+                        matchedLoginStaff
+                          ? matchedLoginStaff.status === 'Aktif'
+                            ? 'text-emerald-600'
+                            : matchedLoginStaff.status === 'Menunggu Validasi'
+                            ? 'text-amber-600'
+                            : 'text-rose-600'
+                          : 'text-slate-400'
                       }`}
                     />
                   </div>
                   {matchedLoginStaff ? (
-                    <div className="mt-1.5 flex items-start gap-1.5 text-[11px] font-bold text-emerald-700">
-                      <CheckCircle className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
-                      <span>
-                        Pegawai terverifikasi: {matchedLoginStaff.name} (
-                        {
-                          resolveStaffEffectivePermissions(
-                            matchedLoginStaff,
-                            matchedLoginStaff.role,
-                            rolePermissions
-                          ).length
-                        }{' '}
-                        Modul Akses)
-                      </span>
-                    </div>
+                    matchedLoginStaff.status === 'Menunggu Validasi' ? (
+                      <div className="mt-1.5 flex items-start gap-1.5 text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-2.5 py-1.5">
+                        <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
+                        <span>
+                          Akun <strong>{matchedLoginStaff.name}</strong> terdaftar namun berstatus{' '}
+                          <strong>Menunggu Validasi APJ / Owner</strong>. Akses login dibuka setelah
+                          data divalidasi.
+                        </span>
+                      </div>
+                    ) : matchedLoginStaff.status !== 'Aktif' ? (
+                      <div className="mt-1.5 flex items-start gap-1.5 text-[11px] font-bold text-rose-700">
+                        <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0 mt-0.5" />
+                        <span>
+                          Akun pegawai {matchedLoginStaff.name} berstatus Non-Aktif. Hubungi APJ /
+                          Owner.
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="mt-1.5 flex items-start gap-1.5 text-[11px] font-bold text-emerald-700">
+                        <CheckCircle className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                        <span>
+                          Pegawai terverifikasi: {matchedLoginStaff.name} (
+                          {
+                            resolveStaffEffectivePermissions(
+                              matchedLoginStaff,
+                              matchedLoginStaff.role,
+                              rolePermissions
+                            ).length
+                          }{' '}
+                          Modul Akses)
+                        </span>
+                      </div>
+                    )
                   ) : loginNameInput.trim() && loginIdInput.trim() ? (
                     <div className="mt-1.5 flex items-start gap-1.5 text-[11px] font-bold text-rose-600">
                       <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0 mt-0.5" />
@@ -11501,6 +11866,37 @@ export default function App() {
                 >
                   Masuk ke Sistem Latisha Farma
                 </button>
+
+                {/* Link Registrasi Akun Pegawai */}
+                <div className="pt-2 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowStaffRegistration(true)}
+                    className="inline-flex items-center justify-center sm:justify-start gap-1.5 py-2 px-3 rounded-xl bg-violet-50 hover:bg-violet-100 text-violet-800 border border-violet-200 font-extrabold text-[11px] transition cursor-pointer"
+                  >
+                    <UserPlus className="w-3.5 h-3.5 text-violet-600 shrink-0" />
+                    <span>Registrasi Akun Pegawai Baru</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const shareUrl = getStaffRegistrationShareUrl(isDemoActive);
+                      navigator.clipboard?.writeText(shareUrl).then(() => {
+                        setCopiedStaffRegUrl(true);
+                        setTimeout(() => setCopiedStaffRegUrl(false), 2200);
+                      });
+                    }}
+                    className="inline-flex items-center justify-center gap-1 py-1.5 px-2.5 text-[11px] font-bold text-slate-600 hover:text-violet-700 hover:bg-slate-50 rounded-lg transition cursor-pointer"
+                    title="Salin link halaman registrasi akun pegawai untuk dibagikan"
+                  >
+                    {copiedStaffRegUrl ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-600" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                    <span>{copiedStaffRegUrl ? 'Link Disalin!' : 'Salin Link Registrasi'}</span>
+                  </button>
+                </div>
               </form>
 
               {/* Right / Secondary Column: Mode Demo & Public / Mitra Portals */}
@@ -11628,6 +12024,15 @@ export default function App() {
                       className="text-emerald-700 hover:text-emerald-900 font-bold hover:underline py-1"
                     >
                       /portal-mitra ↗
+                    </a>
+                    <a
+                      href={`./?view=registrasi-pegawai${isDemoActive ? '&mode=demo' : ''}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-violet-700 hover:text-violet-900 font-bold hover:underline py-1 inline-flex items-center gap-0.5"
+                    >
+                      <span>?view=registrasi-pegawai</span>
+                      <ExternalLink className="w-3 h-3" />
                     </a>
                   </div>
                 </div>
@@ -11766,6 +12171,11 @@ export default function App() {
         }}
         pendingShiftApprovalCount={pendingShiftApprovalCount}
         onNavigateToCashierShiftApproval={() => handleNavigateTab('pos-kasir')}
+        pendingStaffValidationCount={pendingValidationStaff.length}
+        onOpenStaffValidation={() => {
+          setSettingsInitialTab('pegawai');
+          setIsSettingsModalOpen(true);
+        }}
         isDemoMode={isDemoActive}
         onResetDemo={handleResetDemoData}
         onExitDemo={handleExitDemoMode}
@@ -11862,6 +12272,153 @@ export default function App() {
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Notifikasi Validasi Akun Pegawai Baru (Khusus APJ / Owner) */}
+      {isSuperAdminLoggedIn && pendingValidationStaff.length > 0 && (
+        <div
+          role="region"
+          aria-label="Notifikasi validasi akun pegawai baru"
+          className="bg-gradient-to-r from-amber-50 via-amber-100/90 to-orange-50 text-amber-950 border-b-2 border-amber-400 px-3 sm:px-5 py-2.5 shadow-sm z-30 shrink-0"
+        >
+          <div className="max-w-7xl mx-auto space-y-2">
+            {pendingValidationStaff.map((pendingSt, idx) => {
+              const pendingRoles = getStaffActiveRoles(pendingSt, pendingSt.role);
+              const isConfirmingReject = confirmRejectPendingStaffId === pendingSt.id;
+              return (
+                <div
+                  key={pendingSt.id}
+                  className={`flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 ${
+                    idx > 0 ? 'pt-2 border-t border-amber-300/70' : ''
+                  }`}
+                >
+                  <div className="flex items-start sm:items-center gap-2.5 min-w-0">
+                    <span className="p-2 bg-amber-500 text-white rounded-xl shrink-0 shadow-2xs">
+                      <Bell className="w-4 h-4 animate-bounce" />
+                    </span>
+                    <div className="min-w-0 text-xs">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="px-2 py-0.5 rounded-md bg-amber-500 text-white font-black text-[10px] uppercase tracking-wider">
+                          VALIDASI PEGAWAI BARU
+                        </span>
+                        <span className="font-mono font-black text-sky-800 bg-white px-2 py-0.5 rounded border border-sky-300 text-[10px]">
+                          {pendingSt.id}
+                        </span>
+                        <span className="font-black text-xs sm:text-sm text-slate-900">
+                          {pendingSt.name}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-violet-100 text-violet-900 border border-violet-300 font-bold text-[10px]">
+                          {pendingRoles.join(', ')}
+                        </span>
+                        {pendingSt.isDpj && pendingRoles.includes('Dokter') && (
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-300 font-extrabold text-[10px]">
+                            Calon DPJ
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-amber-900 mt-0.5 break-words">
+                        Pegawai mendaftar mandiri dan menunggu validasi APJ / Owner sebelum dapat login ke sistem.
+                        {' · '}WA/HP: <strong className="font-mono">{pendingSt.phone}</strong>
+                        {pendingSt.sipNumber && (
+                          <>
+                            {' · '}SIP: <strong className="font-mono">{pendingSt.sipNumber}</strong>
+                          </>
+                        )}
+                        {pendingSt.estrNumber && (
+                          <>
+                            {' · '}E-STR: <strong className="font-mono">{pendingSt.estrNumber}</strong>
+                          </>
+                        )}
+                        {pendingSt.sipbNumber && (
+                          <>
+                            {' · '}SIPB/E-STR: <strong className="font-mono">{pendingSt.sipbNumber}</strong>
+                          </>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => void handleValidateStaffAccount(pendingSt)}
+                      className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-sm inline-flex items-center gap-1.5 cursor-pointer transition"
+                    >
+                      <CheckCircle className="w-4 h-4" />
+                      <span>Validasi &amp; Aktifkan</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSettingsInitialTab('pegawai');
+                        setIsSettingsModalOpen(true);
+                      }}
+                      className="px-3 py-2 rounded-xl bg-white hover:bg-amber-50 text-amber-950 border border-amber-300 font-bold text-[11px] inline-flex items-center gap-1.5 cursor-pointer transition"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Tinjau Data</span>
+                    </button>
+                    {isConfirmingReject ? (
+                      <div className="inline-flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => void handleRejectPendingStaff(pendingSt)}
+                          className="px-2.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-black text-[11px] cursor-pointer transition"
+                        >
+                          Yakin Tolak
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmRejectPendingStaffId(null)}
+                          className="px-2 py-2 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 font-bold text-[11px] cursor-pointer transition"
+                        >
+                          Batal
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmRejectPendingStaffId(pendingSt.id)}
+                        className="px-2.5 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-[11px] cursor-pointer transition"
+                      >
+                        Tolak
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Toast Konfirmasi Validasi Pegawai (APJ / Owner) */}
+      {isSuperAdminLoggedIn && staffValidationToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-4 left-4 z-50 max-w-md w-[calc(100vw-2rem)] animate-in fade-in slide-in-from-bottom-2"
+        >
+          <div className="rounded-2xl border border-emerald-400 bg-slate-900 text-white shadow-xl p-3.5 flex items-start gap-3 text-xs">
+            <div className="p-2 rounded-xl bg-emerald-500/20 text-emerald-300 shrink-0">
+              <CheckCircle className="w-4 h-4" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="font-black text-xs text-emerald-300">Validasi Pegawai Diperbarui</div>
+              <p className="text-[11px] text-slate-200 mt-0.5 leading-relaxed break-words">
+                {staffValidationToast}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setStaffValidationToast(null)}
+              className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer shrink-0"
+              aria-label="Tutup notifikasi validasi pegawai"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
       )}
@@ -13042,25 +13599,103 @@ export default function App() {
         staffList={staffList}
         branches={branches}
         rolePermissions={rolePermissions}
-        onUpdateRolePermissions={(updated) => {
-          setRolePermissions(updated);
-          addAuditLog('Hak Akses', 'Konfigurasi checkbox hak akses peran diperbarui oleh APJ / Owner.');
+        onUpdateRolePermissions={(updated, changedMeta) => {
+          const normalizedMap = saveRolePermissionsLocally(updated);
+          setRolePermissions(normalizedMap);
+
+          if (changedMeta) {
+            const { nextStaffList, updatedStaffMembers } = reconcileStaffPermissionsWithRoleChange(
+              staffList,
+              normalizedMap,
+              changedMeta
+            );
+            if (updatedStaffMembers.length > 0) {
+              saveStaffListLocally(nextStaffList);
+              setStaffList(nextStaffList);
+              if (!isDemoActive && !isDemoMode()) {
+                updatedStaffMembers.forEach((st) => {
+                  void syncStaffToSupabase(st);
+                });
+              }
+            }
+          }
+
+          if (!isDemoActive && !isDemoMode() && getSupabaseClient()) {
+            void syncFacilityProfilesToSupabase({
+              pharmacy: getSavedPharmacyProfile(),
+              apj: getSavedAPJProfile(),
+              dpj: getSavedDPJProfile(),
+              rolePermissions: normalizedMap
+            });
+          }
+
+          addAuditLog(
+            'Hak Akses',
+            changedMeta
+              ? `Checkbox hak akses modul "${changedMeta.permId}" untuk peran ${changedMeta.role} ${changedMeta.enabled ? 'diaktifkan' : 'dinonaktifkan'} & disinkronkan ke pegawai.`
+              : 'Konfigurasi checkbox hak akses peran diperbarui oleh APJ / Owner.'
+          );
         }}
         onAddStaff={(s) => {
-          setStaffList((prev) => [...prev, s]);
-          syncStaffToSupabase(s);
+          markIdsPendingSync('staff', [s.id]);
+          setStaffList((prev) => {
+            const nextList = [...prev, s];
+            saveStaffListLocally(nextList);
+            return nextList;
+          });
+          syncStaffToSupabase(s)
+            .then((res) => {
+              if (res.success) confirmCloudSync('staff', [s.id]);
+            })
+            .catch(() => {});
           addAuditLog('Pegawai', `Registrasi staf baru ${s.name} (${s.role})`);
         }}
         onUpdateStaff={(updated) => {
-          setStaffList((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
-          syncStaffToSupabase(updated);
-          addAuditLog('Pegawai', `Update peran & hak akses staf ${updated.name} (${updated.role})`);
+          const prevRecord = staffList.find((s) => s.id === updated.id);
+          const becameActive =
+            prevRecord?.status === 'Menunggu Validasi' && updated.status === 'Aktif';
+          const enriched: Staff = becameActive
+            ? {
+                ...updated,
+                validatedAt: updated.validatedAt || new Date().toISOString(),
+                validatedBy: updated.validatedBy || userName || 'APJ / Owner'
+              }
+            : updated;
+          setStaffList((prev) => {
+            const nextList = prev.map((s) => (s.id === enriched.id ? enriched : s));
+            saveStaffListLocally(nextList);
+            return nextList;
+          });
+          syncStaffToSupabase(enriched);
+          if (
+            becameActive &&
+            getStaffActiveRoles(enriched, enriched.role).includes('Dokter') &&
+            enriched.isDpj === true
+          ) {
+            void syncDoctorStaffToDpjProfile(enriched, rolePermissions);
+          }
+          addAuditLog(
+            becameActive ? 'Validasi Pegawai' : 'Pegawai',
+            becameActive
+              ? `APJ / Owner memvalidasi & mengaktifkan akun pegawai ${enriched.name} (${enriched.id}, Role: ${enriched.role})`
+              : `Update peran & hak akses staf ${enriched.name} (${enriched.role})`
+          );
+        }}
+        onValidateStaff={(st) => {
+          void handleValidateStaffAccount(st);
+        }}
+        onRejectStaff={(st) => {
+          void handleRejectPendingStaff(st);
         }}
         onDeleteStaff={(id) => {
           const cleanId = String(id || '').trim();
           if (!cleanId) return;
           markIdsDeleted('staff', [cleanId]);
-          setStaffList((prev) => prev.filter((s) => s.id !== cleanId));
+          setStaffList((prev) => {
+            const nextList = prev.filter((s) => s.id !== cleanId);
+            saveStaffListLocally(nextList);
+            return nextList;
+          });
           if (!isDemoActive && !isDemoMode()) {
             deleteStaffFromSupabase(cleanId)
               .then((res) => {
@@ -13073,6 +13708,7 @@ export default function App() {
           addAuditLog('Pegawai', `Hapus staf ID: ${cleanId}`);
         }}
         onSyncStaffFromSupabase={(newStaffs) => {
+          saveStaffListLocally(newStaffs);
           setStaffList(newStaffs);
           addAuditLog('Pegawai', `Sinkronisasi manual data pegawai dengan Supabase (${newStaffs.length} pegawai)`);
         }}
@@ -13133,9 +13769,19 @@ export default function App() {
                   )
                 );
                 setStaffList((prev) =>
-                  prev.map((s) => (s.id === 'STF-002' ? { ...s, name: parsedDpj.name, phone: parsedDpj.phone || s.phone } : s))
+                  prev.map((s) =>
+                    s.isDpj || s.id === 'STF-002'
+                      ? {
+                          ...s,
+                          name: parsedDpj.name,
+                          phone: parsedDpj.phone || s.phone,
+                          ...(parsedDpj.sip ? { sipNumber: parsedDpj.sip } : {}),
+                          ...(parsedDpj.idi ? { estrNumber: parsedDpj.idi } : {})
+                        }
+                      : s
+                  )
                 );
-                if (currentStaff?.id === 'STF-002') {
+                if (currentStaff?.isDpj || currentStaff?.id === 'STF-002') {
                   setUserName(parsedDpj.name);
                 }
               }

@@ -1,9 +1,11 @@
 import { createClient, SupabaseClient, RealtimeChannel } from '@supabase/supabase-js';
-import { Patient, OnlineRegistration, ICD10Item, Staff, StaffRole, PtkpStatus, StaffTaxCategory, normalizeStaffRole, ensurePrimaryOwnerStaffRole, RMERecord, VitalSign, PrescriptionItem, StaffFeeItem, DutySchedule, Medicine, Mitra, MitraOrder, MitraOrderItem, MitraOrderStatus, MitraPaymentStatus, DrugInteractionRecord, DrugInteractionSeverity, PharmacyProfile, PharmacyBankAccount, APJProfile, DPJProfile, EPrescription, MedicalMorbidityReportRecord, MorbidityTopDiagnosis, Transaction, CartItem, StockMutation, LabTestRecord, LabTestItem, StockOpnameRecord, StockOpnameItemRecord, StockOpnameKind, LiveOpnameItemActivity, Supplier, Branch, StockTransfer, PurchaseInvoice, PurchaseItem, PurchaseOrder, PurchaseOrderItem, SPGroupType, SPPrintLogEntry, DebtPaymentRecord, ReceivablePaymentRecord, CashFlowRecord, SalesDiscount, PromoAd, FeeConfig, TariffItem, DEFAULT_FEE_CONFIG, PayrollOvertimeConfig, DEFAULT_PAYROLL_OVERTIME_CONFIG, MarketingCampaign, MarketingStrategyType, MarketingCampaignStatus, ServiceFeeRole, ServiceFeeType, ServiceFeeRecipientRule, StaffFeeLedgerEntry, StaffFeeLedgerPaymentStatus, WpOpTaxConfig, WpOpTaxScheme, TaxScopeMode, PphMonthlySnapshot, PphAuditEntry, Pph21StaffBreakdown } from '../types';
+import { Patient, OnlineRegistration, ICD10Item, Staff, StaffRole, StaffStatus, PtkpStatus, StaffTaxCategory, normalizeStaffRole, ensurePrimaryOwnerStaffRole, RMERecord, VitalSign, PrescriptionItem, StaffFeeItem, DutySchedule, Medicine, Mitra, MitraOrder, MitraOrderItem, MitraOrderStatus, MitraPaymentStatus, DrugInteractionRecord, DrugInteractionSeverity, PharmacyProfile, PharmacyBankAccount, APJProfile, DPJProfile, EPrescription, MedicalMorbidityReportRecord, MorbidityTopDiagnosis, Transaction, CartItem, StockMutation, LabTestRecord, LabTestItem, StockOpnameRecord, StockOpnameItemRecord, StockOpnameKind, LiveOpnameItemActivity, Supplier, Branch, StockTransfer, PurchaseInvoice, PurchaseItem, PurchaseOrder, PurchaseOrderItem, SPGroupType, SPPrintLogEntry, DebtPaymentRecord, ReceivablePaymentRecord, CashFlowRecord, SalesDiscount, PromoAd, FeeConfig, TariffItem, DEFAULT_FEE_CONFIG, PayrollOvertimeConfig, DEFAULT_PAYROLL_OVERTIME_CONFIG, MarketingCampaign, MarketingStrategyType, MarketingCampaignStatus, ServiceFeeRole, ServiceFeeType, ServiceFeeRecipientRule, StaffFeeLedgerEntry, StaffFeeLedgerPaymentStatus, WpOpTaxConfig, WpOpTaxScheme, TaxScopeMode, PphMonthlySnapshot, PphAuditEntry, Pph21StaffBreakdown } from '../types';
 import { INITIAL_ICD10_LIST, INITIAL_STAFF, INITIAL_DUTY_SCHEDULES, INITIAL_MEDICINES } from '../data/initialData';
 import { resolveGenericDrugName } from '../data/drugInteractions';
 import { isDemoMode, demoGetItem, demoSetItem } from './demoSandbox';
+import { getDeletedIdsSet } from './deletionRegistry';
 import { normalizeServiceFeeRole, normalizeServiceFeeType } from './serviceFeeHelper';
+import { getSavedRolePermissions, normalizeRolePermissionsMap } from './staffRegistrationHelper';
 
 import { CashierShiftSession, CashDenominationItem, CASH_DENOMINATIONS_LIST } from '../types';
 
@@ -2251,25 +2253,44 @@ export function staffToSupabaseRow(st: Staff): Record<string, any> {
   if (st.npwpNik !== undefined) row.npwp_nik = st.npwpNik || null;
   if (st.ptkpStatus !== undefined) row.ptkp_status = st.ptkpStatus || null;
   if (st.taxCategory !== undefined) row.tax_category = st.taxCategory || null;
+  if (st.sipNumber !== undefined) row.no_sip = st.sipNumber || null;
+  if (st.sipbNumber !== undefined) row.no_sipb = st.sipbNumber || null;
+  if (st.estrNumber !== undefined) row.no_estr = st.estrNumber || null;
+  if (st.isDpj !== undefined) row.is_dpj = Boolean(st.isDpj);
+  if (st.registeredAt !== undefined) row.registered_at = st.registeredAt || null;
+  if (st.validatedAt !== undefined) row.validated_at = st.validatedAt || null;
+  if (st.validatedBy !== undefined) row.validated_by = st.validatedBy || null;
   return row;
 }
 
-function stripOptionalStaffTaxCols(row: Record<string, any>): Record<string, any> {
+const OPTIONAL_STAFF_COLS = [
+  'npwp_nik',
+  'ptkp_status',
+  'tax_category',
+  'no_sip',
+  'no_sipb',
+  'no_estr',
+  'is_dpj',
+  'registered_at',
+  'validated_at',
+  'validated_by'
+];
+
+function stripOptionalStaffCols(row: Record<string, any>): Record<string, any> {
   const copy = { ...row };
-  delete copy.npwp_nik;
-  delete copy.ptkp_status;
-  delete copy.tax_category;
+  for (const col of OPTIONAL_STAFF_COLS) {
+    delete copy[col];
+  }
   return copy;
 }
 
-function isMissingStaffTaxColError(error: any): boolean {
-  if (!error) return false;
+function findMissingOptionalStaffCol(error: any, row: Record<string, any>): string | undefined {
+  if (!error) return undefined;
   const msg = String(error.message || '').toLowerCase();
-  return (
-    msg.includes('npwp_nik') ||
-    msg.includes('ptkp_status') ||
-    msg.includes('tax_category')
-  );
+  const isSchemaError =
+    msg.includes('column') || msg.includes('schema cache') || error.code === 'PGRST204';
+  if (!isSchemaError) return undefined;
+  return OPTIONAL_STAFF_COLS.find((col) => col in row && msg.includes(col));
 }
 
 // Helper: Convert Supabase row to local Staff format
@@ -2304,6 +2325,15 @@ export function supabaseRowToStaff(row: Record<string, any>): Staff {
   const taxCategory: StaffTaxCategory | undefined =
     rawTaxCat === 'pegawai_tetap' || rawTaxCat === 'bukan_pegawai' ? rawTaxCat : undefined;
 
+  const rawStatus = String(row.status || 'Aktif').trim();
+  const normalizedStatus: StaffStatus =
+    rawStatus === 'Non-Aktif'
+      ? 'Non-Aktif'
+      : rawStatus === 'Menunggu Validasi'
+      ? 'Menunggu Validasi'
+      : 'Aktif';
+
+  const rawIsDpj = row.is_dpj ?? row.isDpj;
   const baseStaff: Staff = {
     id: row.id_pegawai || row.id || `STF-${Date.now().toString().slice(-4)}`,
     name: row.nama_lengkap || row.nama || row.name || 'Tanpa Nama',
@@ -2311,11 +2341,24 @@ export function supabaseRowToStaff(row: Record<string, any>): Staff {
     roles: normalizedRoles,
     permissions,
     phone: row.no_hp || row.phone || row.kontak || '',
-    status: (row.status || 'Aktif') as 'Aktif' | 'Non-Aktif',
+    status: normalizedStatus,
     branchId: row.branch_id || row.branchId || 'BR-01',
     npwpNik: row.npwp_nik || row.npwpNik ? String(row.npwp_nik || row.npwpNik) : undefined,
     ptkpStatus: (row.ptkp_status || row.ptkpStatus) as PtkpStatus | undefined,
-    taxCategory
+    taxCategory,
+    sipNumber: row.no_sip || row.sipNumber ? String(row.no_sip || row.sipNumber) : undefined,
+    sipbNumber: row.no_sipb || row.sipbNumber ? String(row.no_sipb || row.sipbNumber) : undefined,
+    estrNumber: row.no_estr || row.estrNumber ? String(row.no_estr || row.estrNumber) : undefined,
+    ...(typeof rawIsDpj === 'boolean' ? { isDpj: rawIsDpj } : {}),
+    ...(row.registered_at || row.registeredAt
+      ? { registeredAt: String(row.registered_at || row.registeredAt) }
+      : {}),
+    ...(row.validated_at || row.validatedAt
+      ? { validatedAt: String(row.validated_at || row.validatedAt) }
+      : {}),
+    ...(row.validated_by || row.validatedBy
+      ? { validatedBy: String(row.validated_by || row.validatedBy) }
+      : {})
   };
 
   return ensurePrimaryOwnerStaffRole(baseStaff).staff;
@@ -2329,17 +2372,20 @@ export async function seedStaffToSupabase(): Promise<{ success: boolean; count: 
   }
 
   const { staffTable } = getSupabaseConfig();
-  const rows = INITIAL_STAFF.map(staffToSupabaseRow);
+  const deletedStaffSet = getDeletedIdsSet('staff');
+  const seedCandidates = INITIAL_STAFF.filter((s) => !deletedStaffSet.has(s.id));
+  const targetSeed = seedCandidates.length > 0 ? seedCandidates : [INITIAL_STAFF[0]];
+  const rows = targetSeed.map(staffToSupabaseRow);
 
   try {
     let { error } = await client
       .from(staffTable)
       .upsert(rows, { onConflict: 'id' });
 
-    if (error && isMissingStaffTaxColError(error)) {
+    if (error && findMissingOptionalStaffCol(error, rows[0] || {})) {
       const retry = await client
         .from(staffTable)
-        .upsert(rows.map(stripOptionalStaffTaxCols), { onConflict: 'id' });
+        .upsert(rows.map(stripOptionalStaffCols), { onConflict: 'id' });
       error = retry.error;
     }
 
@@ -2364,7 +2410,9 @@ export async function fetchStaffFromSupabase(): Promise<{ data: Staff[] | null; 
   }
 
   const { staffTable } = getSupabaseConfig();
-  const fallbackStaff = INITIAL_STAFF;
+  const deletedStaffSet = getDeletedIdsSet('staff');
+  const seedCandidates = INITIAL_STAFF.filter((s) => !deletedStaffSet.has(s.id));
+  const fallbackStaff = seedCandidates.length > 0 ? seedCandidates : [INITIAL_STAFF[0]];
   try {
     const { data, error } = await client
       .from(staffTable)
@@ -2431,15 +2479,23 @@ export async function syncStaffToSupabase(st: Staff): Promise<{ success: boolean
   const row = staffToSupabaseRow(st);
 
   try {
-    let { error } = await client
-      .from(staffTable)
-      .upsert(row, { onConflict: 'id' });
+    let currentRow = { ...row };
+    let error: any = null;
 
-    if (error && isMissingStaffTaxColError(error)) {
-      const retry = await client
+    for (let attempt = 0; attempt <= OPTIONAL_STAFF_COLS.length; attempt++) {
+      const res = await client
         .from(staffTable)
-        .upsert(stripOptionalStaffTaxCols(row), { onConflict: 'id' });
-      error = retry.error;
+        .upsert(currentRow, { onConflict: 'id' });
+      error = res.error;
+      if (!error) break;
+      const missingCol = findMissingOptionalStaffCol(error, currentRow);
+      if (missingCol) {
+        const nextRow = { ...currentRow };
+        delete nextRow[missingCol];
+        currentRow = nextRow;
+        continue;
+      }
+      break;
     }
 
     if (error) {
@@ -2550,11 +2606,18 @@ CREATE TABLE IF NOT EXISTS pegawai (
   peran_multi JSONB, -- Array role tambahan
   hak_akses JSONB,  -- Array permission modul
   no_hp VARCHAR(50),
-  status VARCHAR(20) DEFAULT 'Aktif',
+  status VARCHAR(30) DEFAULT 'Aktif',
   branch_id VARCHAR(50) DEFAULT 'BR-01',
   npwp_nik VARCHAR(40),
   ptkp_status VARCHAR(10) DEFAULT 'TK/0',
   tax_category VARCHAR(30) DEFAULT 'pegawai_tetap',
+  no_sip VARCHAR(120),
+  no_sipb VARCHAR(120),
+  no_estr VARCHAR(120),
+  is_dpj BOOLEAN DEFAULT FALSE,
+  registered_at TIMESTAMPTZ,
+  validated_at TIMESTAMPTZ,
+  validated_by VARCHAR(255),
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -2562,6 +2625,13 @@ CREATE TABLE IF NOT EXISTS pegawai (
 ALTER TABLE pegawai ADD COLUMN IF NOT EXISTS npwp_nik VARCHAR(40);
 ALTER TABLE pegawai ADD COLUMN IF NOT EXISTS ptkp_status VARCHAR(10) DEFAULT 'TK/0';
 ALTER TABLE pegawai ADD COLUMN IF NOT EXISTS tax_category VARCHAR(30) DEFAULT 'pegawai_tetap';
+ALTER TABLE pegawai ADD COLUMN IF NOT EXISTS no_sip VARCHAR(120);
+ALTER TABLE pegawai ADD COLUMN IF NOT EXISTS no_sipb VARCHAR(120);
+ALTER TABLE pegawai ADD COLUMN IF NOT EXISTS no_estr VARCHAR(120);
+ALTER TABLE pegawai ADD COLUMN IF NOT EXISTS is_dpj BOOLEAN DEFAULT FALSE;
+ALTER TABLE pegawai ADD COLUMN IF NOT EXISTS registered_at TIMESTAMPTZ;
+ALTER TABLE pegawai ADD COLUMN IF NOT EXISTS validated_at TIMESTAMPTZ;
+ALTER TABLE pegawai ADD COLUMN IF NOT EXISTS validated_by VARCHAR(255);
 
 -- Index untuk pencarian cepat
 CREATE INDEX IF NOT EXISTS idx_pegawai_id ON pegawai (id);
@@ -6038,6 +6108,7 @@ export interface FacilityProfileBundle {
   pharmacy?: Partial<PharmacyProfile>;
   apj?: Partial<APJProfile>;
   dpj?: Partial<DPJProfile>;
+  rolePermissions?: Record<string, string[]>;
   updatedAt?: string;
 }
 
@@ -6077,8 +6148,12 @@ export function facilityProfilesToSupabaseRow(bundle: {
   pharmacy: PharmacyProfile;
   apj: APJProfile;
   dpj: DPJProfile;
+  rolePermissions?: Record<string, string[]>;
 }): Record<string, any> {
   const { pharmacy, apj, dpj } = bundle;
+  const resolvedRolePermissions = normalizeRolePermissionsMap(
+    bundle.rolePermissions || getSavedRolePermissions()
+  );
   const nowIso = new Date().toISOString();
   const cleanPharmacyName = sanitizeLegacyTenantFacilityText(pharmacy.name || '');
   const cleanHeaderNote = sanitizeLegacyTenantFacilityText(pharmacy.headerNote || '');
@@ -6146,7 +6221,8 @@ export function facilityProfilesToSupabaseRow(bundle: {
       stra: apj.stra || '',
       phone: apj.phone || '',
       schedule: apj.schedule || '',
-      notes: apj.notes || ''
+      notes: apj.notes || '',
+      _rolePermissions: resolvedRolePermissions
     },
     dpj_nama: dpj.name || '',
     dpj_sip: dpj.sip || '',
@@ -6191,9 +6267,28 @@ export function supabaseRowToFacilityProfiles(row: Record<string, any>): Facilit
     return undefined;
   };
 
-  const pharmJson = parseJsonMaybe<Partial<PharmacyProfile>>(pickDefined('pharmacy_json', 'profil_apotek'));
-  const apjJson = parseJsonMaybe<Partial<APJProfile>>(pickDefined('apj_json', 'profil_apj'));
+  const rawPharmJson = parseJsonMaybe<Record<string, any>>(pickDefined('pharmacy_json', 'profil_apotek'));
+  const rawApjJson = parseJsonMaybe<Record<string, any>>(pickDefined('apj_json', 'profil_apj'));
   const dpjJson = parseJsonMaybe<Partial<DPJProfile>>(pickDefined('dpj_json', 'profil_dpj'));
+
+  const rawRolePermissions =
+    (rawApjJson && typeof rawApjJson._rolePermissions === 'object' ? rawApjJson._rolePermissions : undefined) ||
+    (rawPharmJson && typeof rawPharmJson._rolePermissions === 'object' ? rawPharmJson._rolePermissions : undefined) ||
+    parseJsonMaybe<Record<string, string[]>>(pickDefined('role_permissions', 'hak_akses_peran'));
+
+  let pharmJson: Partial<PharmacyProfile> | null = rawPharmJson as Partial<PharmacyProfile> | null;
+  if (rawPharmJson && '_rolePermissions' in rawPharmJson) {
+    const cleanPharm = { ...rawPharmJson };
+    delete cleanPharm._rolePermissions;
+    pharmJson = cleanPharm as Partial<PharmacyProfile>;
+  }
+
+  let apjJson: Partial<APJProfile> | null = rawApjJson as Partial<APJProfile> | null;
+  if (rawApjJson && '_rolePermissions' in rawApjJson) {
+    const cleanApj = { ...rawApjJson };
+    delete cleanApj._rolePermissions;
+    apjJson = cleanApj as Partial<APJProfile>;
+  }
 
   const rawBanks = parseJsonMaybe<PharmacyBankAccount[]>(pickDefined('rekening_bank', 'bank_accounts'))
     || (Array.isArray(pharmJson?.bankAccounts) ? pharmJson.bankAccounts : undefined);
@@ -6256,6 +6351,7 @@ export function supabaseRowToFacilityProfiles(row: Record<string, any>): Facilit
     pharmacy,
     apj,
     dpj,
+    ...(rawRolePermissions ? { rolePermissions: normalizeRolePermissionsMap(rawRolePermissions) } : {}),
     updatedAt: pickNonEmptyString('updated_at', 'created_at')
   };
 }
@@ -6319,7 +6415,12 @@ export async function fetchFacilityProfilesFromSupabase(timeoutMs = 8000): Promi
 }
 
 export async function syncFacilityProfilesToSupabase(
-  bundle: { pharmacy: PharmacyProfile; apj: APJProfile; dpj: DPJProfile },
+  bundle: {
+    pharmacy: PharmacyProfile;
+    apj: APJProfile;
+    dpj: DPJProfile;
+    rolePermissions?: Record<string, string[]>;
+  },
   timeoutMs = 8000
 ): Promise<{
   success: boolean;

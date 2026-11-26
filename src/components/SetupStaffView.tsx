@@ -29,6 +29,7 @@ import {
   isPrimaryOwnerStaffRecord
 } from '../types';
 import { PTKP_OPTIONS } from '../utils/taxService';
+import { generateNextStaffId } from '../utils/staffRegistrationHelper';
 
 const AVAILABLE_ROLES: StaffRole[] = [
   'APJ / Owner',
@@ -165,7 +166,7 @@ export const SetupStaffView: React.FC<SetupStaffViewProps> = ({
     }
 
     const newStaff: Staff = {
-      id: `STF-${String(staffList.length + 1).padStart(3, '0')}`,
+      id: generateNextStaffId(staffList),
       name: form.name,
       role: primaryRole,
       roles,
