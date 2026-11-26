@@ -21,22 +21,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Install dependencies
-        run: npm install --legacy-peer-deps || npm install
+        run: bun install --frozen-lockfile || bun install || npm install --legacy-peer-deps
 
       - name: Build Vite production bundle
         run: npm run build
 
       - name: Add SPA 404 fallback for GitHub Pages
         run: cp dist/index.html dist/404.html
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
