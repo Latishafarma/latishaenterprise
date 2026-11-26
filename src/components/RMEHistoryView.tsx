@@ -31,7 +31,7 @@ import { INITIAL_PATIENTS } from '../data/initialData';
 import { RMERecord, Staff, Medicine, ICD10Item, StaffFeeItem, PrescriptionItem, VitalSign, Patient } from '../types';
 import { openPrintWindow } from '../utils/printHelper';
 import { PaginationControls } from './PaginationControls';
-import { useFacilityProfiles, formatPharmacyAddress } from './PharmacySettingsModal';
+import { useFacilityProfiles, formatPharmacyAddress } from '../utils/facilityProfileHelper';
 import { SUPABASE_RME_SQL_SCHEMA, fetchRmeFromSupabase, isDemoRmeId } from '../utils/supabaseClient';
 import { getDeletedIdsSet } from '../utils/deletionRegistry';
 import { useIsOwnerAdmin } from '../utils/roleAccess';

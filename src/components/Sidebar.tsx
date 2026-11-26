@@ -474,7 +474,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                       <span>Antrean E-Resep & Skrining</span>
                     </span>
                     {pendingResepCount > 0 && (
-                      <span className="bg-amber-500 text-slate-950 text-[10px] px-1.5 py-0.2 rounded-full font-black animate-pulse">
+                      <span className="bg-amber-500 text-slate-950 text-[10px] px-1.5 py-0.2 rounded-full font-black">
                         {pendingResepCount}
                       </span>
                     )}

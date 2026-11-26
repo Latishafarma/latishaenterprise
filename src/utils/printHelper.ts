@@ -3,7 +3,7 @@ import {
   getSavedAPJProfile,
   getSavedDPJProfile,
   syncFacilityProfileToServer
-} from '../components/PharmacySettingsModal';
+} from './facilityProfileHelper';
 import { demoGetItem, demoSetItem, isDemoMode } from './demoSandbox';
 import { hasLocalServerBackend, safeBackendFetch } from './serverBridgeHelper';
 

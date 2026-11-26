@@ -133,14 +133,16 @@ import {
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
 import {
-  PharmacySettingsModal,
   getSavedPharmacyProfile,
   getSavedAPJProfile,
   getSavedDPJProfile,
   applyRemoteFacilityProfiles,
   formatPharmacyAddress,
   syncFacilityProfileToServer
-} from './components/PharmacySettingsModal';
+} from './utils/facilityProfileHelper';
+const PharmacySettingsModal = lazy(() =>
+  import('./components/PharmacySettingsModal').then((m) => ({ default: m.PharmacySettingsModal }))
+);
 
 import type { ConvertMitraOrderOptions } from './components/MitraOrdersView';
 
@@ -382,7 +384,9 @@ import {
   confirmFeeLedgerTrxDeletes,
   clearNonPendingDeletedTombstones
 } from './utils/deletionRegistry';
-import { PatientServiceChatWidget } from './components/PatientServiceChatWidget';
+const PatientServiceChatWidget = lazy(() =>
+  import('./components/PatientServiceChatWidget').then((m) => ({ default: m.PatientServiceChatWidget }))
+);
 import {
   isDemoMode,
   demoGetItem,
@@ -393,7 +397,7 @@ import {
   activateDemoModeStorage,
   deactivateDemoModeStorage
 } from './utils/demoSandbox';
-import { seedDemoSandboxStorage, DemoSeedBundle } from './data/demoData';
+import type { DemoSeedBundle } from './data/demoData';
 import { playRestrictedSaleAlarmAudio, stopRestrictedSaleAlarmAudio, playCheckInOverdueAlarmAndVoice } from './utils/audio';
 import {
   ATTENDANCE_UPDATED_EVENT,
@@ -638,12 +642,24 @@ export default function App() {
     );
   }
 
-  // Synchronously seed isolated Demo Sandbox storage BEFORE initial useState hydration if ?mode=demo or active
-  if (isDemoMode()) {
-    seedDemoSandboxStorage(false);
-  }
-
   const [isDemoActive, setIsDemoActive] = useState<boolean>(() => isDemoMode());
+
+  useEffect(() => {
+    if (!isDemoActive) return;
+    if (demoGetItem('latisha_medicines')) return;
+    let cancelled = false;
+    import('./data/demoData')
+      .then(({ seedDemoSandboxStorage }) => {
+        if (cancelled) return;
+        const bundle = seedDemoSandboxStorage(false);
+        applyDemoSeedToReactStates(bundle, true);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isDemoActive]);
+
   const [demoResetVersion, setDemoResetVersion] = useState<number>(0);
   const [demoResetToast, setDemoResetToast] = useState<string>('');
   const [copiedDemoUrl, setCopiedDemoUrl] = useState<boolean>(false);
@@ -2024,7 +2040,7 @@ export default function App() {
       ['latisha_purchase_orders', purchaseOrders, () => JSON.stringify(purchaseOrders)],
       ['latisha_stock_mutations', stockMutations, () => JSON.stringify(stockMutations)],
       ['latisha_transfers', transfers, () => JSON.stringify(transfers)],
-      ['latisha_audit_logs', auditLogs, () => JSON.stringify(auditLogs)],
+      ['latisha_audit_logs', auditLogs, () => JSON.stringify(auditLogs.slice(0, 300))],
       ['latisha_branches', branches, () => JSON.stringify(branches)],
       ['latisha_fee_config', feeConfig, () => JSON.stringify(feeConfig)],
       ['latisha_fee_ledger', feeLedger, () => JSON.stringify(feeLedger)],
@@ -2064,16 +2080,26 @@ export default function App() {
     }
 
     persistTimerRef.current = window.setTimeout(() => {
-      persistTimerRef.current = null;
-      const pending = Array.from(pendingPersistMapRef.current.entries());
-      pendingPersistMapRef.current.clear();
-      for (const [key, serialize] of pending) {
-        try {
-          demoSetItem(key, serialize());
-        } catch (err) {
-          console.warn(`Local cache write skipped for ${key}:`, err);
+      const flushChunk = () => {
+        persistTimerRef.current = null;
+        let processed = 0;
+        while (pendingPersistMapRef.current.size > 0 && processed < 2) {
+          const nextIter = pendingPersistMapRef.current.entries().next();
+          if (nextIter.done) break;
+          const [key, serialize] = nextIter.value;
+          pendingPersistMapRef.current.delete(key);
+          try {
+            demoSetItem(key, serialize());
+          } catch (err) {
+            console.warn(`Local cache write skipped for ${key}:`, err);
+          }
+          processed++;
         }
-      }
+        if (pendingPersistMapRef.current.size > 0) {
+          persistTimerRef.current = window.setTimeout(flushChunk, 16);
+        }
+      };
+      flushChunk();
     }, 350);
   }, [
     isDemoActive,
@@ -2380,6 +2406,64 @@ export default function App() {
     const client = getSupabaseClient();
     if (!client) return;
 
+    const isPortalView = showMitraPortal || showPublicPortal;
+    const isLoginOrRegView = (!isLoggedIn || showStaffRegistration) && !isPortalView;
+    const isFullAppView = isLoggedIn && !isPortalView && !showStaffRegistration;
+
+    let effectDisposed = false;
+    const waveTimers: number[] = [];
+
+    let cancelledPatientsEffect = false;
+    let cancelledStaffEffect = false;
+    let cancelledMitraEffect = false;
+    let cancelledMitraOrderEffect = false;
+    let cancelledFeeConfigEffect = false;
+    let cancelledFeeLedgerEffect = false;
+    let cancelledPromoDiscountEffect = false;
+    let cancelledRmeEffect = false;
+    let cancelledMorbidityEffect = false;
+    let cancelledTransactionEffect = false;
+    let cancelledStockCardEffect = false;
+    let cancelledLabEffect = false;
+    let cancelledOpnameEffect = false;
+    let cancelledScheduleEffect = false;
+    let cancelledMedicineEffect = false;
+    let cancelledSupplierEffect = false;
+    let cancelledBranchEffect = false;
+    let cancelledShiftEffect = false;
+    let cancelledPurchaseInvoiceEffect = false;
+    let cancelledPurchaseOrderEffect = false;
+    let cancelledMarketingEffect = false;
+    let cancelledPrescriptionEffect = false;
+
+    let patientBatchTimer: number | null = null;
+    let patientChannel: ReturnType<typeof subscribePatientsRealtime> = null;
+    let onlineRegChannel: ReturnType<typeof subscribeOnlineRegistrationsRealtime> = null;
+    let icdChannel: ReturnType<typeof subscribeICD10Realtime> = null;
+    let staffChannel: ReturnType<typeof subscribeStaffRealtime> = null;
+    let rmeChannel: ReturnType<typeof subscribeRmeRealtime> = null;
+    let morbidityChannel: ReturnType<typeof subscribeMorbidityReportsRealtime> = null;
+    let transactionChannel: ReturnType<typeof subscribeTransactionsRealtime> = null;
+    let stockCardChannel: ReturnType<typeof subscribeStockMutationsRealtime> = null;
+    let labChannel: ReturnType<typeof subscribeLabRecordsRealtime> = null;
+    let opnameChannel: ReturnType<typeof subscribeOpnameRecordsRealtime> = null;
+    let scheduleChannel: ReturnType<typeof subscribeSchedulesRealtime> = null;
+    let medicineChannel: ReturnType<typeof subscribeMedicinesRealtime> = null;
+    let mitraChannel: ReturnType<typeof subscribeMitraRealtime> = null;
+    let mitraOrderChannel: ReturnType<typeof subscribeMitraOrdersRealtime> = null;
+    let supplierChannel: any = null;
+    let branchChannel: ReturnType<typeof subscribeBranchesRealtime> = null;
+    let branchTransferChannel: ReturnType<typeof subscribeBranchTransfersRealtime> = null;
+    let cashierShiftChannel: ReturnType<typeof subscribeCashierShiftsRealtime> = null;
+    let purchaseInvoiceChannel: ReturnType<typeof subscribePurchaseInvoicesRealtime> = null;
+    let purchaseOrderChannel: ReturnType<typeof subscribePurchaseOrdersRealtime> = null;
+    let marketingChannel: ReturnType<typeof subscribeMarketingCampaignsRealtime> = null;
+    let facilityProfileChannel: ReturnType<typeof subscribeFacilityProfileRealtime> = null;
+    let prescriptionChannel: ReturnType<typeof subscribePrescriptionsRealtime> = null;
+    let promoDiscountChannel: ReturnType<typeof subscribeDiscountsPromosRealtime> = null;
+    let feeConfigChannel: ReturnType<typeof subscribeFeeConfigRealtime> = null;
+    let feeLedgerChannel: ReturnType<typeof subscribeFeeLedgerRealtime> = null;
+
     // Helper sinkronisasi state aplikasi (Cabang, Dokter, APJ/DPJ Staff, UserName) dari profil terbaru
     const syncAppStatesFromProfiles = () => {
       try {
@@ -2498,104 +2582,290 @@ export default function App() {
       getSavedPharmacyProfile();
     } catch {}
 
-    // 0. Initial Inbound Sync: Pull Profil Apotek, APJ, DPJ & Standar Hak Akses Peran dari Supabase
-    fetchFacilityProfilesFromSupabase().then((res) => {
-      if (res.data) {
-        const applied = applyRemoteFacilityProfiles(res.data);
+    // 0. Initial Inbound Sync & Realtime: Profil Apotek, APJ, DPJ & Standar Hak Akses Peran
+    const startFacilityProfileSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      fetchFacilityProfilesFromSupabase().then((res) => {
+        if (effectDisposed || isDemoMode()) return;
+        if (res.data) {
+          const applied = applyRemoteFacilityProfiles(res.data);
+          if (applied.rolePermissions) {
+            setRolePermissions(applied.rolePermissions);
+          }
+          if (applied.changed) {
+            syncAppStatesFromProfiles();
+          }
+        } else if (res.isEmpty) {
+          syncFacilityProfilesToSupabase({
+            pharmacy: getSavedPharmacyProfile(),
+            apj: getSavedAPJProfile(),
+            dpj: getSavedDPJProfile(),
+            rolePermissions: getSavedRolePermissions()
+          });
+        }
+      });
+
+      facilityProfileChannel = subscribeFacilityProfileRealtime((bundle) => {
+        const applied = applyRemoteFacilityProfiles(bundle);
         if (applied.rolePermissions) {
           setRolePermissions(applied.rolePermissions);
         }
         if (applied.changed) {
           syncAppStatesFromProfiles();
         }
-      } else if (res.isEmpty) {
-        syncFacilityProfilesToSupabase({
-          pharmacy: getSavedPharmacyProfile(),
-          apj: getSavedAPJProfile(),
-          dpj: getSavedDPJProfile(),
-          rolePermissions: getSavedRolePermissions()
-        });
-      }
-    });
+      });
+    };
 
     // 1. Initial Inbound Sync: Pull bounded recent patients from Supabase (tombstone-safe + replay pending deletes)
-    let cancelledPatientsEffect = false;
-    (async () => {
-      const pendingDelPatients = getPendingDeleteIds('patients');
-      if (pendingDelPatients.length > 0 && !isDemoMode()) {
-        for (const delId of pendingDelPatients) {
-          const delRes = await deletePatientFromSupabase(delId).catch(() => ({ success: false }));
-          if (cancelledPatientsEffect) return;
-          if (delRes.success) confirmCloudDeletes('patients', [delId]);
+    const startPatientsSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
+        const pendingDelPatients = getPendingDeleteIds('patients');
+        if (pendingDelPatients.length > 0 && !isDemoMode()) {
+          for (const delId of pendingDelPatients) {
+            const delRes = await deletePatientFromSupabase(delId).catch(() => ({ success: false }));
+            if (cancelledPatientsEffect) return;
+            if (delRes.success) confirmCloudDeletes('patients', [delId]);
+          }
         }
-      }
-      const res = await fetchPatientsFromSupabase({ limit: 100 });
-      if (cancelledPatientsEffect) return;
-      if (res.data) {
-        const deletedPatientSet = getDeletedIdsSet('patients');
-        const stubbornIds = res.data
-          .filter((p) =>
-            [p.id, p.dbId, p.noRm].some((k) => k && deletedPatientSet.has(String(k).trim()))
-          )
-          .map((p) => String(p.dbId || p.id || p.noRm).trim())
-          .filter(Boolean);
-        if (stubbornIds.length > 0 && !isDemoMode()) {
-          Promise.all(
-            stubbornIds.map((sid) =>
-              deletePatientFromSupabase(sid)
-                .then((dRes) => {
-                  if (dRes.success) confirmCloudDeletes('patients', [sid]);
-                })
-                .catch(() => {})
+        const res = await fetchPatientsFromSupabase({ limit: 100 });
+        if (cancelledPatientsEffect) return;
+        if (res.data) {
+          const deletedPatientSet = getDeletedIdsSet('patients');
+          const stubbornIds = res.data
+            .filter((p) =>
+              [p.id, p.dbId, p.noRm].some((k) => k && deletedPatientSet.has(String(k).trim()))
             )
+            .map((p) => String(p.dbId || p.id || p.noRm).trim())
+            .filter(Boolean);
+          if (stubbornIds.length > 0 && !isDemoMode()) {
+            Promise.all(
+              stubbornIds.map((sid) =>
+                deletePatientFromSupabase(sid)
+                  .then((dRes) => {
+                    if (dRes.success) confirmCloudDeletes('patients', [sid]);
+                  })
+                  .catch(() => {})
+              )
+            );
+          }
+          const remoteClean = res.data.filter(
+            (p) => ![p.id, p.dbId, p.noRm].some((k) => k && deletedPatientSet.has(String(k).trim()))
           );
+          if (remoteClean.length > 0) {
+            setPatients((prev) =>
+              mergePatientLists(
+                prev.filter(
+                  (p) => ![p.id, p.dbId, p.noRm].some((k) => k && deletedPatientSet.has(String(k).trim()))
+                ),
+                remoteClean
+              ).slice(0, 250)
+            );
+          }
         }
-        const remoteClean = res.data.filter(
+      })();
+
+      const pendingPatientUpserts = new Map<string, Patient>();
+      const pendingPatientDeletes = new Set<string>();
+
+      const flushPatientRealtimeBatch = () => {
+        patientBatchTimer = null;
+        const upserts = Array.from(pendingPatientUpserts.values());
+        const deletes = new Set(pendingPatientDeletes);
+        pendingPatientUpserts.clear();
+        pendingPatientDeletes.clear();
+        if (upserts.length === 0 && deletes.size === 0) return;
+
+        const deletedPatientSet = getDeletedIdsSet('patients');
+        const filteredUpserts = upserts.filter(
           (p) => ![p.id, p.dbId, p.noRm].some((k) => k && deletedPatientSet.has(String(k).trim()))
         );
-        if (remoteClean.length > 0) {
-          setPatients((prev) =>
-            mergePatientLists(
-              prev.filter(
-                (p) => ![p.id, p.dbId, p.noRm].some((k) => k && deletedPatientSet.has(String(k).trim()))
-              ),
-              remoteClean
-            ).slice(0, 250)
+
+        setPatients((prev) => {
+          const nextList = prev.filter(
+            (p) =>
+              !deletes.has(String(p.dbId || '')) &&
+              !deletes.has(String(p.id)) &&
+              !deletes.has(String(p.noRm || '')) &&
+              ![p.id, p.dbId, p.noRm].some((k) => k && deletedPatientSet.has(String(k).trim()))
           );
-        }
-      }
-    })();
-
-    // 2. Initial Inbound Sync: Pull latest online registrations from Supabase
-    fetchOnlineRegistrationsFromSupabase().then((res) => {
-      if (res.data && res.data.length > 0) {
-        setOnlineRegistrations((prev) => {
-          const map = new Map<string, OnlineRegistration>();
-          prev.forEach((r) => map.set(r.id, r));
-          res.data!.forEach((r) => map.set(r.id, r));
-          return Array.from(map.values());
+          const merged =
+            filteredUpserts.length > 0 ? mergePatientLists(filteredUpserts.reverse(), nextList) : nextList;
+          return merged.length > 250 ? merged.slice(0, 250) : merged;
         });
-      }
-    });
+      };
 
-    // 3. Initial Inbound Sync: Pull latest ICD-10 list from Supabase
-    fetchICD10FromSupabase().then((res) => {
-      if (res.data && res.data.length > 0) {
-        setIcd10List(res.data);
-      }
-    });
+      const schedulePatientBatchFlush = () => {
+        if (patientBatchTimer !== null) return;
+        patientBatchTimer = window.setTimeout(flushPatientRealtimeBatch, 250);
+      };
 
-    // 4. Initial Inbound Sync: Pull latest staff list from Supabase (safe against reused STF-XXX IDs)
-    let cancelledStaffEffect = false;
-    (async () => {
-      if (cancelledStaffEffect) return;
-      await refreshStaffFromCloud({ silent: true });
-    })();
+      patientChannel = subscribePatientsRealtime(
+        (newPatient) => {
+          const deletedPatientSet = getDeletedIdsSet('patients');
+          if ([newPatient.id, newPatient.dbId, newPatient.noRm].some((k) => k && deletedPatientSet.has(String(k).trim()))) {
+            return;
+          }
+          const key = String(newPatient.dbId || newPatient.id || newPatient.noRm);
+          pendingPatientDeletes.delete(key);
+          pendingPatientUpserts.set(key, newPatient);
+          schedulePatientBatchFlush();
+        },
+        (updatedPatient) => {
+          const deletedPatientSet = getDeletedIdsSet('patients');
+          if (
+            [updatedPatient.id, updatedPatient.dbId, updatedPatient.noRm].some(
+              (k) => k && deletedPatientSet.has(String(k).trim())
+            )
+          ) {
+            return;
+          }
+          const key = String(updatedPatient.dbId || updatedPatient.id || updatedPatient.noRm);
+          pendingPatientDeletes.delete(key);
+          pendingPatientUpserts.set(key, updatedPatient);
+          schedulePatientBatchFlush();
+        },
+        (deletedId) => {
+          const key = String(deletedId || '').trim();
+          if (!key) return;
+          recordRemoteDeletedId('patients', key);
+          pendingPatientUpserts.delete(key);
+          pendingPatientDeletes.add(key);
+          schedulePatientBatchFlush();
+        }
+      );
+    };
+
+    // 2. Initial Inbound Sync & Realtime: Online Registrations
+    const startOnlineRegSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      fetchOnlineRegistrationsFromSupabase().then((res) => {
+        if (effectDisposed) return;
+        if (res.data && res.data.length > 0) {
+          setOnlineRegistrations((prev) => {
+            const map = new Map<string, OnlineRegistration>();
+            prev.forEach((r) => map.set(r.id, r));
+            res.data!.forEach((r) => map.set(r.id, r));
+            return Array.from(map.values());
+          });
+        }
+      });
+
+      onlineRegChannel = subscribeOnlineRegistrationsRealtime(
+        (newReg) => {
+          setOnlineRegistrations((prev) => {
+            const exists = prev.some((r) => r.id === newReg.id || r.bookingCode === newReg.bookingCode);
+            if (exists) {
+              return prev.map((r) => (r.id === newReg.id || r.bookingCode === newReg.bookingCode ? newReg : r));
+            }
+            return [newReg, ...prev];
+          });
+        },
+        (updatedReg) => {
+          setOnlineRegistrations((prev) => {
+            const exists = prev.some((r) => r.id === updatedReg.id || r.bookingCode === updatedReg.bookingCode);
+            if (exists) {
+              return prev.map((r) => (r.id === updatedReg.id || r.bookingCode === updatedReg.bookingCode ? updatedReg : r));
+            }
+            return [updatedReg, ...prev];
+          });
+        },
+        (deletedId) => {
+          setOnlineRegistrations((prev) => prev.filter((r) => r.id !== deletedId));
+        }
+      );
+    };
+
+    // 3. Initial Inbound Sync & Realtime: ICD-10
+    const startIcdSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      fetchICD10FromSupabase().then((res) => {
+        if (effectDisposed) return;
+        if (res.data && res.data.length > 0) {
+          setIcd10List(res.data);
+        }
+      });
+
+      icdChannel = subscribeICD10Realtime(
+        (newIcd) => {
+          setIcd10List((prev) => {
+            const exists = prev.some((i) => i.code === newIcd.code);
+            if (exists) {
+              return prev.map((i) => (i.code === newIcd.code ? newIcd : i));
+            }
+            return [...prev, newIcd];
+          });
+        },
+        (updatedIcd) => {
+          setIcd10List((prev) => {
+            const exists = prev.some((i) => i.code === updatedIcd.code);
+            if (exists) {
+              return prev.map((i) => (i.code === updatedIcd.code ? updatedIcd : i));
+            }
+            return [...prev, updatedIcd];
+          });
+        },
+        (deletedCode) => {
+          setIcd10List((prev) => prev.filter((i) => i.code !== deletedCode));
+        }
+      );
+    };
+
+    // 4. Initial Inbound Sync & Realtime: Staff (safe against reused STF-XXX IDs)
+    const startStaffSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
+        if (cancelledStaffEffect) return;
+        await refreshStaffFromCloud({ silent: true });
+      })();
+
+      staffChannel = subscribeStaffRealtime(
+        (newStaff) => {
+          const cleanId = String(newStaff?.id || '').trim();
+          if (!cleanId) return;
+          if (getPendingDeleteIds('staff').includes(cleanId)) return;
+          markIdsPendingSync('staff', [cleanId]);
+          confirmCloudSync('staff', [cleanId]);
+          const safeStaff = ensurePrimaryOwnerStaffRole(newStaff).staff;
+          setStaffList((prev) => {
+            const exists = prev.some((s) => s.id === safeStaff.id);
+            const nextList = exists
+              ? prev.map((s) => (s.id === safeStaff.id ? safeStaff : s))
+              : [...prev, safeStaff];
+            saveStaffListLocally(nextList, { broadcast: false });
+            return nextList;
+          });
+        },
+        (updatedStaff) => {
+          const cleanId = String(updatedStaff?.id || '').trim();
+          if (!cleanId || getPendingDeleteIds('staff').includes(cleanId)) return;
+          const safeStaff = ensurePrimaryOwnerStaffRole(updatedStaff).staff;
+          setStaffList((prev) => {
+            const exists = prev.some((s) => s.id === safeStaff.id);
+            const nextList = exists
+              ? prev.map((s) => (s.id === safeStaff.id ? safeStaff : s))
+              : [...prev, safeStaff];
+            saveStaffListLocally(nextList, { broadcast: false });
+            return nextList;
+          });
+        },
+        (deletedId) => {
+          const cleanId = String(deletedId || '').trim();
+          if (!cleanId) return;
+          recordRemoteDeletedId('staff', cleanId);
+          setStaffList((prev) => {
+            const nextList = prev.filter((s) => s.id !== cleanId);
+            saveStaffListLocally(nextList, { broadcast: false });
+            return nextList;
+          });
+        }
+      );
+    };
 
     // 5. Initial Inbound Sync & Safe Realtime: Pull latest RME records from Supabase (tombstone-safe + replay pending deletes)
-    let cancelledRmeEffect = false;
-    let rmeChannel: ReturnType<typeof subscribeRmeRealtime> = null;
-    (async () => {
+    const startRmeSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       // Step 1: Replay any pending cloud deletes FIRST so deleted RME rows never reappear
       const pendingDeleteRmeIds = getPendingDeleteIds('rme_records');
       if (pendingDeleteRmeIds.length > 0 && !isDemoMode()) {
@@ -2714,11 +2984,12 @@ export default function App() {
         );
       }
     })();
+    };
 
     // 5c. Initial Inbound Sync & Safe Realtime: Pull Riwayat & Faktur Penjualan dari Supabase
-    let cancelledTransactionEffect = false;
-    let transactionChannel: ReturnType<typeof subscribeTransactionsRealtime> = null;
-    (async () => {
+    const startTransactionsSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       const demoTrxIds = ['TRX-1001', 'TRX-1002', 'FPJ-202610-1003', 'TRX-1004'];
 
       // Step 1: Replay any pending cloud deletes FIRST so deleted rows never reappear
@@ -2850,11 +3121,12 @@ export default function App() {
         );
       }
     })();
+    };
 
     // 5d. Initial Inbound Sync & Safe Realtime: Pull Mutasi & Kartu Stok Digital (kartu_stok) dari Supabase
-    let cancelledStockCardEffect = false;
-    let stockCardChannel: ReturnType<typeof subscribeStockMutationsRealtime> = null;
-    (async () => {
+    const startStockCardSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       const demoMutIds = ['MUT-01', 'MUT-02', 'MUT-03'];
       const pendingMutDeleteIds = getPendingDeleteIds('stock_mutations');
       if (pendingMutDeleteIds.length > 0) {
@@ -2987,11 +3259,12 @@ export default function App() {
         );
       }
     })();
+    };
 
     // 5b. Initial Inbound Sync & Safe Realtime: Pull Pemeriksaan & Cek Lab (cek_lab) dari Supabase (tombstone-safe + replay pending deletes)
-    let cancelledLabEffect = false;
-    let labChannel: ReturnType<typeof subscribeLabRecordsRealtime> = null;
-    (async () => {
+    const startLabSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       const pendingDeleteLabIds = getPendingDeleteIds('lab_records');
       if (pendingDeleteLabIds.length > 0 && !isDemoMode()) {
         const delRes = await deleteLabRecordsFromSupabase(pendingDeleteLabIds).catch((err) => ({
@@ -3112,11 +3385,12 @@ export default function App() {
         );
       }
     })();
+    };
 
     // 5c. Initial Inbound Sync & Safe Realtime: Pull Riwayat Stok Opname (riwayat_opname) dari Supabase (tombstone-safe + replay pending deletes)
-    let cancelledOpnameEffect = false;
-    let opnameChannel: ReturnType<typeof subscribeOpnameRecordsRealtime> = null;
-    (async () => {
+    const startOpnameSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       // Step 1: Replay any pending cloud deletes FIRST so deleted opname records never reappear
       const pendingDeleteOpnameIds = getPendingDeleteIds('opname_records');
       if (pendingDeleteOpnameIds.length > 0 && !isDemoMode()) {
@@ -3248,11 +3522,12 @@ export default function App() {
         opnameChannelRef.current = opnameChannel;
       }
     })();
+    };
 
     // 5b-morbid. Initial Inbound Sync & Safe Realtime: Pull Arsip Laporan Medis & Morbiditas dari Supabase (tombstone-safe + replay pending deletes)
-    let cancelledMorbidityEffect = false;
-    let morbidityChannel: ReturnType<typeof subscribeMorbidityReportsRealtime> = null;
-    (async () => {
+    const startMorbiditySync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       const pendingDeleteMorbidIds = getPendingDeleteIds('morbidity_reports');
       if (pendingDeleteMorbidIds.length > 0 && !isDemoMode()) {
         for (const delId of pendingDeleteMorbidIds) {
@@ -3365,65 +3640,96 @@ export default function App() {
         );
       }
     })();
+    };
 
     // 6. Initial Inbound/Outbound Two-Way Sync: Flush pending offline ops & pull authoritative schedules from Supabase
-    let cancelledScheduleEffect = false;
-    let scheduleChannel: ReturnType<typeof subscribeSchedulesRealtime> = null;
-    handleSyncSchedulesSupabase().then((syncRes) => {
-      if (cancelledScheduleEffect || isDemoMode()) return;
-      setSchedulesNeedsTableSetup(Boolean(syncRes.needsTableSetup));
-      if (!syncRes.needsTableSetup) {
-        scheduleChannel = subscribeSchedulesRealtime(
-          (newSch) => {
-            const pendingOps = readPendingScheduleOps();
-            if (pendingOps.deletes.includes(newSch.id)) return;
-            setSchedules((prev) => {
-              const next = prev.some((s) => s.id === newSch.id)
-                ? prev.map((s) => (s.id === newSch.id ? newSch : s))
-                : [newSch, ...prev];
-              try {
-                demoSetItem('latisha_schedules', JSON.stringify(next));
-              } catch {}
-              return next;
-            });
-          },
-          (updatedSch) => {
-            const pendingOps = readPendingScheduleOps();
-            if (pendingOps.deletes.includes(updatedSch.id)) return;
-            setSchedules((prev) => {
-              const next = prev.map((s) => (s.id === updatedSch.id ? updatedSch : s));
-              try {
-                demoSetItem('latisha_schedules', JSON.stringify(next));
-              } catch {}
-              return next;
-            });
-          },
-          (delId) => {
-            dequeueScheduleDelete(delId);
-            setSchedules((prev) => {
-              const next = prev.filter((s) => s.id !== delId);
-              try {
-                demoSetItem('latisha_schedules', JSON.stringify(next));
-              } catch {}
-              return next;
-            });
-          }
-        );
-      }
-    });
+    const startSchedulesSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      handleSyncSchedulesSupabase().then((syncRes) => {
+        if (cancelledScheduleEffect || isDemoMode()) return;
+        setSchedulesNeedsTableSetup(Boolean(syncRes.needsTableSetup));
+        if (!syncRes.needsTableSetup) {
+          scheduleChannel = subscribeSchedulesRealtime(
+            (newSch) => {
+              const pendingOps = readPendingScheduleOps();
+              if (pendingOps.deletes.includes(newSch.id)) return;
+              setSchedules((prev) => {
+                const next = prev.some((s) => s.id === newSch.id)
+                  ? prev.map((s) => (s.id === newSch.id ? newSch : s))
+                  : [newSch, ...prev];
+                try {
+                  demoSetItem('latisha_schedules', JSON.stringify(next));
+                } catch {}
+                return next;
+              });
+            },
+            (updatedSch) => {
+              const pendingOps = readPendingScheduleOps();
+              if (pendingOps.deletes.includes(updatedSch.id)) return;
+              setSchedules((prev) => {
+                const next = prev.map((s) => (s.id === updatedSch.id ? updatedSch : s));
+                try {
+                  demoSetItem('latisha_schedules', JSON.stringify(next));
+                } catch {}
+                return next;
+              });
+            },
+            (delId) => {
+              dequeueScheduleDelete(delId);
+              setSchedules((prev) => {
+                const next = prev.filter((s) => s.id !== delId);
+                try {
+                  demoSetItem('latisha_schedules', JSON.stringify(next));
+                } catch {}
+                return next;
+              });
+            }
+          );
+        }
+      });
+    };
 
-    // 7. Initial Inbound/Outbound Two-Way Sync: Flush pending offline ops & pull authoritative master_obat
-    let cancelledMedicineEffect = false;
-    handleSyncMedicinesSupabase().then((syncRes) => {
-      if (cancelledMedicineEffect || isDemoMode()) return;
-      if (syncRes.needsTableSetup) {
-        setMedicinesNeedsTableSetup(true);
-      }
-    });
+    // 7. Initial Inbound/Outbound Two-Way Sync & Realtime: master_obat
+    const startMedicinesSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      handleSyncMedicinesSupabase().then((syncRes) => {
+        if (cancelledMedicineEffect || isDemoMode()) return;
+        if (syncRes.needsTableSetup) {
+          setMedicinesNeedsTableSetup(true);
+        }
+      });
 
-    // 8. Initial Inbound Sync: Pull latest Mitra Orders from Supabase (tombstone-safe + replay pending deletes)
-    let cancelledMitraOrderEffect = false;
-    (async () => {
+      medicineChannel = subscribeMedicinesRealtime(
+        (newMed) => {
+          if (isDemoMode()) return;
+          setMedicines((prev) => {
+            if (prev.some((m) => m.id === newMed.id)) {
+              return prev.map((m) => (m.id === newMed.id ? newMed : m));
+            }
+            return normalizeUniqueMedicines([newMed, ...prev]).items;
+          });
+        },
+        (updatedMed) => {
+          if (isDemoMode()) return;
+          setMedicines((prev) => {
+            if (prev.some((m) => m.id === updatedMed.id)) {
+              return prev.map((m) => (m.id === updatedMed.id ? updatedMed : m));
+            }
+            return normalizeUniqueMedicines([updatedMed, ...prev]).items;
+          });
+        },
+        (delId) => {
+          if (isDemoMode()) return;
+          setMedicines((prev) => prev.filter((m) => m.id !== delId));
+        }
+      );
+      medicineChannelRef.current = medicineChannel;
+    };
+
+    // 8. Initial Inbound Sync & Realtime: Mitra Orders from Supabase (tombstone-safe + replay pending deletes)
+    const startMitraOrdersSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       const pendingDeleteOrdIds = getPendingDeleteIds('mitra_orders');
       if (pendingDeleteOrdIds.length > 0 && !isDemoMode()) {
         for (const delId of pendingDeleteOrdIds) {
@@ -3478,9 +3784,42 @@ export default function App() {
       }
     })();
 
-    // 9. Initial Inbound Sync: Pull Riwayat Skrining Resep & Antrean E-Resep dari Supabase
-    let cancelledPrescriptionEffect = false;
-    (async () => {
+      mitraOrderChannel = subscribeMitraOrdersRealtime(
+        (newOrd) => {
+          if (!newOrd?.id || getDeletedIdsSet('mitra_orders').has(newOrd.id)) return;
+          setMitraOrders((prev) => {
+            const next = prev.some((o) => o.id === newOrd.id)
+              ? prev.map((o) => (o.id === newOrd.id ? newOrd : o))
+              : [newOrd, ...prev];
+            persistMitraOrdersNow(next);
+            return next;
+          });
+        },
+        (updatedOrd) => {
+          if (!updatedOrd?.id || getDeletedIdsSet('mitra_orders').has(updatedOrd.id)) return;
+          setMitraOrders((prev) => {
+            const next = prev.map((o) => (o.id === updatedOrd.id ? updatedOrd : o));
+            persistMitraOrdersNow(next);
+            return next;
+          });
+        },
+        (delId) => {
+          const cleanId = String(delId || '').trim();
+          if (!cleanId) return;
+          recordRemoteDeletedId('mitra_orders', cleanId);
+          setMitraOrders((prev) => {
+            const next = prev.filter((o) => o.id !== cleanId);
+            persistMitraOrdersNow(next);
+            return next;
+          });
+        }
+      );
+    };
+
+    // 9. Initial Inbound Sync & Realtime: Pull Riwayat Skrining Resep & Antrean E-Resep dari Supabase
+    const startPrescriptionsSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       // Step 1: Replay any pending cloud deletes FIRST so deleted rows never reappear
       const pendingDeleteRxIds = getPendingDeleteIds('prescriptions');
       if (pendingDeleteRxIds.length > 0 && !isDemoMode()) {
@@ -3560,9 +3899,48 @@ export default function App() {
       }
     })();
 
-    // 10b. Initial Inbound Sync: Diskon & Promo Portal Mitra (tombstone-safe + replay pending deletes)
-    let cancelledPromoDiscountEffect = false;
-    (async () => {
+      prescriptionChannel = subscribePrescriptionsRealtime(
+        (newRx) => {
+          const cleanId = String(newRx.id || '').trim();
+          if (!cleanId || isDemoPrescriptionId(cleanId)) return;
+          if (getDeletedIdsSet('prescriptions').has(cleanId)) return;
+          setPrescriptions((prev) => {
+            const next = prev.some((p) => String(p.id).trim() === cleanId)
+              ? prev.map((p) => (String(p.id).trim() === cleanId ? newRx : p))
+              : [newRx, ...prev];
+            persistPrescriptionsNow(next);
+            return next;
+          });
+        },
+        (updatedRx) => {
+          const cleanId = String(updatedRx.id || '').trim();
+          if (!cleanId || isDemoPrescriptionId(cleanId)) return;
+          if (getDeletedIdsSet('prescriptions').has(cleanId)) return;
+          setPrescriptions((prev) => {
+            const next = prev.some((p) => String(p.id).trim() === cleanId)
+              ? prev.map((p) => (String(p.id).trim() === cleanId ? updatedRx : p))
+              : [updatedRx, ...prev];
+            persistPrescriptionsNow(next);
+            return next;
+          });
+        },
+        (deletedId) => {
+          const cleanId = String(deletedId || '').trim();
+          if (!cleanId) return;
+          recordRemoteDeletedId('prescriptions', cleanId);
+          setPrescriptions((prev) => {
+            const next = prev.filter((p) => String(p.id).trim() !== cleanId);
+            persistPrescriptionsNow(next);
+            return next;
+          });
+        }
+      );
+    };
+
+    // 10b. Initial Inbound Sync & Realtime: Diskon & Promo Portal Mitra (tombstone-safe + replay pending deletes)
+    const startPromoDiscountSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       const pendingDelPromoIds = getPendingDeleteIds('discounts_promos');
       if (pendingDelPromoIds.length > 0 && !isDemoMode()) {
         for (const delId of pendingDelPromoIds) {
@@ -3654,32 +4032,76 @@ export default function App() {
       }
     })();
 
-    // 10c-fee. Initial Inbound Sync: Pengaturan Tarif & Jasa Medis (pengaturan_tarif_jasa)
-    let cancelledFeeConfigEffect = false;
-    fetchFeeConfigFromSupabase().then((res) => {
-      if (cancelledFeeConfigEffect || isDemoMode()) return;
-      setFeeConfigNeedsTableSetup(Boolean(res.needsTableSetup));
-      if (res.data) {
-        setFeeConfig(res.data);
-        if (res.data.payrollConfig) {
+      promoDiscountChannel = subscribeDiscountsPromosRealtime(
+        (item) => {
+          const deletedSet = getDeletedIdsSet('discounts_promos');
+          if (item.kind === 'DISCOUNT' && item.discount) {
+            if (!item.discount.id || deletedSet.has(item.discount.id)) return;
+            setSalesDiscounts((prev) => {
+              const exists = prev.some((d) => d.id === item.discount!.id);
+              return exists
+                ? prev.map((d) => (d.id === item.discount!.id ? item.discount! : d))
+                : [item.discount!, ...prev];
+            });
+          } else if (item.kind === 'PROMO' && item.promo) {
+            if (!item.promo.id || deletedSet.has(item.promo.id)) return;
+            setPromoAds((prev) => {
+              const exists = prev.some((p) => p.id === item.promo!.id);
+              return exists
+                ? prev.map((p) => (p.id === item.promo!.id ? item.promo! : p))
+                : [item.promo!, ...prev];
+            });
+          }
+        },
+        (deletedId) => {
+          const cleanId = String(deletedId || '').trim();
+          if (!cleanId) return;
+          recordRemoteDeletedId('discounts_promos', cleanId);
+          setSalesDiscounts((prev) => prev.filter((d) => d.id !== cleanId));
+          setPromoAds((prev) => prev.filter((p) => p.id !== cleanId));
+        }
+      );
+    };
+
+    // 10c-fee. Initial Inbound Sync & Realtime: Pengaturan Tarif & Jasa Medis (pengaturan_tarif_jasa)
+    const startFeeConfigSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      fetchFeeConfigFromSupabase().then((res) => {
+        if (cancelledFeeConfigEffect || isDemoMode()) return;
+        setFeeConfigNeedsTableSetup(Boolean(res.needsTableSetup));
+        if (res.data) {
+          setFeeConfig(res.data);
+          if (res.data.payrollConfig) {
+            try {
+              demoSetItem('latisha_payroll_overtime_config', JSON.stringify(res.data.payrollConfig));
+            } catch {}
+          }
+        } else if (res.isEmpty) {
+          syncFeeConfigToSupabase(feeConfig, userName)
+            .then((seedRes) => {
+              if (!cancelledFeeConfigEffect && seedRes.needsTableSetup) {
+                setFeeConfigNeedsTableSetup(true);
+              }
+            })
+            .catch(() => {});
+        }
+      });
+
+      feeConfigChannel = subscribeFeeConfigRealtime((remoteFeeConfig) => {
+        if (isDemoMode()) return;
+        setFeeConfig(remoteFeeConfig);
+        if (remoteFeeConfig.payrollConfig) {
           try {
-            demoSetItem('latisha_payroll_overtime_config', JSON.stringify(res.data.payrollConfig));
+            demoSetItem('latisha_payroll_overtime_config', JSON.stringify(remoteFeeConfig.payrollConfig));
           } catch {}
         }
-      } else if (res.isEmpty) {
-        syncFeeConfigToSupabase(feeConfig, userName)
-          .then((seedRes) => {
-            if (!cancelledFeeConfigEffect && seedRes.needsTableSetup) {
-              setFeeConfigNeedsTableSetup(true);
-            }
-          })
-          .catch(() => {});
-      }
-    });
+      });
+    };
 
-    // 10c-ledger. Initial Inbound Sync: Ledger Fee Petugas POS (log_fee_petugas, tombstone-safe + replay pending deletes)
-    let cancelledFeeLedgerEffect = false;
-    (async () => {
+    // 10c-ledger. Initial Inbound Sync & Realtime: Ledger Fee Petugas POS (log_fee_petugas, tombstone-safe + replay pending deletes)
+    const startFeeLedgerSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       if (isDemoMode()) return;
 
       // Step 1: Replay pending transaction-scoped & entry-scoped fee deletes FIRST
@@ -3815,9 +4237,51 @@ export default function App() {
       }
     })();
 
-    // 10. Initial Inbound Sync: Pull Master Data Mitra dari Supabase (tombstone-safe + replay pending deletes)
-    let cancelledMitraEffect = false;
-    (async () => {
+      feeLedgerChannel = subscribeFeeLedgerRealtime(
+        (remoteEntry) => {
+          if (isDemoMode() || !remoteEntry?.id || isDemoFeeLedgerId(remoteEntry.id)) return;
+          const cleanId = String(remoteEntry.id).trim();
+          const cleanTrxId = String(remoteEntry.transaction_id || '').trim();
+          if (
+            getDeletedIdsSet('fee_ledger').has(cleanId) ||
+            (cleanTrxId && getDeletedIdsSet('transactions').has(cleanTrxId))
+          ) {
+            return;
+          }
+          if (
+            transactionsAuthoritativeRef.current &&
+            (!cleanTrxId ||
+              (!transactionsRef.current.some((t) => t.id === cleanTrxId) &&
+                !getPendingSyncIdsSet('transactions').has(cleanTrxId)))
+          ) {
+            return;
+          }
+          setFeeLedger((prev) => {
+            const exists = prev.some((item) => item.id === cleanId);
+            const next = exists
+              ? prev.map((item) => (item.id === cleanId ? remoteEntry : item))
+              : [remoteEntry, ...prev];
+            persistFeeLedgerNow(next);
+            return next;
+          });
+        },
+        (deletedId) => {
+          const cleanId = String(deletedId || '').trim();
+          if (isDemoMode() || !cleanId) return;
+          recordRemoteDeletedId('fee_ledger', cleanId);
+          setFeeLedger((prev) => {
+            const next = prev.filter((item) => item.id !== cleanId);
+            persistFeeLedgerNow(next);
+            return next;
+          });
+        }
+      );
+    };
+
+    // 10. Initial Inbound Sync & Realtime: Pull Master Data Mitra dari Supabase (tombstone-safe + replay pending deletes)
+    const startMitraSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       const demoMitraIds = ['MTR-001', 'MTR-002', 'MTR-003'];
       const pendingDeleteMitraIds = getPendingDeleteIds('mitra');
       if (pendingDeleteMitraIds.length > 0 && !isDemoMode()) {
@@ -3888,10 +4352,46 @@ export default function App() {
       }
     })();
 
+      mitraChannel = subscribeMitraRealtime(
+        (newMitra) => {
+          if (!newMitra?.id || ['MTR-001', 'MTR-002', 'MTR-003'].includes(newMitra.id)) return;
+          if (getDeletedIdsSet('mitra').has(newMitra.id)) return;
+          setMitraList((prev) => {
+            const next = prev.some((m) => m.id === newMitra.id)
+              ? prev.map((m) => (m.id === newMitra.id ? newMitra : m))
+              : [newMitra, ...prev];
+            persistMitraListNow(next);
+            return next;
+          });
+        },
+        (updatedMitra) => {
+          if (!updatedMitra?.id || ['MTR-001', 'MTR-002', 'MTR-003'].includes(updatedMitra.id)) return;
+          if (getDeletedIdsSet('mitra').has(updatedMitra.id)) return;
+          setMitraList((prev) => {
+            const next = prev.some((m) => m.id === updatedMitra.id)
+              ? prev.map((m) => (m.id === updatedMitra.id ? updatedMitra : m))
+              : [updatedMitra, ...prev];
+            persistMitraListNow(next);
+            return next;
+          });
+        },
+        (deletedId) => {
+          const cleanId = String(deletedId || '').trim();
+          if (!cleanId) return;
+          recordRemoteDeletedId('mitra', cleanId);
+          setMitraList((prev) => {
+            const next = prev.filter((m) => m.id !== cleanId);
+            persistMitraListNow(next);
+            return next;
+          });
+        }
+      );
+    };
+
     // 7d. Sync Master Data Supplier & PBF (tombstone-safe + replay pending deletes)
-    let supplierChannel: any = null;
-    let cancelledSupplierEffect = false;
-    (async () => {
+    const startSuppliersSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       if (isDemoMode()) return;
       const pendingDeleteSupplierIds = getPendingDeleteIds('suppliers');
       if (pendingDeleteSupplierIds.length > 0) {
@@ -3998,13 +4498,12 @@ export default function App() {
         );
       }
     })();
+    };
 
     // 10c. Initial Inbound Sync & Safe Realtime: Pull Multi-Cabang (cabang & transfer_stok_cabang, tombstone-safe)
-    let cancelledBranchEffect = false;
-    let branchChannel: ReturnType<typeof subscribeBranchesRealtime> = null;
-    let branchTransferChannel: ReturnType<typeof subscribeBranchTransfersRealtime> = null;
-
-    (async () => {
+    const startBranchesSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       if (isDemoMode()) return;
       const pendingDeleteBranchIds = getPendingDeleteIds('branches');
       if (pendingDeleteBranchIds.length > 0) {
@@ -4109,8 +4608,11 @@ export default function App() {
         );
       }
     })();
+    };
 
-    (async () => {
+    const startBranchTransfersSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       if (isDemoMode()) return;
       const pendingDeleteTrfIds = getPendingDeleteIds('branch_transfers');
       if (pendingDeleteTrfIds.length > 0) {
@@ -4204,12 +4706,12 @@ export default function App() {
         );
       }
     })();
+    };
 
     // 10d. Initial Inbound Sync & Safe Realtime: Pull Riwayat Shift Kasir (riwayat_shift_kasir) dari Supabase
-    let cancelledShiftEffect = false;
-    let cashierShiftChannel: ReturnType<typeof subscribeCashierShiftsRealtime> = null;
-
-    (async () => {
+    const startCashierShiftsSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       if (isDemoMode()) return;
 
       // Step 1: Replay any pending clear-all or individual cloud deletes FIRST
@@ -4335,12 +4837,12 @@ export default function App() {
         );
       }
     })();
+    };
 
     // 10e. Initial Inbound Sync & Safe Realtime: Pull Faktur Pembelian & Hutang PBF (faktur_pembelian, tombstone-safe)
-    let cancelledPurchaseInvoiceEffect = false;
-    let purchaseInvoiceChannel: ReturnType<typeof subscribePurchaseInvoicesRealtime> = null;
-
-    (async () => {
+    const startPurchaseInvoicesSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       if (isDemoMode()) return;
       const pendingDeleteInvIds = getPendingDeleteIds('purchase_invoices');
       if (pendingDeleteInvIds.length > 0) {
@@ -4445,12 +4947,12 @@ export default function App() {
         );
       }
     })();
+    };
 
     // 10f. Initial Inbound Sync & Safe Realtime: Pull Pesanan Pembelian & Riwayat Surat Pesanan (surat_pesanan)
-    let cancelledPurchaseOrderEffect = false;
-    let purchaseOrderChannel: ReturnType<typeof subscribePurchaseOrdersRealtime> = null;
-
-    (async () => {
+    const startPurchaseOrdersSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       if (isDemoMode()) return;
 
       const pendingDeleteIds = getPendingDeleteIds('purchase_orders');
@@ -4565,12 +5067,12 @@ export default function App() {
         purchaseOrderChannelRef.current = purchaseOrderChannel;
       }
     })();
+    };
 
     // 10g. Initial Inbound Sync & Safe Realtime: Strategi Marketing (strategi_marketing)
-    let cancelledMarketingEffect = false;
-    let marketingChannel: ReturnType<typeof subscribeMarketingCampaignsRealtime> = null;
-
-    (async () => {
+    const startMarketingSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
       if (isDemoMode()) return;
 
       const pendingDeleteIds = getPendingDeleteIds('marketing_campaigns');
@@ -4668,399 +5170,75 @@ export default function App() {
         marketingChannelRef.current = marketingChannel;
       }
     })();
+    };
 
-    // RME, Arsip Morbiditas & Schedules Realtime subscribed conditionally after table availability check above
+    const scheduleWave = (delayMs: number, fn: () => void) => {
+      const tid = window.setTimeout(() => {
+        if (!effectDisposed && !isDemoMode()) {
+          fn();
+        }
+      }, delayMs);
+      waveTimers.push(tid);
+    };
 
-    // Realtime subscription for Medicines (Two-Way Sync)
-    const medicineChannel = subscribeMedicinesRealtime(
-      (newMed) => {
-        if (isDemoMode()) return;
-        setMedicines((prev) => {
-          if (prev.some((m) => m.id === newMed.id)) {
-            return prev.map((m) => (m.id === newMed.id ? newMed : m));
-          }
-          return normalizeUniqueMedicines([newMed, ...prev]).items;
-        });
-      },
-      (updatedMed) => {
-        if (isDemoMode()) return;
-        setMedicines((prev) => {
-          if (prev.some((m) => m.id === updatedMed.id)) {
-            return prev.map((m) => (m.id === updatedMed.id ? updatedMed : m));
-          }
-          return normalizeUniqueMedicines([updatedMed, ...prev]).items;
-        });
-      },
-      (delId) => {
-        if (isDemoMode()) return;
-        setMedicines((prev) => prev.filter((m) => m.id !== delId));
-      }
-    );
-    medicineChannelRef.current = medicineChannel;
-
-    // Realtime subscription for Mitra Orders (tombstone-safe)
-    const mitraOrderChannel = subscribeMitraOrdersRealtime(
-      (newOrd) => {
-        if (!newOrd?.id || getDeletedIdsSet('mitra_orders').has(newOrd.id)) return;
-        setMitraOrders((prev) => {
-          const next = prev.some((o) => o.id === newOrd.id)
-            ? prev.map((o) => (o.id === newOrd.id ? newOrd : o))
-            : [newOrd, ...prev];
-          persistMitraOrdersNow(next);
-          return next;
-        });
-      },
-      (updatedOrd) => {
-        if (!updatedOrd?.id || getDeletedIdsSet('mitra_orders').has(updatedOrd.id)) return;
-        setMitraOrders((prev) => {
-          const next = prev.map((o) => (o.id === updatedOrd.id ? updatedOrd : o));
-          persistMitraOrdersNow(next);
-          return next;
-        });
-      },
-      (delId) => {
-        const cleanId = String(delId || '').trim();
-        if (!cleanId) return;
-        recordRemoteDeletedId('mitra_orders', cleanId);
-        setMitraOrders((prev) => {
-          const next = prev.filter((o) => o.id !== cleanId);
-          persistMitraOrdersNow(next);
-          return next;
-        });
-      }
-    );
-
-    // 5. Real-time Inbound Sync: Micro-batched & bounded listener for Patients (tombstone-safe)
-    const pendingPatientUpserts = new Map<string, Patient>();
-    const pendingPatientDeletes = new Set<string>();
-    let patientBatchTimer: number | null = null;
-
-    const flushPatientRealtimeBatch = () => {
-      patientBatchTimer = null;
-      const upserts = Array.from(pendingPatientUpserts.values());
-      const deletes = new Set(pendingPatientDeletes);
-      pendingPatientUpserts.clear();
-      pendingPatientDeletes.clear();
-      if (upserts.length === 0 && deletes.size === 0) return;
-
-      const deletedPatientSet = getDeletedIdsSet('patients');
-      const filteredUpserts = upserts.filter(
-        (p) => ![p.id, p.dbId, p.noRm].some((k) => k && deletedPatientSet.has(String(k).trim()))
-      );
-
-      setPatients((prev) => {
-        const nextList = prev.filter(
-          (p) =>
-            !deletes.has(String(p.dbId || '')) &&
-            !deletes.has(String(p.id)) &&
-            !deletes.has(String(p.noRm || '')) &&
-            ![p.id, p.dbId, p.noRm].some((k) => k && deletedPatientSet.has(String(k).trim()))
-        );
-        const merged =
-          filteredUpserts.length > 0 ? mergePatientLists(filteredUpserts.reverse(), nextList) : nextList;
-        return merged.length > 250 ? merged.slice(0, 250) : merged;
+    if (isLoginOrRegView) {
+      // Mode Login / Registrasi Pegawai: hanya sinkronkan profil fasilitas, daftar pegawai & cabang
+      startFacilityProfileSync();
+      startStaffSync();
+      startBranchesSync();
+    } else if (isPortalView) {
+      // Mode Portal Pelanggan / Mitra: hanya muat katalog, promo, jadwal, cabang, order mitra, registrasi & pasien
+      startFacilityProfileSync();
+      startStaffSync();
+      startBranchesSync();
+      startMedicinesSync();
+      startSchedulesSync();
+      startMitraOrdersSync();
+      scheduleWave(250, () => {
+        startPromoDiscountSync();
+        startMitraSync();
+        startOnlineRegSync();
+        startPatientsSync();
       });
-    };
+    } else if (isFullAppView) {
+      // Mode ERP Terautentikasi: sinkronisasi bertahap 3 gelombang agar main thread mobile tetap ringan
+      startFacilityProfileSync();
+      startStaffSync();
+      startBranchesSync();
+      startMedicinesSync();
+      startSchedulesSync();
+      startPatientsSync();
+      startOnlineRegSync();
+      startPrescriptionsSync();
+      startMitraOrdersSync();
 
-    const schedulePatientBatchFlush = () => {
-      if (patientBatchTimer !== null) return;
-      patientBatchTimer = window.setTimeout(flushPatientRealtimeBatch, 250);
-    };
+      scheduleWave(350, () => {
+        startTransactionsSync();
+        startStockCardSync();
+        startCashierShiftsSync();
+        startFeeConfigSync();
+        startFeeLedgerSync();
+        startPromoDiscountSync();
+        startMitraSync();
+        startSuppliersSync();
+      });
 
-    const patientChannel = subscribePatientsRealtime(
-      (newPatient) => {
-        const deletedPatientSet = getDeletedIdsSet('patients');
-        if ([newPatient.id, newPatient.dbId, newPatient.noRm].some((k) => k && deletedPatientSet.has(String(k).trim()))) {
-          return;
-        }
-        const key = String(newPatient.dbId || newPatient.id || newPatient.noRm);
-        pendingPatientDeletes.delete(key);
-        pendingPatientUpserts.set(key, newPatient);
-        schedulePatientBatchFlush();
-      },
-      (updatedPatient) => {
-        const deletedPatientSet = getDeletedIdsSet('patients');
-        if (
-          [updatedPatient.id, updatedPatient.dbId, updatedPatient.noRm].some(
-            (k) => k && deletedPatientSet.has(String(k).trim())
-          )
-        ) {
-          return;
-        }
-        const key = String(updatedPatient.dbId || updatedPatient.id || updatedPatient.noRm);
-        pendingPatientDeletes.delete(key);
-        pendingPatientUpserts.set(key, updatedPatient);
-        schedulePatientBatchFlush();
-      },
-      (deletedId) => {
-        const key = String(deletedId || '').trim();
-        if (!key) return;
-        recordRemoteDeletedId('patients', key);
-        pendingPatientUpserts.delete(key);
-        pendingPatientDeletes.add(key);
-        schedulePatientBatchFlush();
-      }
-    );
-
-    // 6. Real-time Inbound Sync: Listen to INSERT, UPDATE, DELETE for Online Registrations
-    const onlineRegChannel = subscribeOnlineRegistrationsRealtime(
-      (newReg) => {
-        setOnlineRegistrations((prev) => {
-          const exists = prev.some((r) => r.id === newReg.id || r.bookingCode === newReg.bookingCode);
-          if (exists) {
-            return prev.map((r) => (r.id === newReg.id || r.bookingCode === newReg.bookingCode ? newReg : r));
-          }
-          return [newReg, ...prev];
-        });
-      },
-      (updatedReg) => {
-        setOnlineRegistrations((prev) => {
-          const exists = prev.some((r) => r.id === updatedReg.id || r.bookingCode === updatedReg.bookingCode);
-          if (exists) {
-            return prev.map((r) => (r.id === updatedReg.id || r.bookingCode === updatedReg.bookingCode ? updatedReg : r));
-          }
-          return [updatedReg, ...prev];
-        });
-      },
-      (deletedId) => {
-        setOnlineRegistrations((prev) => prev.filter((r) => r.id !== deletedId));
-      }
-    );
-
-    // 7. Real-time Inbound Sync: Listen to INSERT, UPDATE, DELETE for ICD-10
-    const icdChannel = subscribeICD10Realtime(
-      (newIcd) => {
-        setIcd10List((prev) => {
-          const exists = prev.some((i) => i.code === newIcd.code);
-          if (exists) {
-            return prev.map((i) => (i.code === newIcd.code ? newIcd : i));
-          }
-          return [...prev, newIcd];
-        });
-      },
-      (updatedIcd) => {
-        setIcd10List((prev) => {
-          const exists = prev.some((i) => i.code === updatedIcd.code);
-          if (exists) {
-            return prev.map((i) => (i.code === updatedIcd.code ? updatedIcd : i));
-          }
-          return [...prev, updatedIcd];
-        });
-      },
-      (deletedCode) => {
-        setIcd10List((prev) => prev.filter((i) => i.code !== deletedCode));
-      }
-    );
-
-    // 8. Real-time Inbound Sync: Listen to INSERT, UPDATE, DELETE for Pegawai (tombstone-safe)
-    const staffChannel = subscribeStaffRealtime(
-      (newStaff) => {
-        const cleanId = String(newStaff?.id || '').trim();
-        if (!cleanId) return;
-        if (getPendingDeleteIds('staff').includes(cleanId)) return;
-        markIdsPendingSync('staff', [cleanId]);
-        confirmCloudSync('staff', [cleanId]);
-        const safeStaff = ensurePrimaryOwnerStaffRole(newStaff).staff;
-        setStaffList((prev) => {
-          const exists = prev.some((s) => s.id === safeStaff.id);
-          const nextList = exists
-            ? prev.map((s) => (s.id === safeStaff.id ? safeStaff : s))
-            : [...prev, safeStaff];
-          saveStaffListLocally(nextList, { broadcast: false });
-          return nextList;
-        });
-      },
-      (updatedStaff) => {
-        const cleanId = String(updatedStaff?.id || '').trim();
-        if (!cleanId || getPendingDeleteIds('staff').includes(cleanId)) return;
-        const safeStaff = ensurePrimaryOwnerStaffRole(updatedStaff).staff;
-        setStaffList((prev) => {
-          const exists = prev.some((s) => s.id === safeStaff.id);
-          const nextList = exists
-            ? prev.map((s) => (s.id === safeStaff.id ? safeStaff : s))
-            : [...prev, safeStaff];
-          saveStaffListLocally(nextList, { broadcast: false });
-          return nextList;
-        });
-      },
-      (deletedId) => {
-        const cleanId = String(deletedId || '').trim();
-        if (!cleanId) return;
-        recordRemoteDeletedId('staff', cleanId);
-        setStaffList((prev) => {
-          const nextList = prev.filter((s) => s.id !== cleanId);
-          saveStaffListLocally(nextList, { broadcast: false });
-          return nextList;
-        });
-      }
-    );
-
-    // 9. Real-time Inbound Sync: Listen to INSERT / UPDATE for Profil Fasilitas (Apotek, APJ, DPJ & Role Permissions)
-    const facilityProfileChannel = subscribeFacilityProfileRealtime((bundle) => {
-      const applied = applyRemoteFacilityProfiles(bundle);
-      if (applied.rolePermissions) {
-        setRolePermissions(applied.rolePermissions);
-      }
-      if (applied.changed) {
-        syncAppStatesFromProfiles();
-      }
-    });
-
-    // 10. Real-time Inbound Sync: Listen to INSERT / UPDATE / DELETE for Riwayat Skrining Resep
-    const prescriptionChannel = subscribePrescriptionsRealtime(
-      (newRx) => {
-        const cleanId = String(newRx.id || '').trim();
-        if (!cleanId || isDemoPrescriptionId(cleanId)) return;
-        if (getDeletedIdsSet('prescriptions').has(cleanId)) return;
-        setPrescriptions((prev) => {
-          const next = prev.some((p) => String(p.id).trim() === cleanId)
-            ? prev.map((p) => (String(p.id).trim() === cleanId ? newRx : p))
-            : [newRx, ...prev];
-          persistPrescriptionsNow(next);
-          return next;
-        });
-      },
-      (updatedRx) => {
-        const cleanId = String(updatedRx.id || '').trim();
-        if (!cleanId || isDemoPrescriptionId(cleanId)) return;
-        if (getDeletedIdsSet('prescriptions').has(cleanId)) return;
-        setPrescriptions((prev) => {
-          const next = prev.some((p) => String(p.id).trim() === cleanId)
-            ? prev.map((p) => (String(p.id).trim() === cleanId ? updatedRx : p))
-            : [updatedRx, ...prev];
-          persistPrescriptionsNow(next);
-          return next;
-        });
-      },
-      (deletedId) => {
-        const cleanId = String(deletedId || '').trim();
-        if (!cleanId) return;
-        recordRemoteDeletedId('prescriptions', cleanId);
-        setPrescriptions((prev) => {
-          const next = prev.filter((p) => String(p.id).trim() !== cleanId);
-          persistPrescriptionsNow(next);
-          return next;
-        });
-      }
-    );
-
-    // 11. Real-time Inbound Sync: Listen to INSERT / UPDATE / DELETE for Master Data Mitra (tombstone-safe)
-    const mitraChannel = subscribeMitraRealtime(
-      (newMitra) => {
-        if (!newMitra?.id || ['MTR-001', 'MTR-002', 'MTR-003'].includes(newMitra.id)) return;
-        if (getDeletedIdsSet('mitra').has(newMitra.id)) return;
-        setMitraList((prev) => {
-          const next = prev.some((m) => m.id === newMitra.id)
-            ? prev.map((m) => (m.id === newMitra.id ? newMitra : m))
-            : [newMitra, ...prev];
-          persistMitraListNow(next);
-          return next;
-        });
-      },
-      (updatedMitra) => {
-        if (!updatedMitra?.id || ['MTR-001', 'MTR-002', 'MTR-003'].includes(updatedMitra.id)) return;
-        if (getDeletedIdsSet('mitra').has(updatedMitra.id)) return;
-        setMitraList((prev) => {
-          const next = prev.some((m) => m.id === updatedMitra.id)
-            ? prev.map((m) => (m.id === updatedMitra.id ? updatedMitra : m))
-            : [updatedMitra, ...prev];
-          persistMitraListNow(next);
-          return next;
-        });
-      },
-      (deletedId) => {
-        const cleanId = String(deletedId || '').trim();
-        if (!cleanId) return;
-        recordRemoteDeletedId('mitra', cleanId);
-        setMitraList((prev) => {
-          const next = prev.filter((m) => m.id !== cleanId);
-          persistMitraListNow(next);
-          return next;
-        });
-      }
-    );
-
-    const promoDiscountChannel = subscribeDiscountsPromosRealtime(
-      (item) => {
-        const deletedSet = getDeletedIdsSet('discounts_promos');
-        if (item.kind === 'DISCOUNT' && item.discount) {
-          if (!item.discount.id || deletedSet.has(item.discount.id)) return;
-          setSalesDiscounts((prev) => {
-            const exists = prev.some((d) => d.id === item.discount!.id);
-            return exists
-              ? prev.map((d) => (d.id === item.discount!.id ? item.discount! : d))
-              : [item.discount!, ...prev];
-          });
-        } else if (item.kind === 'PROMO' && item.promo) {
-          if (!item.promo.id || deletedSet.has(item.promo.id)) return;
-          setPromoAds((prev) => {
-            const exists = prev.some((p) => p.id === item.promo!.id);
-            return exists
-              ? prev.map((p) => (p.id === item.promo!.id ? item.promo! : p))
-              : [item.promo!, ...prev];
-          });
-        }
-      },
-      (deletedId) => {
-        const cleanId = String(deletedId || '').trim();
-        if (!cleanId) return;
-        recordRemoteDeletedId('discounts_promos', cleanId);
-        setSalesDiscounts((prev) => prev.filter((d) => d.id !== cleanId));
-        setPromoAds((prev) => prev.filter((p) => p.id !== cleanId));
-      }
-    );
-
-    const feeConfigChannel = subscribeFeeConfigRealtime((remoteFeeConfig) => {
-      if (isDemoMode()) return;
-      setFeeConfig(remoteFeeConfig);
-      if (remoteFeeConfig.payrollConfig) {
-        try {
-          demoSetItem('latisha_payroll_overtime_config', JSON.stringify(remoteFeeConfig.payrollConfig));
-        } catch {}
-      }
-    });
-
-    const feeLedgerChannel = subscribeFeeLedgerRealtime(
-      (remoteEntry) => {
-        if (isDemoMode() || !remoteEntry?.id || isDemoFeeLedgerId(remoteEntry.id)) return;
-        const cleanId = String(remoteEntry.id).trim();
-        const cleanTrxId = String(remoteEntry.transaction_id || '').trim();
-        if (
-          getDeletedIdsSet('fee_ledger').has(cleanId) ||
-          (cleanTrxId && getDeletedIdsSet('transactions').has(cleanTrxId))
-        ) {
-          return;
-        }
-        if (
-          transactionsAuthoritativeRef.current &&
-          (!cleanTrxId ||
-            (!transactionsRef.current.some((t) => t.id === cleanTrxId) &&
-              !getPendingSyncIdsSet('transactions').has(cleanTrxId)))
-        ) {
-          return;
-        }
-        setFeeLedger((prev) => {
-          const exists = prev.some((item) => item.id === cleanId);
-          const next = exists
-            ? prev.map((item) => (item.id === cleanId ? remoteEntry : item))
-            : [remoteEntry, ...prev];
-          persistFeeLedgerNow(next);
-          return next;
-        });
-      },
-      (deletedId) => {
-        const cleanId = String(deletedId || '').trim();
-        if (isDemoMode() || !cleanId) return;
-        recordRemoteDeletedId('fee_ledger', cleanId);
-        setFeeLedger((prev) => {
-          const next = prev.filter((item) => item.id !== cleanId);
-          persistFeeLedgerNow(next);
-          return next;
-        });
-      }
-    );
+      scheduleWave(900, () => {
+        startRmeSync();
+        startLabSync();
+        startOpnameSync();
+        startMorbiditySync();
+        startPurchaseInvoicesSync();
+        startPurchaseOrdersSync();
+        startMarketingSync();
+        startBranchTransfersSync();
+        startIcdSync();
+      });
+    }
 
     return () => {
+      effectDisposed = true;
+      waveTimers.forEach((tid) => window.clearTimeout(tid));
       if (patientBatchTimer !== null) {
         window.clearTimeout(patientBatchTimer);
         patientBatchTimer = null;
@@ -5086,60 +5264,61 @@ export default function App() {
       cancelledPurchaseInvoiceEffect = true;
       cancelledPurchaseOrderEffect = true;
       cancelledMarketingEffect = true;
-        const activeClient = getSupabaseClient();
-        if (activeClient) {
-          if (patientChannel) activeClient.removeChannel(patientChannel);
-          if (onlineRegChannel) activeClient.removeChannel(onlineRegChannel);
-          if (icdChannel) activeClient.removeChannel(icdChannel);
-          if (staffChannel) activeClient.removeChannel(staffChannel);
-          if (rmeChannel) activeClient.removeChannel(rmeChannel);
-          if (morbidityChannel) activeClient.removeChannel(morbidityChannel);
-          if (transactionChannel) activeClient.removeChannel(transactionChannel);
-          if (stockCardChannel) activeClient.removeChannel(stockCardChannel);
-          if (labChannel) activeClient.removeChannel(labChannel);
-          if (opnameChannel) activeClient.removeChannel(opnameChannel);
-          if (opnameChannelRef.current && opnameChannelRef.current !== opnameChannel) {
-            activeClient.removeChannel(opnameChannelRef.current);
-          }
-          opnameChannelRef.current = null;
-          if (scheduleChannel) activeClient.removeChannel(scheduleChannel);
-          if (medicineChannel) activeClient.removeChannel(medicineChannel);
-          if (medicineChannelRef.current && medicineChannelRef.current !== medicineChannel) {
-            activeClient.removeChannel(medicineChannelRef.current);
-          }
-          medicineChannelRef.current = null;
-          if (mitraChannel) activeClient.removeChannel(mitraChannel);
-          if (mitraOrderChannel) activeClient.removeChannel(mitraOrderChannel);
-          if (supplierChannel) activeClient.removeChannel(supplierChannel);
-          if (branchChannel) activeClient.removeChannel(branchChannel);
-          if (branchTransferChannel) activeClient.removeChannel(branchTransferChannel);
-          if (cashierShiftChannel) activeClient.removeChannel(cashierShiftChannel);
-          if (purchaseInvoiceChannel) activeClient.removeChannel(purchaseInvoiceChannel);
-          if (purchaseOrderChannel) activeClient.removeChannel(purchaseOrderChannel);
-          if (
-            purchaseOrderChannelRef.current &&
-            purchaseOrderChannelRef.current !== purchaseOrderChannel
-          ) {
-            activeClient.removeChannel(purchaseOrderChannelRef.current);
-          }
-          purchaseOrderChannelRef.current = null;
-          if (marketingChannel) activeClient.removeChannel(marketingChannel);
-          if (
-            marketingChannelRef.current &&
-            marketingChannelRef.current !== marketingChannel
-          ) {
-            activeClient.removeChannel(marketingChannelRef.current);
-          }
-          marketingChannelRef.current = null;
-          if (facilityProfileChannel) activeClient.removeChannel(facilityProfileChannel);
-          cancelledPrescriptionEffect = true;
-          if (prescriptionChannel) activeClient.removeChannel(prescriptionChannel);
-          if (promoDiscountChannel) activeClient.removeChannel(promoDiscountChannel);
-          if (feeConfigChannel) activeClient.removeChannel(feeConfigChannel);
-          if (feeLedgerChannel) activeClient.removeChannel(feeLedgerChannel);
+      cancelledPrescriptionEffect = true;
+
+      const activeClient = getSupabaseClient();
+      if (activeClient) {
+        if (patientChannel) activeClient.removeChannel(patientChannel);
+        if (onlineRegChannel) activeClient.removeChannel(onlineRegChannel);
+        if (icdChannel) activeClient.removeChannel(icdChannel);
+        if (staffChannel) activeClient.removeChannel(staffChannel);
+        if (rmeChannel) activeClient.removeChannel(rmeChannel);
+        if (morbidityChannel) activeClient.removeChannel(morbidityChannel);
+        if (transactionChannel) activeClient.removeChannel(transactionChannel);
+        if (stockCardChannel) activeClient.removeChannel(stockCardChannel);
+        if (labChannel) activeClient.removeChannel(labChannel);
+        if (opnameChannel) activeClient.removeChannel(opnameChannel);
+        if (opnameChannelRef.current && opnameChannelRef.current !== opnameChannel) {
+          activeClient.removeChannel(opnameChannelRef.current);
         }
+        opnameChannelRef.current = null;
+        if (scheduleChannel) activeClient.removeChannel(scheduleChannel);
+        if (medicineChannel) activeClient.removeChannel(medicineChannel);
+        if (medicineChannelRef.current && medicineChannelRef.current !== medicineChannel) {
+          activeClient.removeChannel(medicineChannelRef.current);
+        }
+        medicineChannelRef.current = null;
+        if (mitraChannel) activeClient.removeChannel(mitraChannel);
+        if (mitraOrderChannel) activeClient.removeChannel(mitraOrderChannel);
+        if (supplierChannel) activeClient.removeChannel(supplierChannel);
+        if (branchChannel) activeClient.removeChannel(branchChannel);
+        if (branchTransferChannel) activeClient.removeChannel(branchTransferChannel);
+        if (cashierShiftChannel) activeClient.removeChannel(cashierShiftChannel);
+        if (purchaseInvoiceChannel) activeClient.removeChannel(purchaseInvoiceChannel);
+        if (purchaseOrderChannel) activeClient.removeChannel(purchaseOrderChannel);
+        if (
+          purchaseOrderChannelRef.current &&
+          purchaseOrderChannelRef.current !== purchaseOrderChannel
+        ) {
+          activeClient.removeChannel(purchaseOrderChannelRef.current);
+        }
+        purchaseOrderChannelRef.current = null;
+        if (marketingChannel) activeClient.removeChannel(marketingChannel);
+        if (
+          marketingChannelRef.current &&
+          marketingChannelRef.current !== marketingChannel
+        ) {
+          activeClient.removeChannel(marketingChannelRef.current);
+        }
+        marketingChannelRef.current = null;
+        if (facilityProfileChannel) activeClient.removeChannel(facilityProfileChannel);
+        if (prescriptionChannel) activeClient.removeChannel(prescriptionChannel);
+        if (promoDiscountChannel) activeClient.removeChannel(promoDiscountChannel);
+        if (feeConfigChannel) activeClient.removeChannel(feeConfigChannel);
+        if (feeLedgerChannel) activeClient.removeChannel(feeLedgerChannel);
+      }
     };
-  }, [isDemoActive]);
+  }, [isDemoActive, isLoggedIn, showMitraPortal, showPublicPortal, showStaffRegistration]);
 
   // Cross-tab instant sync for staffList & rolePermissions (including ?view=registrasi-pegawai in another tab)
   useEffect(() => {
@@ -11271,8 +11450,9 @@ export default function App() {
     window.dispatchEvent(new Event('latisha_profile_updated'));
   };
 
-  const handleEnterDemoMode = (targetRole?: StaffRole, openTargetPortal?: 'mitra' | 'pasien') => {
+  const handleEnterDemoMode = async (targetRole?: StaffRole, openTargetPortal?: 'mitra' | 'pasien') => {
     activateDemoModeStorage();
+    const { seedDemoSandboxStorage } = await import('./data/demoData');
     const bundle = seedDemoSandboxStorage(false);
     setIsDemoActive(true);
     applyDemoSeedToReactStates(bundle, true, targetRole);
@@ -11283,7 +11463,8 @@ export default function App() {
     }
   };
 
-  const handleResetDemoData = () => {
+  const handleResetDemoData = async () => {
+    const { seedDemoSandboxStorage } = await import('./data/demoData');
     const freshBundle = seedDemoSandboxStorage(true);
     applyDemoSeedToReactStates(freshBundle, false, activeRole);
     setDemoResetToast('Data Demo berhasil di-reset ke kondisi awal! Database asli apotek tetap 100% aman.');
@@ -11423,38 +11604,51 @@ export default function App() {
   const [globalAttendanceRecords, setGlobalAttendanceRecords] = useState<StaffAttendanceRecord[]>(() =>
     loadLocalAttendanceRecords()
   );
-  const [attendanceClockTick, setAttendanceClockTick] = useState<number>(() => Date.now());
+  const [overdueCurrentUserSchedules, setOverdueCurrentUserSchedules] = useState<DutySchedule[]>([]);
   const [dismissedCheckInBanner, setDismissedCheckInBanner] = useState<boolean>(false);
 
   useEffect(() => {
     if (!isLoggedIn) return;
     const onAttUpdated = () => setGlobalAttendanceRecords(loadLocalAttendanceRecords());
     window.addEventListener(ATTENDANCE_UPDATED_EVENT, onAttUpdated);
-    const interval = window.setInterval(() => {
-      setAttendanceClockTick(Date.now());
-    }, 30000);
     return () => {
       window.removeEventListener(ATTENDANCE_UPDATED_EVENT, onAttUpdated);
-      window.clearInterval(interval);
     };
   }, [isLoggedIn]);
 
-  const overdueCurrentUserSchedules = useMemo(() => {
-    if (!isLoggedIn || showPublicPortal || showMitraPortal) return [];
-    const now = new Date(attendanceClockTick);
-    return findOverdueUncheckedSchedules({
-      schedules,
-      records: globalAttendanceRecords,
-      now,
-      graceMinutes: 5,
-      targetStaffId: currentStaff?.id,
-      targetStaffName: userName
-    });
+  useEffect(() => {
+    if (!isLoggedIn || showPublicPortal || showMitraPortal) {
+      setOverdueCurrentUserSchedules((prev) => (prev.length === 0 ? prev : []));
+      return;
+    }
+    const evaluateOverdue = () => {
+      const next = findOverdueUncheckedSchedules({
+        schedules,
+        records: globalAttendanceRecords,
+        now: new Date(),
+        graceMinutes: 5,
+        targetStaffId: currentStaff?.id,
+        targetStaffName: userName
+      });
+      setOverdueCurrentUserSchedules((prev) => {
+        if (
+          prev.length === next.length &&
+          prev.every((item, idx) => item.id === next[idx]?.id)
+        ) {
+          return prev;
+        }
+        return next;
+      });
+    };
+    evaluateOverdue();
+    const interval = window.setInterval(evaluateOverdue, 30000);
+    return () => {
+      window.clearInterval(interval);
+    };
   }, [
     isLoggedIn,
     showPublicPortal,
     showMitraPortal,
-    attendanceClockTick,
     schedules,
     globalAttendanceRecords,
     currentStaff?.id,
@@ -11463,7 +11657,7 @@ export default function App() {
 
   useEffect(() => {
     if (overdueCurrentUserSchedules.length === 0) return;
-    const todayIso = getTodayIsoLocal(new Date(attendanceClockTick));
+    const todayIso = getTodayIsoLocal(new Date());
     const unalerted = overdueCurrentUserSchedules.filter(
       (s) => !hasTriggeredCheckInOverdueAlert(todayIso, s.id)
     );
@@ -11472,7 +11666,7 @@ export default function App() {
     unalerted.forEach((s) => markTriggeredCheckInOverdueAlert(todayIso, s.id));
     setDismissedCheckInBanner(false);
     playCheckInOverdueAlarmAndVoice().catch(() => {});
-  }, [overdueCurrentUserSchedules, attendanceClockTick]);
+  }, [overdueCurrentUserSchedules]);
 
   const pendingShiftApprovalCount = useMemo(
     () => cashierShifts.filter((s) => s.status === 'Menunggu Approval Tutup Kasir').length,
@@ -12771,13 +12965,11 @@ export default function App() {
           <Suspense fallback={<TabLoadingFallback />}>
           {isMobileMode ? (
             <MobileFieldStaffView
-              patients={patients}
               medicines={medicines}
               queue={queue}
               transactions={transactions}
               onApplyStockOpname={handleApplyStockOpname}
               onCloseMobileMode={() => setIsMobileMode(false)}
-              onSaveMobileRME={(rec) => handleSaveRME(rec)}
               staffName={userName}
               opnameRecords={opnameRecords}
               stockMutations={stockMutations}
@@ -13767,8 +13959,10 @@ export default function App() {
       </div>
 
       {/* Pharmacy & APJ Settings Modal (Accessible via Header Settings Icon - APJ / Owner Only) */}
-      <PharmacySettingsModal
-        isOpen={isSettingsModalOpen}
+      {isSettingsModalOpen && (
+        <Suspense fallback={null}>
+          <PharmacySettingsModal
+            isOpen={isSettingsModalOpen}
         initialTab={settingsInitialTab}
         onClose={() => setIsSettingsModalOpen(false)}
         activeRole={activeRole}
@@ -13982,21 +14176,25 @@ export default function App() {
             }
           } catch (e) {}
         }}
-      />
+          />
+        </Suspense>
+      )}
       {/* Interactive Floating Customer / Patient Service Chat Widget */}
-      <PatientServiceChatWidget
-        currentBranch={currentBranch}
-        medicines={medicines}
-        doctors={effectiveDoctors}
-        schedules={schedules}
-        feeConfig={feeConfig}
-        promoAds={promoAds}
-        salesDiscounts={salesDiscounts}
-        queue={queue}
-        staffName={userName}
-        onNavigateTab={handleNavigateTab}
-        onOpenPatientPortal={() => setShowPublicPortal(true)}
-      />
+      <Suspense fallback={null}>
+        <PatientServiceChatWidget
+          currentBranch={currentBranch}
+          medicines={medicines}
+          doctors={effectiveDoctors}
+          schedules={schedules}
+          feeConfig={feeConfig}
+          promoAds={promoAds}
+          salesDiscounts={salesDiscounts}
+          queue={queue}
+          staffName={userName}
+          onNavigateTab={handleNavigateTab}
+          onOpenPatientPortal={() => setShowPublicPortal(true)}
+        />
+      </Suspense>
     </div>
     </RoleAccessProvider>
   );

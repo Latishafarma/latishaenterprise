@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import { demoGetItem, demoSetItem, demoRemoveItem } from '../utils/demoSandbox';
 import {
   ClipboardCheck,
@@ -48,7 +48,10 @@ import {
   DEFAULT_PAGE_SIZE_OPTIONS
 } from './PaginationControls';
 import { MedicineCategorySymbol } from './MedicineCategorySymbol';
-import { CameraBarcodeScannerModal, playBarcodeBeep } from './CameraBarcodeScannerModal';
+import { playBarcodeBeep } from '../utils/barcodeBeep';
+const CameraBarcodeScannerModal = lazy(() =>
+  import('./CameraBarcodeScannerModal').then((m) => ({ default: m.CameraBarcodeScannerModal }))
+);
 import {
   SUPABASE_OPNAME_SQL_SCHEMA,
   DEFAULT_OPNAME_TABLE,
@@ -3855,16 +3858,20 @@ export const StockOpnameView: React.FC<StockOpnameViewProps> = ({
         </div>
       )}
 
-      <CameraBarcodeScannerModal
-        isOpen={showCameraScanner}
-        onClose={() => setShowCameraScanner(false)}
-        title="Scan Barcode Stok Opname"
-        subtitle="Arahkan kamera ke barcode kemasan obat untuk langsung menampilkan obat dan menghitung stok fisik."
-        scanMode="barcode"
-        onScanSuccess={(code) => {
-          processBarcodeScan(code);
-        }}
-      />
+      {showCameraScanner && (
+        <Suspense fallback={null}>
+          <CameraBarcodeScannerModal
+            isOpen={showCameraScanner}
+            onClose={() => setShowCameraScanner(false)}
+            title="Scan Barcode Stok Opname"
+            subtitle="Arahkan kamera ke barcode kemasan obat untuk langsung menampilkan obat dan menghitung stok fisik."
+            scanMode="barcode"
+            onScanSuccess={(code) => {
+              processBarcodeScan(code);
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };

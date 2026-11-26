@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useDeferredValue, lazy, Suspense } from 'react';
 import {
   Smartphone,
   Stethoscope,
@@ -6,8 +6,6 @@ import {
   Volume2,
   Search,
   User,
-  HeartPulse,
-  Send,
   CheckCircle,
   Pill,
   ArrowLeft,
@@ -40,13 +38,13 @@ import {
   Flame,
   MapPin,
   ScanBarcode,
-  Camera
+  Camera,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react';
 import {
-  Patient,
   Medicine,
   PatientQueue,
-  RMERecord,
   Transaction,
   StockOpnameRecord,
   StockOpnameKind,
@@ -65,13 +63,13 @@ import {
   getClientOpnameSessionId,
   subscribeLiveOpnameActivityChannel,
   LiveOpnameActivityController,
-  fetchPatientsPaginatedFromSupabase,
-  fetchMedicineByBarcodeOrIdFromSupabase,
-  getSupabaseConfig,
-  deduplicatePatients
+  fetchMedicineByBarcodeOrIdFromSupabase
 } from '../utils/supabaseClient';
 import { isDemoMode, demoGetItem, demoSetItem } from '../utils/demoSandbox';
-import { CameraBarcodeScannerModal, playBarcodeBeep } from './CameraBarcodeScannerModal';
+import { playBarcodeBeep } from '../utils/barcodeBeep';
+const CameraBarcodeScannerModal = lazy(() =>
+  import('./CameraBarcodeScannerModal').then((m) => ({ default: m.CameraBarcodeScannerModal }))
+);
 import { useIsOwnerAdmin } from '../utils/roleAccess';
 import {
   ATTENDANCE_UPDATED_EVENT,
@@ -111,7 +109,6 @@ interface MobileCountState {
 }
 
 interface MobileFieldStaffViewProps {
-  patients: Patient[];
   medicines: Medicine[];
   queue: PatientQueue[];
   transactions?: Transaction[];
@@ -143,7 +140,6 @@ interface MobileFieldStaffViewProps {
     opnameKind?: StockOpnameKind
   ) => void;
   onCloseMobileMode: () => void;
-  onSaveMobileRME: (record: RMERecord) => void;
   staffName?: string;
   opnameRecords?: StockOpnameRecord[];
   stockMutations?: StockMutation[];
@@ -155,14 +151,12 @@ interface MobileFieldStaffViewProps {
 }
 
 export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
-  patients,
   medicines,
   queue,
   transactions = [],
   onApplyStockOpname,
   onCloseMobileMode,
-  onSaveMobileRME,
-  staffName = 'dr. Anis Prima Dewi (Home Visit)',
+  staffName = 'Petugas Lapangan',
   opnameRecords = [],
   stockMutations = [],
   staffList = [],
@@ -172,7 +166,7 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
   onAuditLog
 }) => {
   // Mobile Tab: default to 'stokopname' as requested by user
-  const [mobileTab, setMobileTab] = useState<'stokopname' | 'cekstok' | 'homevisit' | 'antrean' | 'absensi'>('stokopname');
+  const [mobileTab, setMobileTab] = useState<'stokopname' | 'cekstok' | 'antrean' | 'absensi'>('stokopname');
   const isOwnerAdmin = useIsOwnerAdmin();
 
   // ================= MOBILE ATTENDANCE (KEHADIRAN, CUTI & LEMBUR MINGGU) STATE =================
@@ -416,8 +410,15 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
   }, [opnameKind]);
 
   const [opnameSearch, setOpnameSearch] = useState('');
+  const deferredOpnameSearch = useDeferredValue(opnameSearch);
   const [selectedRack, setSelectedRack] = useState<string>('ALL');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'UNCOUNTED' | 'COUNTED' | 'DIFF' | 'BEING_COUNTED_OTHER'>('ALL');
+  const [opnamePage, setOpnamePage] = useState(1);
+  const OPNAME_PAGE_SIZE = 20;
+
+  useEffect(() => {
+    setOpnamePage(1);
+  }, [deferredOpnameSearch, selectedRack, statusFilter]);
   
   // Physical count + Multi-Batch storage
   const [mobileCounts, setMobileCounts] = useState<Record<string, MobileCountState>>({});
@@ -940,8 +941,8 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
 
   // Filtered items based on search, rack, and status
   const filteredOpnameItems = useMemo(() => {
+    const q = deferredOpnameSearch.toLowerCase();
     return reconciledItems.filter((item) => {
-      const q = opnameSearch.toLowerCase();
       const matchSearch =
         !q ||
         item.name.toLowerCase().includes(q) ||
@@ -962,38 +963,60 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
 
       return matchSearch && matchRack && matchStatus;
     });
-  }, [reconciledItems, opnameSearch, selectedRack, statusFilter, remoteOpnameActivities]);
+  }, [reconciledItems, deferredOpnameSearch, selectedRack, statusFilter, remoteOpnameActivities]);
 
-  // Publish active mobile opname counts in real time to other devices/tabs
+  const totalOpnamePages = Math.max(1, Math.ceil(filteredOpnameItems.length / OPNAME_PAGE_SIZE));
+  const safeOpnamePage = Math.min(opnamePage, totalOpnamePages);
+  const paginatedOpnameItems = useMemo(() => {
+    const startIdx = (safeOpnamePage - 1) * OPNAME_PAGE_SIZE;
+    return filteredOpnameItems.slice(startIdx, startIdx + OPNAME_PAGE_SIZE);
+  }, [filteredOpnameItems, safeOpnamePage]);
+
+  const reconciledByIdMap = useMemo(() => {
+    const map = new Map<string, (typeof reconciledItems)[number]>();
+    reconciledItems.forEach((item) => map.set(item.id, item));
+    return map;
+  }, [reconciledItems]);
+
+  // Publish active mobile opname counts in real time (debounced O(counted) lookup)
   useEffect(() => {
     if (!activityControllerRef.current) return;
-    const nowIso = new Date().toISOString();
-    const nowLabel = new Date().toLocaleTimeString('id-ID', {
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-    const myItems: LiveOpnameItemActivity[] = [];
-    reconciledItems.forEach((r) => {
-      const isFocused = focusedMedicineId === r.id;
-      if (!r.hasCounted && !isFocused) return;
-      myItems.push({
-        medicineId: r.id,
-        medicineName: r.name,
-        staffName: `${staffName} (Mobile)`,
-        sessionId: myMobileSessionId,
-        physicalStock: r.hasCounted ? String(r.physicalStock) : '',
-        unit: r.unit,
-        batchCount: r.batchEntries.length,
-        statusText: r.hasCounted
-          ? `Input Fisik: ${r.physicalStock} ${r.unit}`
-          : 'Sedang mengisi angka fisik...',
-        isFocused,
-        updatedAt: nowIso,
-        updatedTimeLabel: nowLabel
+    const timer = window.setTimeout(() => {
+      if (!activityControllerRef.current) return;
+      const nowIso = new Date().toISOString();
+      const nowLabel = new Date().toLocaleTimeString('id-ID', {
+        hour: '2-digit',
+        minute: '2-digit'
       });
-    });
-    activityControllerRef.current.publishMyActivities(myItems);
-  }, [reconciledItems, focusedMedicineId, staffName, myMobileSessionId]);
+      const candidateIds = new Set<string>(Object.keys(mobileCounts));
+      if (focusedMedicineId) candidateIds.add(focusedMedicineId);
+
+      const myItems: LiveOpnameItemActivity[] = [];
+      candidateIds.forEach((medId) => {
+        const r = reconciledByIdMap.get(medId);
+        if (!r) return;
+        const isFocused = focusedMedicineId === r.id;
+        if (!r.hasCounted && !isFocused) return;
+        myItems.push({
+          medicineId: r.id,
+          medicineName: r.name,
+          staffName: `${staffName} (Mobile)`,
+          sessionId: myMobileSessionId,
+          physicalStock: r.hasCounted ? String(r.physicalStock) : '',
+          unit: r.unit,
+          batchCount: r.batchEntries.length,
+          statusText: r.hasCounted
+            ? `Input Fisik: ${r.physicalStock} ${r.unit}`
+            : 'Sedang mengisi angka fisik...',
+          isFocused,
+          updatedAt: nowIso,
+          updatedTimeLabel: nowLabel
+        });
+      });
+      activityControllerRef.current.publishMyActivities(myItems);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [mobileCounts, reconciledByIdMap, focusedMedicineId, staffName, myMobileSessionId]);
 
   // Opname KPI summary metrics
   const opnameMetrics = useMemo(() => {
@@ -1144,9 +1167,11 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
       if (target === 'opname') {
         setSelectedRack('ALL');
         setStatusFilter('ALL');
+        setOpnamePage(1);
         setOpnameSearch(found.barcode || found.id || found.name);
         setFocusedMedicineId(found.id);
       } else {
+        setStockPage(1);
         setStockSearch(found.barcode || found.id || found.name);
       }
       setMobileScanBanner({
@@ -1169,119 +1194,24 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
     }, 4000);
   };
 
-  // ================= HOME VISIT STATE =================
-  const [searchPatient, setSearchPatient] = useState('');
-  const [remoteVisitPatients, setRemoteVisitPatients] = useState<Patient[]>([]);
-  const [selectedPatient, setSelectedPatient] = useState<Patient | null>(patients[0] || null);
-
-  useEffect(() => {
-    const clean = searchPatient.trim();
-    if (clean.length < 2 || isDemoMode()) {
-      setRemoteVisitPatients([]);
-      return;
-    }
-    const cfg = getSupabaseConfig();
-    if (!cfg.url || !cfg.key) return;
-
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      fetchPatientsPaginatedFromSupabase({
-        page: 1,
-        pageSize: 25,
-        searchQuery: clean
-      }).then((res) => {
-        if (!cancelled && res.data) {
-          setRemoteVisitPatients(res.data);
-        }
-      });
-    }, 300);
-
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [searchPatient]);
-
-  const homeVisitPatientOptions = useMemo(() => {
-    const q = searchPatient.trim().toLowerCase();
-    let list: Patient[];
-    if (!q) {
-      list = patients.slice(0, 50);
-    } else {
-      const localMatches = patients.filter(
-        (p) =>
-          p.name.toLowerCase().includes(q) ||
-          p.id.toLowerCase().includes(q) ||
-          (p.noRm || '').toLowerCase().includes(q) ||
-          (p.nik && p.nik.includes(q))
-      );
-      list =
-        remoteVisitPatients.length > 0
-          ? deduplicatePatients([...remoteVisitPatients, ...localMatches]).slice(0, 50)
-          : localMatches.slice(0, 50);
-    }
-    if (selectedPatient && !list.some((p) => p.id === selectedPatient.id)) {
-      return [selectedPatient, ...list].slice(0, 50);
-    }
-    return list;
-  }, [patients, remoteVisitPatients, searchPatient, selectedPatient]);
-  const [td, setTd] = useState('120/80');
-  const [suhu, setSuhu] = useState('36.5');
-  const [nadi, setNadi] = useState('80');
-  const [spo2, setSpo2] = useState('98');
-  const [gds, setGds] = useState('110');
-  const [soapS, setSoapS] = useState('');
-  const [soapA, setSoapA] = useState('J00 - Common Cold');
-
   // ================= CEK STOK CEPAT STATE =================
   const [stockSearch, setStockSearch] = useState('');
+  const deferredStockSearch = useDeferredValue(stockSearch);
+  const [stockPage, setStockPage] = useState(1);
+  const STOCK_PAGE_SIZE = 25;
+
+  useEffect(() => {
+    setStockPage(1);
+  }, [deferredStockSearch]);
 
   const currentQueuePatient = queue[0] || null;
 
-  const handleSaveHomeVisit = () => {
-    if (!selectedPatient) return;
-
-    const newRecord: RMERecord = {
-      id: `RME-HV-${Date.now().toString().slice(-5)}`,
-      date: new Date().toISOString().split('T')[0],
-      time: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
-      rmId: selectedPatient.id,
-      patientName: selectedPatient.name,
-      nik: selectedPatient.nik,
-      age: selectedPatient.age,
-      gender: selectedPatient.gender,
-      doctorName: staffName,
-      doctorId: 'DOC-001',
-      vitalSign: {
-        td,
-        suhu: parseFloat(suhu) || 36.5,
-        nadi: parseInt(nadi) || 80,
-        spo2: parseInt(spo2) || 98
-      },
-      soapS: soapS || 'Kunjungan home visit medis ke rumah pasien.',
-      soapO: `TD: ${td}, Suhu: ${suhu}C, Nadi: ${nadi}, GDS: ${gds} mg/dL`,
-      soapA,
-      icdCode: 'J00',
-      icdName: soapA,
-      prescription: [],
-      doctorFee: 35000,
-      medicalSupportFee: 15000,
-      adminFee: 0,
-      notes: 'Pemeriksaan rawat jalan luar gedung (Home Care)',
-      branchId: 'BR-01'
-    };
-
-    onSaveMobileRME(newRecord);
-    alert(`Rekam Medis Home Visit untuk ${selectedPatient.name} berhasil disimpan!`);
-    setSoapS('');
-  };
-
   const filteredMeds = useMemo(() => {
-    const combined = [...medicines];
-    extraScannedMeds.forEach((em) => {
-      if (!combined.some((m) => m.id === em.id)) combined.push(em);
-    });
-    const q = stockSearch.trim().toLowerCase();
+    const combined = extraScannedMeds.length === 0 ? medicines : (() => {
+      const seen = new Set(medicines.map((m) => m.id));
+      return [...medicines, ...extraScannedMeds.filter((em) => !seen.has(em.id))];
+    })();
+    const q = deferredStockSearch.trim().toLowerCase();
     if (!q) return combined;
     return combined.filter(
       (m) =>
@@ -1290,7 +1220,14 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
         m.id.toLowerCase().includes(q) ||
         (m.batchNo || '').toLowerCase().includes(q)
     );
-  }, [medicines, extraScannedMeds, stockSearch]);
+  }, [medicines, extraScannedMeds, deferredStockSearch]);
+
+  const totalStockPages = Math.max(1, Math.ceil(filteredMeds.length / STOCK_PAGE_SIZE));
+  const safeStockPage = Math.min(stockPage, totalStockPages);
+  const paginatedMeds = useMemo(() => {
+    const startIdx = (safeStockPage - 1) * STOCK_PAGE_SIZE;
+    return filteredMeds.slice(startIdx, startIdx + STOCK_PAGE_SIZE);
+  }, [filteredMeds, safeStockPage]);
 
   return (
     <div className="max-w-md mx-auto bg-slate-100 min-h-[780px] rounded-3xl border-4 border-slate-800 shadow-2xl overflow-hidden flex flex-col font-sans relative">
@@ -1345,8 +1282,8 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
         </div>
       )}
 
-      {/* 5 Navigation Tabs */}
-      <div className="grid grid-cols-5 bg-white border-b text-[10px] font-bold shrink-0">
+      {/* 4 Navigation Tabs */}
+      <div className="grid grid-cols-4 bg-white border-b text-[10px] font-bold shrink-0">
         <button
           onClick={() => setMobileTab('stokopname')}
           className={`py-2.5 flex flex-col items-center gap-1 border-b-2 transition ${
@@ -1381,18 +1318,6 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
         >
           <UserCheck className={`w-4 h-4 ${mobileTab === 'absensi' ? 'text-teal-600' : 'text-slate-400'}`} />
           <span>Absensi</span>
-        </button>
-
-        <button
-          onClick={() => setMobileTab('homevisit')}
-          className={`py-2.5 flex flex-col items-center gap-1 border-b-2 transition ${
-            mobileTab === 'homevisit'
-              ? 'border-indigo-600 text-indigo-700 bg-indigo-50/60'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <HeartPulse className={`w-4 h-4 ${mobileTab === 'homevisit' ? 'text-indigo-600' : 'text-slate-400'}`} />
-          <span>Home Care</span>
         </button>
 
         <button
@@ -1622,6 +1547,19 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
 
             {/* List of Medicines for Stock Opname */}
             <div className="space-y-2.5 pb-20">
+              {filteredOpnameItems.length > 0 && (
+                <div className="flex items-center justify-between text-[11px] text-slate-600 bg-white border border-slate-200 rounded-xl px-3 py-1.5">
+                  <span>
+                    Menampilkan <strong className="font-mono text-slate-900">{paginatedOpnameItems.length}</strong> dari{' '}
+                    <strong className="font-mono text-slate-900">{filteredOpnameItems.length}</strong> item
+                  </span>
+                  {totalOpnamePages > 1 && (
+                    <span className="font-mono font-bold text-slate-700">
+                      Hal {safeOpnamePage}/{totalOpnamePages}
+                    </span>
+                  )}
+                </div>
+              )}
               {filteredOpnameItems.length === 0 ? (
                 <div className="p-8 text-center bg-white rounded-2xl border border-slate-200 space-y-2">
                   <Boxes className="w-8 h-8 text-slate-300 mx-auto" />
@@ -1638,7 +1576,7 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
                   </button>
                 </div>
               ) : (
-                filteredOpnameItems.map((med) => {
+                paginatedOpnameItems.map((med) => {
                   const isCounted = med.hasCounted;
                   const diff = med.difference;
                   const remoteActs = remoteOpnameActivities[med.id] || [];
@@ -1648,7 +1586,7 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
                   return (
                     <div
                       key={med.id}
-                      className={`p-3 rounded-2xl border transition shadow-xs space-y-2.5 ${
+                      className={`mobile-card-cv p-3 rounded-2xl border shadow-xs space-y-2.5 ${
                         isBeingCountedByOther
                           ? 'bg-amber-50/70 border-amber-400 ring-1 ring-amber-300'
                           : !isCounted
@@ -1667,7 +1605,7 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
                             <div key={`${act.sessionId}-${act.medicineId}`} className="flex items-start justify-between gap-2">
                               <div>
                                 <div className="font-black text-amber-900 flex items-center gap-1">
-                                  <span className="w-2 h-2 rounded-full bg-amber-600 animate-ping" />
+                                  <span className="w-2 h-2 rounded-full bg-amber-600" />
                                   <Lock className="w-3 h-3 text-amber-700" />
                                   <span>Sedang dihitung oleh {act.staffName}</span>
                                 </div>
@@ -2007,10 +1945,35 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
                   );
                 })
               )}
+              {totalOpnamePages > 1 && (
+                <div className="flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-xl p-2 shadow-xs">
+                  <button
+                    type="button"
+                    disabled={safeOpnamePage <= 1}
+                    onClick={() => setOpnamePage((p) => Math.max(1, p - 1))}
+                    className="min-h-[36px] px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 disabled:opacity-40 text-xs font-bold text-slate-700 flex items-center gap-1"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                    <span>Prev</span>
+                  </button>
+                  <span className="font-mono text-[11px] font-bold text-slate-700">
+                    Hal {safeOpnamePage} / {totalOpnamePages}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={safeOpnamePage >= totalOpnamePages}
+                    onClick={() => setOpnamePage((p) => Math.min(totalOpnamePages, p + 1))}
+                    className="min-h-[36px] px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-xs font-bold text-white flex items-center gap-1"
+                  >
+                    <span>Next</span>
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Bottom Fixed Action Bar for Mobile Posting */}
-            <div className="fixed bottom-0 left-0 right-0 max-w-md mx-auto p-3 bg-white/95 backdrop-blur-md border-t border-slate-200 shadow-xl flex items-center justify-between gap-3 z-30">
+            <div className="fixed bottom-0 left-0 right-0 max-w-md mx-auto p-3 bg-white border-t border-slate-200 shadow-xl flex items-center justify-between gap-3 z-30">
               <div className="font-mono text-[11px]">
                 <div className="text-[10px] text-slate-500 font-sans">Total Dihitung:</div>
                 <strong className="text-slate-900 text-xs">
@@ -2099,9 +2062,21 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
               </button>
             </div>
 
+            <div className="flex items-center justify-between text-[11px] text-slate-600 px-1">
+              <span>
+                Menampilkan <strong className="font-mono text-slate-900">{paginatedMeds.length}</strong> dari{' '}
+                <strong className="font-mono text-slate-900">{filteredMeds.length}</strong> obat
+              </span>
+              {totalStockPages > 1 && (
+                <span className="font-mono font-bold text-slate-700">
+                  Hal {safeStockPage}/{totalStockPages}
+                </span>
+              )}
+            </div>
+
             <div className="space-y-2 max-h-[500px] overflow-y-auto custom-scrollbar">
-              {filteredMeds.map((m) => (
-                <div key={m.id} className="p-3 bg-white rounded-2xl border border-slate-200 shadow-xs space-y-1">
+              {paginatedMeds.map((m) => (
+                <div key={m.id} className="mobile-card-cv p-3 bg-white rounded-2xl border border-slate-200 shadow-xs space-y-1">
                   <div className="flex justify-between items-start gap-2">
                     <div className="min-w-0">
                       <strong className="text-slate-900 block">{m.name}</strong>
@@ -2130,137 +2105,35 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
                 </div>
               ))}
             </div>
-          </div>
-        )}
-
-        {/* ================= TAB 3: HOME CARE / VISIT ================= */}
-        {mobileTab === 'homevisit' && (
-          <div className="space-y-3.5">
-            <div className="space-y-1.5">
-              <label className="block font-bold text-slate-700">Pilih Pasien Kunjungan Rumah</label>
-              <div className="relative">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
-                <input
-                  type="text"
-                  placeholder="Filter cepat Nama / No. RM / NIK..."
-                  value={searchPatient}
-                  onChange={(e) => setSearchPatient(e.target.value)}
-                  className="w-full pl-8 pr-3 py-2 border border-slate-200 rounded-xl text-xs bg-white outline-none focus:ring-2 focus:ring-sky-500"
-                />
-              </div>
-              <select
-                value={selectedPatient?.id || ''}
-                onChange={(e) => {
-                  const p = homeVisitPatientOptions.find((item) => item.id === e.target.value);
-                  if (p) setSelectedPatient(p);
-                }}
-                className="w-full p-2.5 border rounded-xl font-bold bg-white outline-none"
-              >
-                {homeVisitPatientOptions.map((p) => (
-                  <option key={p.dbId || p.id} value={p.id}>
-                    {p.name} ({p.id} - {p.gender})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {selectedPatient && (
-              <div className="p-3 bg-white rounded-2xl border border-slate-200 shadow-xs space-y-1">
-                <div className="font-extrabold text-slate-900 text-sm">{selectedPatient.name}</div>
-                <div className="text-slate-500 text-[11px] font-mono">
-                  NIK: {selectedPatient.nik} · {selectedPatient.phone}
-                </div>
-                <div className="text-slate-600 text-[11px]">{selectedPatient.address}</div>
-
-                {selectedPatient.allergy !== 'Tidak Ada' && (
-                  <div className="mt-1 p-1.5 bg-rose-50 border border-rose-200 text-rose-800 font-bold text-[10px] rounded-lg">
-                    Alergi: {selectedPatient.allergy}
-                  </div>
-                )}
+            {totalStockPages > 1 && (
+              <div className="flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-xl p-2 shadow-xs">
+                <button
+                  type="button"
+                  disabled={safeStockPage <= 1}
+                  onClick={() => setStockPage((p) => Math.max(1, p - 1))}
+                  className="min-h-[36px] px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 disabled:opacity-40 text-xs font-bold text-slate-700 flex items-center gap-1"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                  <span>Prev</span>
+                </button>
+                <span className="font-mono text-[11px] font-bold text-slate-700">
+                  Hal {safeStockPage} / {totalStockPages}
+                </span>
+                <button
+                  type="button"
+                  disabled={safeStockPage >= totalStockPages}
+                  onClick={() => setStockPage((p) => Math.min(totalStockPages, p + 1))}
+                  className="min-h-[36px] px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-xs font-bold text-white flex items-center gap-1"
+                >
+                  <span>Next</span>
+                  <ChevronRight className="w-4 h-4" />
+                </button>
               </div>
             )}
-
-            {/* Vital Signs Grid */}
-            <div className="p-3 bg-white rounded-2xl border border-slate-200 shadow-xs space-y-2">
-              <span className="font-black text-slate-700 text-[10px] uppercase">
-                Input Tanda Vital Lapangan
-              </span>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-[10px] text-slate-500 font-bold">TD (mmHg)</label>
-                  <input
-                    type="text"
-                    value={td}
-                    onChange={(e) => setTd(e.target.value)}
-                    className="w-full p-2 border rounded-xl font-mono font-bold bg-slate-50"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[10px] text-slate-500 font-bold">Suhu (°C)</label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    value={suhu}
-                    onChange={(e) => setSuhu(e.target.value)}
-                    className="w-full p-2 border rounded-xl font-mono font-bold bg-slate-50"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[10px] text-slate-500 font-bold">Nadi (bpm)</label>
-                  <input
-                    type="number"
-                    value={nadi}
-                    onChange={(e) => setNadi(e.target.value)}
-                    className="w-full p-2 border rounded-xl font-mono font-bold bg-slate-50"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[10px] text-slate-500 font-bold">Gula Darah GDS (mg/dL)</label>
-                  <input
-                    type="number"
-                    value={gds}
-                    onChange={(e) => setGds(e.target.value)}
-                    className="w-full p-2 border rounded-xl font-mono font-bold bg-slate-50"
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* Anamnesis & Diagnosis */}
-            <div className="space-y-2">
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Catatan Keluhan Pasien</label>
-                <textarea
-                  rows={2}
-                  placeholder="Kondisi pasien di rumah..."
-                  value={soapS}
-                  onChange={(e) => setSoapS(e.target.value)}
-                  className="w-full p-2.5 border rounded-xl bg-white outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Diagnosis Lapangan</label>
-                <input
-                  type="text"
-                  value={soapA}
-                  onChange={(e) => setSoapA(e.target.value)}
-                  className="w-full p-2.5 border rounded-xl font-bold bg-white"
-                />
-              </div>
-            </div>
-
-            <button
-              onClick={handleSaveHomeVisit}
-              className="w-full py-3 bg-gradient-to-r from-indigo-600 to-sky-600 text-white font-extrabold rounded-xl shadow-md uppercase tracking-wider text-xs flex items-center justify-center gap-2"
-            >
-              <Send className="w-4 h-4" />
-              <span>Simpan RME Kunjungan Rumah</span>
-            </button>
           </div>
         )}
 
-        {/* ================= TAB 4: PANGGIL ANTREAN ================= */}
+        {/* ================= TAB 3: PANGGIL ANTREAN ================= */}
         {mobileTab === 'antrean' && (
           <div className="text-center space-y-6 py-6">
             <div className="p-6 bg-slate-900 text-white rounded-3xl space-y-2">
@@ -2300,7 +2173,7 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
           </div>
         )}
 
-        {/* ================= TAB 5: ABSENSI, CUTI & LEMBUR MINGGU ================= */}
+        {/* ================= TAB 4: ABSENSI, CUTI & LEMBUR MINGGU ================= */}
         {mobileTab === 'absensi' && resolvedMobileStaff && (
           <div className="space-y-3">
             {/* Notice */}
@@ -2731,21 +2604,25 @@ export const MobileFieldStaffView: React.FC<MobileFieldStaffViewProps> = ({
       )}
 
       {/* Camera Barcode Scanner Modal for Mobile Opname / Cek Stok */}
-      <CameraBarcodeScannerModal
-        isOpen={scannerTargetTab !== null}
-        onClose={() => setScannerTargetTab(null)}
-        title={
-          scannerTargetTab === 'opname'
-            ? 'Scan Barcode Stok Opname'
-            : 'Scan Barcode Cek Stok Obat'
-        }
-        subtitle="Arahkan kamera ke barcode kemasan obat untuk langsung mencari dan membuka data stoknya."
-        scanMode="barcode"
-        onScanSuccess={(code) => {
-          const target = scannerTargetTab || 'opname';
-          handleMobileBarcodeScan(code, target);
-        }}
-      />
+      {scannerTargetTab !== null && (
+        <Suspense fallback={null}>
+          <CameraBarcodeScannerModal
+            isOpen={true}
+            onClose={() => setScannerTargetTab(null)}
+            title={
+              scannerTargetTab === 'opname'
+                ? 'Scan Barcode Stok Opname'
+                : 'Scan Barcode Cek Stok Obat'
+            }
+            subtitle="Arahkan kamera ke barcode kemasan obat untuk langsung mencari dan membuka data stoknya."
+            scanMode="barcode"
+            onScanSuccess={(code) => {
+              const target = scannerTargetTab || 'opname';
+              handleMobileBarcodeScan(code, target);
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };

@@ -25,6 +25,41 @@ body {
   background: #94a3b8;
 }
 
+.custom-scrollbar {
+  -webkit-overflow-scrolling: touch;
+}
+
+.mobile-card-cv {
+  content-visibility: auto;
+  contain-intrinsic-size: 1px 180px;
+}
+
+/* Mobile & touch device performance optimizations: eliminate expensive backdrop-filter blur passes and 300ms tap delay */
+button,
+a,
+input,
+select,
+textarea {
+  touch-action: manipulation;
+}
+
+@media (max-width: 768px), ((hover: none) and (pointer: coarse)) {
+  [class*="backdrop-blur"] {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 @media print {
   @page {
     size: A4 portrait;

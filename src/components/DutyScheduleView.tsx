@@ -44,7 +44,7 @@ import {
 import {
   useFacilityProfiles,
   resolvePharmacyOperationalHours
-} from './PharmacySettingsModal';
+} from '../utils/facilityProfileHelper';
 import { useIsOwnerAdmin } from '../utils/roleAccess';
 import { StaffAttendancePanel } from './StaffAttendancePanel';
 import {

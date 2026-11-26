@@ -208,7 +208,7 @@ export const Header: React.FC<HeaderProps> = React.memo(({
             title={`${pendingStaffValidationCount} pegawai baru menunggu validasi APJ / Owner`}
             className="flex items-center justify-center gap-1.5 min-h-[38px] px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-extrabold bg-amber-100 hover:bg-amber-200 text-amber-950 border border-amber-400 transition-all shadow-xs cursor-pointer whitespace-nowrap"
           >
-            <Bell className="w-4 h-4 text-amber-700 shrink-0 animate-bounce" />
+            <Bell className="w-4 h-4 text-amber-700 shrink-0" />
             <span className="hidden sm:inline">Validasi Pegawai</span>
             <span className="px-1.5 py-0.5 rounded-full bg-rose-600 text-white text-[10px] font-black leading-none">
               {pendingStaffValidationCount}

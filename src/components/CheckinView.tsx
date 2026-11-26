@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, lazy, Suspense } from 'react';
 import {
   HeartPulse,
   Send,
@@ -12,7 +12,9 @@ import {
   Camera
 } from 'lucide-react';
 import { Patient, PatientQueue, Doctor, Staff } from '../types';
-import { CameraBarcodeScannerModal } from './CameraBarcodeScannerModal';
+const CameraBarcodeScannerModal = lazy(() =>
+  import('./CameraBarcodeScannerModal').then((m) => ({ default: m.CameraBarcodeScannerModal }))
+);
 import {
   checkPatientInSupabase,
   fetchPatientsPaginatedFromSupabase,
@@ -733,17 +735,21 @@ export const CheckinView: React.FC<CheckinViewProps> = ({
         </div>
       )}
 
-      <CameraBarcodeScannerModal
-        isOpen={showCameraQrScanner}
-        onClose={() => setShowCameraQrScanner(false)}
-        title="Scan Kamera QR / Barcode Pasien"
-        subtitle="Arahkan kamera ke QR Code atau Barcode pada Kartu Rekam Medis / E-Tiket pasien."
-        scanMode="both"
-        onScanSuccess={(decoded) => {
-          setQrInputCode(decoded);
-          handleProcessQrScan(decoded);
-        }}
-      />
+      {showCameraQrScanner && (
+        <Suspense fallback={null}>
+          <CameraBarcodeScannerModal
+            isOpen={showCameraQrScanner}
+            onClose={() => setShowCameraQrScanner(false)}
+            title="Scan Kamera QR / Barcode Pasien"
+            subtitle="Arahkan kamera ke QR Code atau Barcode pada Kartu Rekam Medis / E-Tiket pasien."
+            scanMode="both"
+            onScanSuccess={(decoded) => {
+              setQrInputCode(decoded);
+              handleProcessQrScan(decoded);
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };

@@ -35,7 +35,7 @@ import {
   PatientQueue,
   SalesDiscount
 } from '../types';
-import { formatPharmacyAddress, useFacilityProfiles } from './PharmacySettingsModal';
+import { formatPharmacyAddress, useFacilityProfiles } from '../utils/facilityProfileHelper';
 import { MedicineCategorySymbol } from './MedicineCategorySymbol';
 import { hasLocalServerBackend, safeBackendFetch } from '../utils/serverBridgeHelper';
 import { buildPublicAssetPortalUrl } from '../utils/portalUrlHelper';

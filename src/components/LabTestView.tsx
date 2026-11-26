@@ -45,7 +45,7 @@ import {
 import {
   useFacilityProfiles,
   formatPharmacyAddress
-} from './PharmacySettingsModal';
+} from '../utils/facilityProfileHelper';
 import { openPrintWindow } from '../utils/printHelper';
 import { MedicineCategorySymbol } from './MedicineCategorySymbol';
 import {

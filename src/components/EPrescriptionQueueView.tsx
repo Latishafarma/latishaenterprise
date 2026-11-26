@@ -82,7 +82,7 @@ import {
   markInitialCloudSyncCompleted
 } from '../utils/deletionRegistry';
 import { useIsOwnerAdmin } from '../utils/roleAccess';
-import { useFacilityProfiles, formatPharmacyAddress } from './PharmacySettingsModal';
+import { useFacilityProfiles, formatPharmacyAddress } from '../utils/facilityProfileHelper';
 import { isPrescriptionInPosQueue } from '../utils/prescriptionQueueHelper';
 
 interface EPrescriptionQueueViewProps {

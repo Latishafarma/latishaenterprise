@@ -38,7 +38,7 @@ import {
   Legend
 } from 'recharts';
 import { Transaction, Medicine, PatientQueue, EPrescription, Branch } from '../types';
-import { useFacilityProfiles } from './PharmacySettingsModal';
+import { useFacilityProfiles } from '../utils/facilityProfileHelper';
 import { MedicineCategorySymbol } from './MedicineCategorySymbol';
 
 interface DashboardViewProps {

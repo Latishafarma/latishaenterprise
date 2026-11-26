@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useDeferredValue, lazy, Suspense } from 'react';
 import { demoGetItem, demoSetItem } from '../utils/demoSandbox';
 import { summarizeTransactionForDocument } from '../utils/transactionPrintHelper';
 import {
@@ -66,8 +66,11 @@ import {
 import { openPrintWindow } from '../utils/printHelper';
 import { findBestCartDiscount } from '../utils/discountHelper';
 import { RupiahInput } from './RupiahInput';
-import { useFacilityProfiles, formatPharmacyAddress } from './PharmacySettingsModal';
-import { CameraBarcodeScannerModal, playBarcodeBeep } from './CameraBarcodeScannerModal';
+import { useFacilityProfiles, formatPharmacyAddress } from '../utils/facilityProfileHelper';
+import { playBarcodeBeep } from '../utils/barcodeBeep';
+const CameraBarcodeScannerModal = lazy(() =>
+  import('./CameraBarcodeScannerModal').then((m) => ({ default: m.CameraBarcodeScannerModal }))
+);
 import {
   SUPABASE_CASHIER_SHIFT_SQL_SCHEMA,
   DEFAULT_CASHIER_SHIFT_TABLE,
@@ -599,6 +602,7 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
   }, [labRecords, customer, isLabRecordPaidInPOS]);
 
   const [pluInput, setPluInput] = useState('');
+  const deferredPluInput = useDeferredValue(pluInput);
   const [selectedMed, setSelectedMed] = useState<Medicine | null>(null);
   const [showMedDropdown, setShowMedDropdown] = useState(false);
   const medDropdownRef = useRef<HTMLDivElement>(null);
@@ -2598,17 +2602,20 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
             </button>
           </div>
 
-          {showMedDropdown && (
-            <div className="absolute z-30 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-48 overflow-y-auto divide-y">
-              {posMedPool
-                .filter(
-                  (m) =>
-                    m.name.toLowerCase().includes(pluInput.toLowerCase()) ||
-                    (m.kekuatan || '').toLowerCase().includes(pluInput.toLowerCase()) ||
-                    (m.barcode || '').toLowerCase().includes(pluInput.toLowerCase()) ||
-                    m.id.toLowerCase().includes(pluInput.toLowerCase())
-                )
-                .map((m, idx) => (
+          {showMedDropdown && (() => {
+            const qLower = deferredPluInput.toLowerCase();
+            const matchedPool = posMedPool.filter(
+              (m) =>
+                !qLower ||
+                m.name.toLowerCase().includes(qLower) ||
+                (m.kekuatan || '').toLowerCase().includes(qLower) ||
+                (m.barcode || '').toLowerCase().includes(qLower) ||
+                m.id.toLowerCase().includes(qLower)
+            );
+            const visiblePool = matchedPool.slice(0, 40);
+            return (
+              <div className="absolute z-30 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-48 overflow-y-auto divide-y">
+                {visiblePool.map((m, idx) => (
                   <div
                     key={`${m.id}-${idx}`}
                     onClick={() => handleMedSelect(m)}
@@ -2633,8 +2640,14 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
                     </span>
                   </div>
                 ))}
-            </div>
-          )}
+                {matchedPool.length > 40 && (
+                  <div className="px-2.5 py-1.5 bg-slate-50 text-[10px] font-semibold text-slate-500 text-center">
+                    Menampilkan 40 dari {matchedPool.length} obat. Ketik lebih spesifik atau scan barcode.
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
 
         {/* Satuan */}
@@ -4438,17 +4451,21 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
         </div>
       )}
 
-      <CameraBarcodeScannerModal
-        isOpen={showPosBarcodeScanner}
-        onClose={() => setShowPosBarcodeScanner(false)}
-        title="Scan Barcode Kasir POS"
-        subtitle="Arahkan kamera ke barcode obat untuk langsung memasukkan item ke keranjang belanja kasir."
-        scanMode="barcode"
-        allowContinuous={true}
-        onScanSuccess={(code) => {
-          processPosBarcodeScan(code, true);
-        }}
-      />
+      {showPosBarcodeScanner && (
+        <Suspense fallback={null}>
+          <CameraBarcodeScannerModal
+            isOpen={true}
+            onClose={() => setShowPosBarcodeScanner(false)}
+            title="Scan Barcode Kasir POS"
+            subtitle="Arahkan kamera ke barcode obat untuk langsung memasukkan item ke keranjang belanja kasir."
+            scanMode="barcode"
+            allowContinuous={true}
+            onScanSuccess={(code) => {
+              processPosBarcodeScan(code, true);
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };

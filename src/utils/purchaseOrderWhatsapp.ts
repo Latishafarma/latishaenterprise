@@ -1,11 +1,10 @@
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
+import type { jsPDF as JsPDFType } from 'jspdf';
 import { PurchaseOrder, PurchaseOrderItem, SPGroupType, Supplier } from '../types';
 import {
   formatPharmacyAddress,
   getSavedAPJProfile,
   getSavedPharmacyProfile
-} from '../components/PharmacySettingsModal';
+} from './facilityProfileHelper';
 
 export interface GeneratedPOPdfResult {
   blob: Blob;
@@ -147,11 +146,15 @@ export const resolveSupplierForPO = (
   return suppliers.find((s) => s.name.trim().toLowerCase() === targetName);
 };
 
-export const generatePurchaseOrderPdfFile = (
+export const generatePurchaseOrderPdfFile = async (
   po: PurchaseOrder,
   matchedSupplier?: Supplier,
   options: GeneratePOPdfOptions = {}
-): GeneratedPOPdfResult => {
+): Promise<GeneratedPOPdfResult> => {
+  const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([
+    import('jspdf'),
+    import('jspdf-autotable')
+  ]);
   const pharmacy = getSavedPharmacyProfile();
   const apj = getSavedAPJProfile();
 
@@ -332,7 +335,7 @@ export const generatePurchaseOrderPdfFile = (
   });
 
   const finalY =
-    (doc as jsPDF & { lastAutoTable?: { finalY?: number } }).lastAutoTable?.finalY ?? cursorY + 30;
+    (doc as JsPDFType & { lastAutoTable?: { finalY?: number } }).lastAutoTable?.finalY ?? cursorY + 30;
   let afterTableY = finalY + 6;
 
   // Ringkasan Total & Catatan
@@ -497,13 +500,13 @@ export interface PurchaseOrderPdfPreviewData {
   filteredTotalCost: number;
 }
 
-export const createPurchaseOrderPdfPreview = (
+export const createPurchaseOrderPdfPreview = async (
   po: PurchaseOrder,
   suppliers: Supplier[] = [],
   selectedSpGroups?: SPGroupType[]
-): PurchaseOrderPdfPreviewData => {
+): Promise<PurchaseOrderPdfPreviewData> => {
   const matchedSupplier = resolveSupplierForPO(po, suppliers);
-  const generated = generatePurchaseOrderPdfFile(po, matchedSupplier, { selectedSpGroups });
+  const generated = await generatePurchaseOrderPdfFile(po, matchedSupplier, { selectedSpGroups });
   const previewUrl = URL.createObjectURL(generated.blob);
   const rawPhone = po.supplierPhone || matchedSupplier?.phone || '';
   const normalizedPhone = normalizeWhatsappPhone(rawPhone);
@@ -545,9 +548,9 @@ export const sendPurchaseOrderViaWhatsapp = async (
   const matchedSupplier = resolveSupplierForPO(po, suppliers);
   const { blob, file, fileName } =
     options.pregeneratedPdf ||
-    generatePurchaseOrderPdfFile(po, matchedSupplier, {
+    (await generatePurchaseOrderPdfFile(po, matchedSupplier, {
       selectedSpGroups: options.selectedSpGroups
-    });
+    }));
 
   const rawPhone =
     options.customPhone !== undefined

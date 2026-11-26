@@ -33,7 +33,7 @@ import {
   generateNextStaffId,
   resolveRoleDefaultPermissions
 } from '../utils/staffRegistrationHelper';
-import { getSavedPharmacyProfile } from './PharmacySettingsModal';
+import { getSavedPharmacyProfile } from '../utils/facilityProfileHelper';
 
 interface PublicStaffRegistrationViewProps {
   staffList: Staff[];

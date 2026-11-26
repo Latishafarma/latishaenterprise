@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useDeferredValue } from 'react';
 import {
   Search,
   ShoppingCart,
@@ -100,7 +100,7 @@ import {
   DEFAULT_BANK_ACCOUNTS,
   getOfficialBankAccounts,
   applyRemoteFacilityProfiles
-} from './PharmacySettingsModal';
+} from '../utils/facilityProfileHelper';
 import {
   isDemoMode,
   demoGetItem,
@@ -108,7 +108,6 @@ import {
   demoRemoveItem,
   getDemoBroadcastChannelName
 } from '../utils/demoSandbox';
-import { seedDemoSandboxStorage } from '../data/demoData';
 import { processMitraLicenseFile, isPdfLicenseFile } from '../utils/mitraLicenseFile';
 
 interface PublicMitraPortalViewProps {
@@ -266,10 +265,22 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
     };
   }, []);
 
-  // Ensure standalone /?view=portal-mitra&mode=demo has demo seed data ready
-  if (demoActive && typeof window !== 'undefined') {
-    seedDemoSandboxStorage(false);
-  }
+  // Ensure standalone /?view=portal-mitra&mode=demo has demo seed data ready lazily
+  useEffect(() => {
+    if (!demoActive || typeof window === 'undefined') return;
+    let cancelled = false;
+    import('../data/demoData')
+      .then(({ seedDemoSandboxStorage }) => {
+        if (cancelled) return;
+        const seeded = seedDemoSandboxStorage(false);
+        setCatalog((prev) => (prev.length > 0 ? prev : seeded.medicines));
+        setMyOrders((prev) => (prev.length > 0 ? prev : seeded.mitraOrders));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [demoActive]);
 
   // Integrated Mitra Directory state (synced with main app localStorage + Supabase)
   const [registeredMitraList, setRegisteredMitraList] = useState<Mitra[]>(() => {
@@ -348,10 +359,17 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
 
   const [activePortalTab, setActivePortalTab] = useState<'katalog' | 'riwayat'>('katalog');
   const [searchQuery, setSearchQuery] = useState('');
+  const deferredSearchQuery = useDeferredValue(searchQuery);
   const [selectedCategory, setSelectedCategory] = useState<string>('Semua');
   const [selectedKelasTerapi, setSelectedKelasTerapi] = useState<string>('Semua');
   const [selectedStatusResep, setSelectedStatusResep] = useState<string>('Semua');
   const [onlyAvailableStock, setOnlyAvailableStock] = useState<boolean>(false);
+  const [catalogPage, setCatalogPage] = useState<number>(1);
+  const CATALOG_PAGE_SIZE = 24;
+
+  useEffect(() => {
+    setCatalogPage(1);
+  }, [deferredSearchQuery, selectedCategory, selectedKelasTerapi, selectedStatusResep, onlyAvailableStock, activeRoom]);
 
   const [cartByRoom, setCartByRoom] = useState<Record<PortalOrderRoom, Record<string, PortalCartEntry>>>({
     REGULER: {},
@@ -941,7 +959,7 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
   }, [catalog, rxStatusConfigs]);
 
   const filteredCatalog = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
+    const q = deferredSearchQuery.trim().toLowerCase();
     return catalog.filter((m) => {
       if (selectedCategory !== 'Semua' && (m.category || '').trim() !== selectedCategory) {
         return false;
@@ -970,13 +988,20 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
   }, [
     catalog,
     rxStatusConfigs,
-    searchQuery,
+    deferredSearchQuery,
     selectedCategory,
     selectedKelasTerapi,
     selectedStatusResep,
     onlyAvailableStock,
     activeRoom
   ]);
+
+  const totalCatalogPages = Math.max(1, Math.ceil(filteredCatalog.length / CATALOG_PAGE_SIZE));
+  const safeCatalogPage = Math.min(catalogPage, totalCatalogPages);
+  const paginatedCatalog = useMemo(() => {
+    const startIdx = (safeCatalogPage - 1) * CATALOG_PAGE_SIZE;
+    return filteredCatalog.slice(startIdx, startIdx + CATALOG_PAGE_SIZE);
+  }, [filteredCatalog, safeCatalogPage]);
 
   const cartItems = useMemo(() => Object.values(cart), [cart]);
   const totalCartItemsCount = cartItems.length;
@@ -1830,10 +1855,11 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
 
   const supabaseConfigured = Boolean(getSupabaseConfig().url && getSupabaseConfig().key);
 
-  const handlePortalResetDemo = () => {
+  const handlePortalResetDemo = async () => {
     if (onResetDemo) {
       onResetDemo();
     }
+    const { seedDemoSandboxStorage } = await import('../data/demoData');
     const fresh = seedDemoSandboxStorage(true);
     setCatalog(fresh.medicines);
     setMyOrders(fresh.mitraOrders);
@@ -2525,15 +2551,21 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
               )}
             </section>
 
-            {/* Results Counter */}
+            {/* Results Counter & Page Info */}
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 px-1">
               <span>
-                Menampilkan <strong className="text-slate-800 font-mono tabular-nums">{filteredCatalog.length}</strong> produk obat (
+                Menampilkan <strong className="text-slate-800 font-mono tabular-nums">{paginatedCatalog.length}</strong> dari{' '}
+                <strong className="text-slate-800 font-mono tabular-nums">{filteredCatalog.length}</strong> produk obat (
                 {activeRoom === 'REGULER'
                   ? 'Harga Reguler/Umum per satuan eceran'
                   : 'Harga Khusus Mitra per satuan kemasan besar'}
                 )
               </span>
+              {totalCatalogPages > 1 && (
+                <span className="font-mono text-[11px] font-bold text-slate-600">
+                  Halaman {safeCatalogPage} / {totalCatalogPages}
+                </span>
+              )}
             </div>
 
             {/* Catalog Cards */}
@@ -2546,8 +2578,9 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
                 </p>
               </div>
             ) : (
+              <>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
-                {filteredCatalog.map((med) => {
+                {paginatedCatalog.map((med) => {
                   const roomPrice = getRoomUnitPrice(med, activeRoom);
                   const unitLabel = getRoomUnitLabel(med, activeRoom);
                   const ratio = Math.max(1, Number(med.rasioKonversi) || 1);
@@ -2570,7 +2603,7 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
                   return (
                     <article
                       key={med.id}
-                      className={`bg-white rounded-2xl border p-4 flex flex-col justify-between gap-3 transition ${
+                      className={`mobile-card-cv bg-white rounded-2xl border p-4 flex flex-col justify-between gap-3 transition ${
                         isOutOfStock
                           ? 'border-slate-200 opacity-75'
                           : qtyInCart > 0
@@ -2739,6 +2772,38 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
                   );
                 })}
               </div>
+              {totalCatalogPages > 1 && (
+                <div className="flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-2xl px-3.5 py-2.5 mt-3">
+                  <button
+                    type="button"
+                    disabled={safeCatalogPage <= 1}
+                    onClick={() => {
+                      setCatalogPage((p) => Math.max(1, p - 1));
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 text-xs font-bold text-slate-700 flex items-center gap-1 cursor-pointer"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                    <span>Sebelumnya</span>
+                  </button>
+                  <span className="text-xs font-mono font-bold text-slate-700">
+                    Hal {safeCatalogPage} / {totalCatalogPages}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={safeCatalogPage >= totalCatalogPages}
+                    onClick={() => {
+                      setCatalogPage((p) => Math.min(totalCatalogPages, p + 1));
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-xs font-bold text-white flex items-center gap-1 cursor-pointer"
+                  >
+                    <span>Berikutnya</span>
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
+              </>
             )}
           </>
         ) : (

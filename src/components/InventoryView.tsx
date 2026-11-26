@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback, lazy, Suspense } from 'react';
 import {
   Boxes,
   Plus,
@@ -60,7 +60,10 @@ import {
 } from '../utils/supabaseClient';
 import { PaginationControls, DEFAULT_PAGE_SIZE_OPTIONS } from './PaginationControls';
 import { MedicineCategorySymbol } from './MedicineCategorySymbol';
-import { CameraBarcodeScannerModal, playBarcodeBeep } from './CameraBarcodeScannerModal';
+import { playBarcodeBeep } from '../utils/barcodeBeep';
+const CameraBarcodeScannerModal = lazy(() =>
+  import('./CameraBarcodeScannerModal').then((m) => ({ default: m.CameraBarcodeScannerModal }))
+);
 
 const PAGE_SIZE_OPTIONS = DEFAULT_PAGE_SIZE_OPTIONS;
 
@@ -4613,31 +4616,35 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         </div>
       )}
 
-      <CameraBarcodeScannerModal
-        isOpen={inventoryScannerTarget !== null}
-        onClose={() => setInventoryScannerTarget(null)}
-        title={
-          inventoryScannerTarget === 'form'
-            ? 'Scan Barcode Kemasan Obat'
-            : 'Scan Barcode Master Obat'
-        }
-        subtitle={
-          inventoryScannerTarget === 'form'
-            ? 'Arahkan kamera ke barcode kemasan pabrik untuk mengisinya ke form obat.'
-            : 'Arahkan kamera ke barcode obat untuk langsung mencari di daftar Master Obat.'
-        }
-        scanMode="barcode"
-        onScanSuccess={(decoded) => {
-          if (inventoryScannerTarget === 'form') {
-            setForm((prev) => ({ ...prev, barcode: decoded }));
-          } else {
-            setCategoryFilter('SEMUA');
-            setStockStatusFilter('SEMUA');
-            setSearchTerm(decoded);
-            setCurrentPage(1);
-          }
-        }}
-      />
+      {inventoryScannerTarget !== null && (
+        <Suspense fallback={null}>
+          <CameraBarcodeScannerModal
+            isOpen={true}
+            onClose={() => setInventoryScannerTarget(null)}
+            title={
+              inventoryScannerTarget === 'form'
+                ? 'Scan Barcode Kemasan Obat'
+                : 'Scan Barcode Master Obat'
+            }
+            subtitle={
+              inventoryScannerTarget === 'form'
+                ? 'Arahkan kamera ke barcode kemasan pabrik untuk mengisinya ke form obat.'
+                : 'Arahkan kamera ke barcode obat untuk langsung mencari di daftar Master Obat.'
+            }
+            scanMode="barcode"
+            onScanSuccess={(decoded) => {
+              if (inventoryScannerTarget === 'form') {
+                setForm((prev) => ({ ...prev, barcode: decoded }));
+              } else {
+                setCategoryFilter('SEMUA');
+                setStockStatusFilter('SEMUA');
+                setSearchTerm(decoded);
+                setCurrentPage(1);
+              }
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };

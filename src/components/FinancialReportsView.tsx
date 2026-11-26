@@ -42,7 +42,7 @@ import {
 import { openPrintWindow } from '../utils/printHelper';
 import { PaginationControls } from './PaginationControls';
 import { MedicineCategorySymbol } from './MedicineCategorySymbol';
-import { useFacilityProfiles, formatPharmacyAddress } from './PharmacySettingsModal';
+import { useFacilityProfiles, formatPharmacyAddress } from '../utils/facilityProfileHelper';
 import {
   ATTENDANCE_UPDATED_EVENT,
   formatIsoToIdDate,

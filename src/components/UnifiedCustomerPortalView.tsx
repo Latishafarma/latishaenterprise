@@ -24,7 +24,7 @@ import {
 import { OfflineIndicator, PWAInstallButton, PWAInstallGuideModal } from './PWAInstallBanner';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 import { isDemoMode } from '../utils/demoSandbox';
-import { getSavedPharmacyProfile } from './PharmacySettingsModal';
+import { getSavedPharmacyProfile } from '../utils/facilityProfileHelper';
 import { recordPortalActivity } from '../utils/portalActivityLogger';
 
 const PublicMitraPortalView = lazy(() =>

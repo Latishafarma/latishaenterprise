@@ -9,7 +9,7 @@ import {
   useFacilityProfiles,
   formatPharmacyAddress,
   formatPharmacyLegalInfo
-} from './PharmacySettingsModal';
+} from '../utils/facilityProfileHelper';
 import { demoGetItem, demoSetItem, isDemoMode } from '../utils/demoSandbox';
 import {
   isJasaCartItem,

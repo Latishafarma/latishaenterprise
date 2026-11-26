@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, lazy, Suspense } from 'react';
 import {
   AlertTriangle,
   Printer,
@@ -52,7 +52,10 @@ import {
   sendPurchaseOrderViaWhatsapp
 } from '../utils/purchaseOrderWhatsapp';
 import { PaginationControls } from './PaginationControls';
-import { CameraBarcodeScannerModal, playBarcodeBeep } from './CameraBarcodeScannerModal';
+import { playBarcodeBeep } from '../utils/barcodeBeep';
+const CameraBarcodeScannerModal = lazy(() =>
+  import('./CameraBarcodeScannerModal').then((m) => ({ default: m.CameraBarcodeScannerModal }))
+);
 import { INITIAL_SUPPLIERS } from '../data/initialData';
 import { demoGetItem, demoSetItem } from '../utils/demoSandbox';
 import {
@@ -880,11 +883,11 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
   };
 
   // Buka Modal Pratinjau PDF Pesanan Pembelian sebelum mengirim ke PBF via WhatsApp
-  const handleSendPoViaWhatsapp = (po: PurchaseOrder) => {
+  const handleSendPoViaWhatsapp = async (po: PurchaseOrder) => {
     if (sendingWaPoId === po.id) return;
     setSendingWaPoId(po.id);
     try {
-      const preview = createPurchaseOrderPdfPreview(po, suppliers);
+      const preview = await createPurchaseOrderPdfPreview(po, suppliers);
       setWaPreviewModal(preview);
       setWaPhoneInput(preview.rawPhone);
       setWaMessageInput(preview.defaultMessage);
@@ -901,10 +904,10 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
     }
   };
 
-  const handleUpdateWaSpSelection = (nextGroups: SPGroupType[]) => {
+  const handleUpdateWaSpSelection = async (nextGroups: SPGroupType[]) => {
     if (!waPreviewModal || nextGroups.length === 0) return;
     try {
-      const updatedPreview = createPurchaseOrderPdfPreview(
+      const updatedPreview = await createPurchaseOrderPdfPreview(
         waPreviewModal.po,
         suppliers,
         nextGroups
@@ -3429,31 +3432,35 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
         </div>
       )}
 
-      <CameraBarcodeScannerModal
-        isOpen={defectaScannerTarget !== null}
-        onClose={() => setDefectaScannerTarget(null)}
-        title="Scan Barcode Obat Defecta / PO"
-        subtitle="Arahkan kamera ke barcode kemasan obat untuk mencari atau menambah ke Surat Pesanan."
-        scanMode="barcode"
-        onScanSuccess={(decoded) => {
-          const lower = decoded.trim().toLowerCase();
-          if (defectaScannerTarget === 'poModal') {
-            const exact = medicines.find(
-              (m) =>
-                (m.barcode && m.barcode.trim().toLowerCase() === lower) ||
-                m.id.trim().toLowerCase() === lower
-            );
-            if (exact) {
-              handleAddMedicineToOrder(exact);
-            } else {
-              setMedicineSearchQuery(decoded);
-            }
-          } else {
-            setSelectedSupplierFilter('SEMUA');
-            setSearchTerm(decoded);
-          }
-        }}
-      />
+      {defectaScannerTarget !== null && (
+        <Suspense fallback={null}>
+          <CameraBarcodeScannerModal
+            isOpen={true}
+            onClose={() => setDefectaScannerTarget(null)}
+            title="Scan Barcode Obat Defecta / PO"
+            subtitle="Arahkan kamera ke barcode kemasan obat untuk mencari atau menambah ke Surat Pesanan."
+            scanMode="barcode"
+            onScanSuccess={(decoded) => {
+              const lower = decoded.trim().toLowerCase();
+              if (defectaScannerTarget === 'poModal') {
+                const exact = medicines.find(
+                  (m) =>
+                    (m.barcode && m.barcode.trim().toLowerCase() === lower) ||
+                    m.id.trim().toLowerCase() === lower
+                );
+                if (exact) {
+                  handleAddMedicineToOrder(exact);
+                } else {
+                  setMedicineSearchQuery(decoded);
+                }
+              } else {
+                setSelectedSupplierFilter('SEMUA');
+                setSearchTerm(decoded);
+              }
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };

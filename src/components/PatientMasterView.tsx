@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { Patient } from '../types';
 import { openPrintWindow } from '../utils/printHelper';
-import { useFacilityProfiles, formatPharmacyAddress } from './PharmacySettingsModal';
+import { useFacilityProfiles, formatPharmacyAddress } from '../utils/facilityProfileHelper';
 import {
   getSupabaseConfig,
   setSupabaseConfig,

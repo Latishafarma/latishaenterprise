@@ -32,7 +32,7 @@ import {
   Check
 } from 'lucide-react';
 import { Transaction, Medicine, StockMutation, CartItem, Branch, Mitra, isOwnerAdminRole } from '../types';
-import { useFacilityProfiles, formatPharmacyAddress } from './PharmacySettingsModal';
+import { useFacilityProfiles, formatPharmacyAddress } from '../utils/facilityProfileHelper';
 import { openPrintWindow } from '../utils/printHelper';
 import { PaginationControls } from './PaginationControls';
 import {

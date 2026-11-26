@@ -28,7 +28,7 @@ import {
   MorbidityTopDiagnosis
 } from '../types';
 import { openPrintWindow } from '../utils/printHelper';
-import { useFacilityProfiles, formatPharmacyAddress } from './PharmacySettingsModal';
+import { useFacilityProfiles, formatPharmacyAddress } from '../utils/facilityProfileHelper';
 import {
   SUPABASE_MORBIDITY_REPORT_SQL_SCHEMA,
   SUPABASE_RME_SQL_SCHEMA,

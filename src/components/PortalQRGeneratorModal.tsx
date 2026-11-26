@@ -12,7 +12,7 @@ import {
   RefreshCw,
   AlertCircle,
 } from 'lucide-react';
-import { getSavedPharmacyProfile } from './PharmacySettingsModal';
+import { getSavedPharmacyProfile } from '../utils/facilityProfileHelper';
 import { isDemoMode } from '../utils/demoSandbox';
 import { getAppBaseUrlWithoutTrailingSlash } from '../utils/portalUrlHelper';
 

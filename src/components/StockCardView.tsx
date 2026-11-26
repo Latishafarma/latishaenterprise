@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, lazy, Suspense } from 'react';
 import {
   ClipboardList,
   Printer,
@@ -28,10 +28,13 @@ import {
   Transaction,
   isOwnerAdminRole
 } from '../types';
-import { useFacilityProfiles, formatPharmacyAddress } from './PharmacySettingsModal';
+import { useFacilityProfiles, formatPharmacyAddress } from '../utils/facilityProfileHelper';
 import { openPrintWindow } from '../utils/printHelper';
 import { PaginationControls } from './PaginationControls';
-import { CameraBarcodeScannerModal, playBarcodeBeep } from './CameraBarcodeScannerModal';
+import { playBarcodeBeep } from '../utils/barcodeBeep';
+const CameraBarcodeScannerModal = lazy(() =>
+  import('./CameraBarcodeScannerModal').then((m) => ({ default: m.CameraBarcodeScannerModal }))
+);
 import {
   SUPABASE_STOCK_CARD_SQL_SCHEMA,
   DEFAULT_STOCK_CARD_TABLE,
@@ -1786,32 +1789,36 @@ export const StockCardView: React.FC<StockCardViewProps> = ({
         </div>
       )}
 
-      <CameraBarcodeScannerModal
-        isOpen={showStockCardScanner}
-        onClose={() => setShowStockCardScanner(false)}
-        title="Scan Barcode Kartu Stok Digital"
-        subtitle="Arahkan kamera ke barcode kemasan obat untuk langsung melihat riwayat mutasi dan saldo batch."
-        scanMode="barcode"
-        onScanSuccess={(decoded) => {
-          const lower = decoded.trim().toLowerCase();
-          const matched = medicines.find(
-            (m) =>
-              (m.barcode && m.barcode.trim().toLowerCase() === lower) ||
-              m.id.trim().toLowerCase() === lower
-          );
-          if (matched) {
-            playBarcodeBeep();
-            setSelectedMedId(matched.id);
-            setMedSearchTerm('');
-            setSearchQuery('');
-            setIsMedDropdownOpen(false);
-          } else {
-            setMedSearchTerm(decoded);
-            setSearchQuery(decoded);
-            setIsMedDropdownOpen(true);
-          }
-        }}
-      />
+      {showStockCardScanner && (
+        <Suspense fallback={null}>
+          <CameraBarcodeScannerModal
+            isOpen={showStockCardScanner}
+            onClose={() => setShowStockCardScanner(false)}
+            title="Scan Barcode Kartu Stok Digital"
+            subtitle="Arahkan kamera ke barcode kemasan obat untuk langsung melihat riwayat mutasi dan saldo batch."
+            scanMode="barcode"
+            onScanSuccess={(decoded) => {
+              const lower = decoded.trim().toLowerCase();
+              const matched = medicines.find(
+                (m) =>
+                  (m.barcode && m.barcode.trim().toLowerCase() === lower) ||
+                  m.id.trim().toLowerCase() === lower
+              );
+              if (matched) {
+                playBarcodeBeep();
+                setSelectedMedId(matched.id);
+                setMedSearchTerm('');
+                setSearchQuery('');
+                setIsMedDropdownOpen(false);
+              } else {
+                setMedSearchTerm(decoded);
+                setSearchQuery(decoded);
+                setIsMedDropdownOpen(true);
+              }
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };
