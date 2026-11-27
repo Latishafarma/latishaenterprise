@@ -49,8 +49,53 @@ import {
   SUPABASE_ICD10_SQL_SCHEMA
 } from '../utils/supabaseClient';
 import { useIsOwnerAdmin } from '../utils/roleAccess';
+import { demoGetItem, demoSetItem } from '../utils/demoSandbox';
 import { MedicineCategorySymbol } from './MedicineCategorySymbol';
 import { RacikanBuilderModal } from './RacikanBuilderModal';
+
+const DOCTOR_RME_DRAFTS_KEY = 'latisha_doctor_rme_drafts_v1';
+
+interface DoctorRMEDraft {
+  draftKey: string;
+  draftRmeId: string;
+  queueNomor: string;
+  rmId: string;
+  patientName: string;
+  soapS: string;
+  soapO: string;
+  soapA: string;
+  soapP: string;
+  selectedIcds: ICD10Item[];
+  presItems: PrescriptionItem[];
+  editedVital: VitalSign;
+  editedComplaint: string;
+  selectedStaffIds: string[];
+  savedAtLabel: string;
+  updatedAtIso: string;
+}
+
+function getDoctorDraftKey(patient: Pick<PatientQueue, 'nomor' | 'rmId'>): string {
+  return `${patient.nomor}::${patient.rmId}`;
+}
+
+function loadDoctorRmeDrafts(): Record<string, DoctorRMEDraft> {
+  try {
+    const raw = demoGetItem(DOCTOR_RME_DRAFTS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveDoctorRmeDrafts(map: Record<string, DoctorRMEDraft>): void {
+  try {
+    demoSetItem(DOCTOR_RME_DRAFTS_KEY, JSON.stringify(map));
+  } catch {
+    // ignore storage quota failures
+  }
+}
 
 interface DoctorSOAPViewProps {
   queue: PatientQueue[];
@@ -154,7 +199,30 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
     return assignedStaffItems.reduce((acc, it) => acc + it.fee, 0);
   }, [assignedStaffItems]);
 
+  const [rmeDraftsMap, setRmeDraftsMap] = useState<Record<string, DoctorRMEDraft>>(() =>
+    loadDoctorRmeDrafts()
+  );
+  const [rmeActionToast, setRmeActionToast] = useState<{
+    type: 'draft' | 'published' | 'warning';
+    message: string;
+  } | null>(null);
+
   const currentPatient = queue.find((q) => q.nomor === selectedQueueNomor) || queue[0] || null;
+  const currentDraftKey = currentPatient ? getDoctorDraftKey(currentPatient) : '';
+  const currentPatientDraft = currentDraftKey ? rmeDraftsMap[currentDraftKey] : undefined;
+
+  // Keep selectedQueueNomor synced when queue updates (e.g., after finishing a patient)
+  useEffect(() => {
+    if (queue.length === 0) {
+      if (selectedQueueNomor !== '') setSelectedQueueNomor('');
+      return;
+    }
+    const stillExists = queue.some((q) => q.nomor === selectedQueueNomor);
+    if (!stillExists) {
+      const nextTarget = queue.find((q) => q.status === 'Diperiksa')?.nomor || queue[0].nomor;
+      setSelectedQueueNomor(nextTarget);
+    }
+  }, [queue, selectedQueueNomor]);
 
   // Editable Vital Signs & Patient Data state for Column 1
   const [isEditingVital, setIsEditingVital] = useState(false);
@@ -200,22 +268,6 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
     setTimeout(() => setCopiedIcdSchema(false), 2500);
   };
 
-  // Sync editedVital when selected patient changes
-  useEffect(() => {
-    if (currentPatient) {
-      setEditedVital({
-        td: currentPatient.vital.td || '120/80',
-        suhu: currentPatient.vital.suhu || 36.5,
-        nadi: currentPatient.vital.nadi || 80,
-        spo2: currentPatient.vital.spo2 || 98,
-        bb: currentPatient.vital.bb,
-        tb: currentPatient.vital.tb
-      });
-      setEditedComplaint(currentPatient.complaint || '');
-      setIsEditingVital(false);
-    }
-  }, [currentPatient?.nomor]);
-
   const handleSaveVitalChanges = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!currentPatient) return;
@@ -238,9 +290,7 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
   const [soapA, setSoapA] = useState('');
   const [soapP, setSoapP] = useState('');
   const [showTemplateModal, setShowTemplateModal] = useState(false);
-  const [selectedIcds, setSelectedIcds] = useState<ICD10Item[]>([
-    { code: 'J00', name: 'Acute nasopharyngitis [common cold]' }
-  ]);
+  const [selectedIcds, setSelectedIcds] = useState<ICD10Item[]>([]);
 
   // Standard clinical presets for quick SOAP editing
   const SOAP_TEMPLATES = [
@@ -319,6 +369,56 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
   const [showMedDropdown, setShowMedDropdown] = useState(false);
   const [showRacikanModal, setShowRacikanModal] = useState(false);
   const [editingRacikanIdx, setEditingRacikanIdx] = useState<number | null>(null);
+
+  // Restore saved RME draft or reset to fresh blank form whenever active queue patient changes
+  useEffect(() => {
+    if (!currentPatient) return;
+    const key = getDoctorDraftKey(currentPatient);
+    const savedDraft = loadDoctorRmeDrafts()[key];
+
+    if (savedDraft) {
+      setEditedVital({
+        td: savedDraft.editedVital?.td || currentPatient.vital.td || '120/80',
+        suhu: savedDraft.editedVital?.suhu ?? currentPatient.vital.suhu ?? 36.5,
+        nadi: savedDraft.editedVital?.nadi ?? currentPatient.vital.nadi ?? 80,
+        spo2: savedDraft.editedVital?.spo2 ?? currentPatient.vital.spo2 ?? 98,
+        bb: savedDraft.editedVital?.bb ?? currentPatient.vital.bb,
+        tb: savedDraft.editedVital?.tb ?? currentPatient.vital.tb
+      });
+      setEditedComplaint(savedDraft.editedComplaint ?? currentPatient.complaint ?? '');
+      setSoapS(savedDraft.soapS || '');
+      setSoapO(savedDraft.soapO || '');
+      setSoapA(savedDraft.soapA || '');
+      setSoapP(savedDraft.soapP || '');
+      setSelectedIcds(Array.isArray(savedDraft.selectedIcds) ? savedDraft.selectedIcds : []);
+      setPresItems(Array.isArray(savedDraft.presItems) ? savedDraft.presItems : []);
+      if (Array.isArray(savedDraft.selectedStaffIds) && savedDraft.selectedStaffIds.length > 0) {
+        setSelectedStaffIds(savedDraft.selectedStaffIds);
+      }
+    } else {
+      setEditedVital({
+        td: currentPatient.vital.td || '120/80',
+        suhu: currentPatient.vital.suhu || 36.5,
+        nadi: currentPatient.vital.nadi || 80,
+        spo2: currentPatient.vital.spo2 || 98,
+        bb: currentPatient.vital.bb,
+        tb: currentPatient.vital.tb
+      });
+      setEditedComplaint(currentPatient.complaint || '');
+      setSoapS('');
+      setSoapO('');
+      setSoapA('');
+      setSoapP('');
+      setSelectedIcds([]);
+      setPresItems([]);
+    }
+
+    setIcdSearch('');
+    setMedSearch('');
+    setShowIcdDropdown(false);
+    setShowMedDropdown(false);
+    setIsEditingVital(false);
+  }, [currentPatient?.nomor]);
 
   // Active Allergy Warning
   const patientAllergy = currentPatient?.rmId
@@ -553,13 +653,78 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
     setEditingRacikanIdx(null);
   };
 
-  const handleSaveAndSend = () => {
+  const showRmeToast = (type: 'draft' | 'published' | 'warning', message: string) => {
+    setRmeActionToast({ type, message });
+    setTimeout(() => {
+      setRmeActionToast((prev) => (prev?.message === message ? null : prev));
+    }, 5500);
+  };
+
+  // Tombol 1: SIMPAN RME (Simpan data sementara agar dapat dilakukan penginputan ulang di Ruang Periksa Dokter)
+  const handleSaveTemporaryRME = () => {
     if (!currentPatient) {
-      alert('Pilih pasien dari antrean terlebih dahulu!');
+      showRmeToast('warning', 'Pilih pasien dari antrean terlebih dahulu!');
       return;
     }
 
-    const recordId = `RME-${Date.now().toString().slice(-6)}`;
+    const key = getDoctorDraftKey(currentPatient);
+    const savedAtLabel = new Date().toLocaleTimeString('id-ID', {
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+    const existingDraft = rmeDraftsMap[key];
+    const draftRmeId = existingDraft?.draftRmeId || `RME-${Date.now().toString().slice(-6)}`;
+
+    const nextDraft: DoctorRMEDraft = {
+      draftKey: key,
+      draftRmeId,
+      queueNomor: currentPatient.nomor,
+      rmId: currentPatient.rmId,
+      patientName: currentPatient.name,
+      soapS,
+      soapO,
+      soapA,
+      soapP,
+      selectedIcds,
+      presItems,
+      editedVital,
+      editedComplaint,
+      selectedStaffIds,
+      savedAtLabel,
+      updatedAtIso: new Date().toISOString()
+    };
+
+    const nextMap = {
+      ...rmeDraftsMap,
+      [key]: nextDraft
+    };
+    setRmeDraftsMap(nextMap);
+    saveDoctorRmeDrafts(nextMap);
+
+    if (onUpdateQueuePatient) {
+      onUpdateQueuePatient(currentPatient.nomor, {
+        vital: editedVital,
+        complaint: editedComplaint,
+        status: 'Diperiksa'
+      });
+    }
+
+    showRmeToast(
+      'draft',
+      `Data sementara RME ${currentPatient.name} (${currentPatient.nomor}) tersimpan pukul ${savedAtLabel}. Anda dapat melanjutkan pengisian kapan saja di Ruang Periksa Dokter.`
+    );
+  };
+
+  // Tombol 2: TERBITKAN E-RESEP (Selesaikan semua aktivitas penginputan RME, tampilkan form baru/kosong, dan kirim resep otomatis ke Antrean Resep)
+  const handlePublishEPrescription = () => {
+    if (!currentPatient) {
+      showRmeToast('warning', 'Pilih pasien dari antrean terlebih dahulu!');
+      return;
+    }
+
+    const key = getDoctorDraftKey(currentPatient);
+    const existingDraft = rmeDraftsMap[key];
+    const recordId = existingDraft?.draftRmeId || `RME-${Date.now().toString().slice(-6)}`;
     const rxId = `RX-${Math.floor(1000 + Math.random() * 9000)}`;
     const today = new Date().toISOString().split('T')[0];
     const timeNow = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
@@ -630,20 +795,35 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
     }
 
     onSaveRME(newRecord, newPrescription);
+
+    if (existingDraft) {
+      const nextMap = { ...rmeDraftsMap };
+      delete nextMap[key];
+      setRmeDraftsMap(nextMap);
+      saveDoctorRmeDrafts(nextMap);
+    }
+
     onFinishQueue(currentPatient.nomor);
 
-    // Reset inputs
+    // Reset seluruh form ke kondisi baru/kosong
     setSoapS('');
     setSoapO('');
     setSoapA('');
     setSoapP('');
-    setSelectedIcds([{ code: 'J00', name: 'Acute nasopharyngitis [common cold]' }]);
+    setSelectedIcds([]);
     setIcdSearch('');
+    setMedSearch('');
     setPresItems([]);
+    setShowIcdDropdown(false);
+    setShowMedDropdown(false);
+    setIsEditingVital(false);
 
-    alert(
-      `Pemeriksaan RME (${recordId}) berhasil disimpan! ${
-        newPrescription ? `Resep digital (${rxId}) telah dikirimkan ke Farmasi.` : ''
+    showRmeToast(
+      'published',
+      `Pemeriksaan RME (${recordId}) selesai & form telah dikosongkan.${
+        newPrescription
+          ? ` E-Resep (${rxId}) otomatis masuk ke submenu Antrean Resep.`
+          : ''
       }`
     );
   };
@@ -671,14 +851,47 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
             onChange={(e) => setSelectedQueueNomor(e.target.value)}
             className="p-2 rounded-xl bg-slate-800 text-white font-bold border border-slate-700 outline-none"
           >
-            {queue.map((q) => (
-              <option key={q.nomor} value={q.nomor}>
-                {q.nomor} - {q.name} ({q.status})
-              </option>
-            ))}
+            {queue.map((q) => {
+              const hasDraft = Boolean(rmeDraftsMap[getDoctorDraftKey(q)]);
+              return (
+                <option key={q.nomor} value={q.nomor}>
+                  {q.nomor} - {q.name} ({q.status}){hasDraft ? ' · [Draft RME]' : ''}
+                </option>
+              );
+            })}
           </select>
         </div>
       </div>
+
+      {rmeActionToast && (
+        <div
+          className={`p-3.5 rounded-2xl border text-xs font-bold flex items-center justify-between gap-3 shadow-xs animate-fade-in ${
+            rmeActionToast.type === 'published'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+              : rmeActionToast.type === 'draft'
+              ? 'bg-sky-50 border-sky-200 text-sky-900'
+              : 'bg-amber-50 border-amber-200 text-amber-900'
+          }`}
+        >
+          <span className="flex items-center gap-2">
+            {rmeActionToast.type === 'published' ? (
+              <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : rmeActionToast.type === 'draft' ? (
+              <Save className="w-4 h-4 text-sky-600 shrink-0" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+            )}
+            <span>{rmeActionToast.message}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setRmeActionToast(null)}
+            className="p-1 rounded-lg hover:bg-black/5 text-slate-500 hover:text-slate-800 transition cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {currentPatient ? (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
@@ -975,8 +1188,14 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
                 </p>
               </div>
 
-              {/* Edit Icon Button for SOAP workspace */}
-              <div className="flex items-center gap-1.5">
+              {/* Edit Icon Button & Draft Status Badge for SOAP workspace */}
+              <div className="flex items-center gap-2 flex-wrap">
+                {currentPatientDraft && (
+                  <span className="px-2.5 py-1 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 text-[11px] font-bold flex items-center gap-1">
+                    <Clock className="w-3 h-3 text-amber-600" />
+                    <span>Draft RME ({currentPatientDraft.savedAtLabel})</span>
+                  </span>
+                )}
                 <button
                   type="button"
                   onClick={() => setShowTemplateModal(true)}
@@ -1561,14 +1780,25 @@ export const DoctorSOAPView: React.FC<DoctorSOAPViewProps> = ({
               </div>
             </div>
 
-            {/* Save & Submit Button */}
-            <div className="pt-3 border-t border-slate-200 flex justify-end">
+            {/* Action Buttons: Simpan RME (Sementara) & Terbitkan E-Resep (Selesai) */}
+            <div className="pt-3 border-t border-slate-200 flex flex-wrap justify-end items-center gap-3">
               <button
-                onClick={handleSaveAndSend}
-                className="py-3 px-6 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-extrabold rounded-xl text-xs uppercase tracking-wider shadow-md transition-all flex items-center gap-2"
+                type="button"
+                onClick={handleSaveTemporaryRME}
+                title="Simpan data RME sementara ketika pengisian belum lengkap agar dapat dilanjutkan kembali di Ruang Periksa Dokter"
+                className="py-3 px-5 bg-sky-600 hover:bg-sky-700 text-white font-extrabold rounded-xl text-xs uppercase tracking-wider shadow-sm transition-all flex items-center gap-2 cursor-pointer active:scale-95"
+              >
+                <Save className="w-4 h-4" />
+                <span>Simpan RME</span>
+              </button>
+              <button
+                type="button"
+                onClick={handlePublishEPrescription}
+                title="Selesaikan seluruh aktivitas penginputan RME, kosongkan form untuk pasien berikutnya, dan kirim resep otomatis ke Antrean Resep"
+                className="py-3 px-6 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-extrabold rounded-xl text-xs uppercase tracking-wider shadow-md transition-all flex items-center gap-2 cursor-pointer active:scale-95"
               >
                 <Send className="w-4 h-4" />
-                <span>Simpan RME & Terbitkan E-Resep ke Farmasi</span>
+                <span>Terbitkan E-Resep</span>
               </button>
             </div>
           </div>

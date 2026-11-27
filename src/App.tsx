@@ -3788,7 +3788,13 @@ export default function App() {
         (newOrd) => {
           if (!newOrd?.id || getDeletedIdsSet('mitra_orders').has(newOrd.id)) return;
           setMitraOrders((prev) => {
-            const next = prev.some((o) => o.id === newOrd.id)
+            const exists = prev.find((o) => o.id === newOrd.id);
+            if (exists && getPendingSyncIdsSet('mitra_orders').has(newOrd.id)) {
+              const localTs = new Date(exists.updatedAt || exists.createdAt || 0).getTime();
+              const remoteTs = new Date(newOrd.updatedAt || newOrd.createdAt || 0).getTime();
+              if (localTs >= remoteTs) return prev;
+            }
+            const next = exists
               ? prev.map((o) => (o.id === newOrd.id ? newOrd : o))
               : [newOrd, ...prev];
             persistMitraOrdersNow(next);
@@ -3798,7 +3804,15 @@ export default function App() {
         (updatedOrd) => {
           if (!updatedOrd?.id || getDeletedIdsSet('mitra_orders').has(updatedOrd.id)) return;
           setMitraOrders((prev) => {
-            const next = prev.map((o) => (o.id === updatedOrd.id ? updatedOrd : o));
+            const exists = prev.find((o) => o.id === updatedOrd.id);
+            if (exists && getPendingSyncIdsSet('mitra_orders').has(updatedOrd.id)) {
+              const localTs = new Date(exists.updatedAt || exists.createdAt || 0).getTime();
+              const remoteTs = new Date(updatedOrd.updatedAt || updatedOrd.createdAt || 0).getTime();
+              if (localTs >= remoteTs) return prev;
+            }
+            const next = exists
+              ? prev.map((o) => (o.id === updatedOrd.id ? updatedOrd : o))
+              : [updatedOrd, ...prev];
             persistMitraOrdersNow(next);
             return next;
           });
@@ -6622,34 +6636,93 @@ export default function App() {
     } catch {}
   };
 
+  const handleSaveManualCustomerPO = async (
+    order: MitraOrder,
+    isEdit: boolean
+  ): Promise<{ success: boolean; syncedToCloud: boolean; needsMigration?: boolean; error?: string }> => {
+    const cleanOrder: MitraOrder = {
+      ...order,
+      branchId: order.branchId || currentBranch.id || 'BR-01',
+      updatedAt: new Date().toISOString()
+    };
+
+    if (!isDemoActive && !isDemoMode()) {
+      markIdsPendingSync('mitra_orders', [cleanOrder.id]);
+    }
+
+    setMitraOrders((prev) => {
+      const exists = prev.some((o) => o.id === cleanOrder.id);
+      const next = exists
+        ? prev.map((o) => (o.id === cleanOrder.id ? cleanOrder : o))
+        : [cleanOrder, ...prev];
+      persistMitraOrdersNow(next);
+      return next;
+    });
+
+    broadcastMitraOrderEvent({ type: 'ORDER_UPSERT', order: cleanOrder });
+    addAuditLog(
+      'PO Pelanggan',
+      `${isEdit ? 'Perbarui' : 'Catat'} PO Pelanggan (${cleanOrder.orderRoom === 'REGULER' ? 'Reguler' : 'Mitra'}) ${cleanOrder.orderCode} a/n ${cleanOrder.mitraName} senilai Rp ${cleanOrder.totalAmount.toLocaleString('id-ID')}.`
+    );
+
+    if (isDemoActive || isDemoMode()) {
+      return { success: true, syncedToCloud: true };
+    }
+
+    const syncRes = await syncMitraOrderToSupabase(cleanOrder);
+    if (syncRes.success) {
+      confirmCloudSync('mitra_orders', [cleanOrder.id]);
+      return {
+        success: true,
+        syncedToCloud: true,
+        needsMigration: syncRes.needsMigration,
+        error: syncRes.needsMigration ? syncRes.error : undefined
+      };
+    }
+
+    return {
+      success: true,
+      syncedToCloud: false,
+      error: syncRes.error || 'Tersimpan lokal & akan otomatis disinkronkan ke Supabase saat koneksi pulih.'
+    };
+  };
+
   const handleUpdateMitraOrderStatus = (
     orderId: string,
     status: MitraOrderStatus,
     adminNotes?: string
   ) => {
-    let updatedOrder: MitraOrder | null = null;
-    setMitraOrders((prev) =>
-      prev.map((ord) => {
-        if (ord.id !== orderId) return ord;
-        updatedOrder = {
-          ...ord,
-          status,
-          adminNotes: adminNotes !== undefined ? adminNotes : ord.adminNotes,
-          updatedAt: new Date().toISOString()
-        };
-        return updatedOrder;
-      })
-    );
-    if (updatedOrder) {
-      syncMitraOrderToSupabase(updatedOrder).catch((err) =>
-        console.warn('Supabase mitra order status sync error:', err)
-      );
-      broadcastMitraOrderEvent({ type: 'ORDER_UPSERT', order: updatedOrder });
-      addAuditLog(
-        'Pesanan Mitra',
-        `Status pesanan ${(updatedOrder as MitraOrder).orderCode} (${(updatedOrder as MitraOrder).mitraName}) diubah menjadi '${status}'.`
-      );
+    const target = mitraOrdersRef.current.find((ord) => ord.id === orderId);
+    if (!target) return;
+    const updatedOrder: MitraOrder = {
+      ...target,
+      status,
+      adminNotes: adminNotes !== undefined ? adminNotes : target.adminNotes,
+      updatedAt: new Date().toISOString()
+    };
+
+    if (!isDemoActive && !isDemoMode()) {
+      markIdsPendingSync('mitra_orders', [orderId]);
     }
+
+    setMitraOrders((prev) => {
+      const next = prev.map((ord) => (ord.id === orderId ? updatedOrder : ord));
+      persistMitraOrdersNow(next);
+      return next;
+    });
+
+    if (!isDemoActive && !isDemoMode()) {
+      syncMitraOrderToSupabase(updatedOrder)
+        .then((res) => {
+          if (res.success) confirmCloudSync('mitra_orders', [orderId]);
+        })
+        .catch((err) => console.warn('Supabase mitra order status sync error:', err));
+    }
+    broadcastMitraOrderEvent({ type: 'ORDER_UPSERT', order: updatedOrder });
+    addAuditLog(
+      'Pesanan Mitra',
+      `Status pesanan ${updatedOrder.orderCode} (${updatedOrder.mitraName}) diubah menjadi '${status}'.`
+    );
   };
 
   const handleValidateMitraOrderPayment = (
@@ -6657,54 +6730,58 @@ export default function App() {
     decision: 'APPROVE' | 'REJECT',
     rejectionReason?: string
   ) => {
-    let updatedOrder: MitraOrder | null = null;
+    const target = mitraOrdersRef.current.find((ord) => ord.id === orderId);
+    if (!target) return;
     const nowIso = new Date().toISOString();
 
-    setMitraOrders((prev) =>
-      prev.map((ord) => {
-        if (ord.id !== orderId) return ord;
-        if (decision === 'APPROVE') {
-          updatedOrder = {
-            ...ord,
+    const updatedOrder: MitraOrder =
+      decision === 'APPROVE'
+        ? {
+            ...target,
             paymentStatus: 'Lunas',
             paymentVerifiedAt: nowIso,
             paymentVerifiedBy: userName,
             paymentRejectionReason: undefined,
-            status: ord.status === 'Pending' ? 'Dikonfirmasi' : ord.status,
+            status: target.status === 'Pending' ? 'Dikonfirmasi' : target.status,
             adminNotes:
-              ord.adminNotes || `Pembayaran Transfer Bank tervalidasi Lunas oleh ${userName}.`,
+              target.adminNotes || `Pembayaran Transfer Bank tervalidasi Lunas oleh ${userName}.`,
             updatedAt: nowIso
-          };
-        } else {
-          const reason =
-            (rejectionReason || '').trim() ||
-            'Bukti transfer tidak valid / nominal belum masuk mutasi rekening.';
-          updatedOrder = {
-            ...ord,
+          }
+        : {
+            ...target,
             paymentStatus: 'Ditolak',
             paymentVerifiedAt: nowIso,
             paymentVerifiedBy: userName,
-            paymentRejectionReason: reason,
+            paymentRejectionReason:
+              (rejectionReason || '').trim() ||
+              'Bukti transfer tidak valid / nominal belum masuk mutasi rekening.',
             updatedAt: nowIso
           };
-        }
-        return updatedOrder;
-      })
-    );
 
-    if (updatedOrder) {
-      const ordRef = updatedOrder as MitraOrder;
-      syncMitraOrderToSupabase(ordRef).catch((err) =>
-        console.warn('Supabase mitra payment validation sync error:', err)
-      );
-      broadcastMitraOrderEvent({ type: 'ORDER_UPSERT', order: ordRef });
-      addAuditLog(
-        'Validasi Pembayaran Mitra',
-        decision === 'APPROVE'
-          ? `Pembayaran pesanan ${ordRef.orderCode} (${ordRef.mitraName}) senilai Rp ${ordRef.totalAmount.toLocaleString('id-ID')} DISETUJUI (Lunas) oleh ${userName}.`
-          : `Pembayaran pesanan ${ordRef.orderCode} (${ordRef.mitraName}) DITOLAK oleh ${userName}. Alasan: ${ordRef.paymentRejectionReason}`
-      );
+    if (!isDemoActive && !isDemoMode()) {
+      markIdsPendingSync('mitra_orders', [orderId]);
     }
+
+    setMitraOrders((prev) => {
+      const next = prev.map((ord) => (ord.id === orderId ? updatedOrder : ord));
+      persistMitraOrdersNow(next);
+      return next;
+    });
+
+    if (!isDemoActive && !isDemoMode()) {
+      syncMitraOrderToSupabase(updatedOrder)
+        .then((res) => {
+          if (res.success) confirmCloudSync('mitra_orders', [orderId]);
+        })
+        .catch((err) => console.warn('Supabase mitra payment validation sync error:', err));
+    }
+    broadcastMitraOrderEvent({ type: 'ORDER_UPSERT', order: updatedOrder });
+    addAuditLog(
+      'Validasi Pembayaran Mitra',
+      decision === 'APPROVE'
+        ? `Pembayaran pesanan ${updatedOrder.orderCode} (${updatedOrder.mitraName}) senilai Rp ${updatedOrder.totalAmount.toLocaleString('id-ID')} DISETUJUI (Lunas) oleh ${userName}.`
+        : `Pembayaran pesanan ${updatedOrder.orderCode} (${updatedOrder.mitraName}) DITOLAK oleh ${userName}. Alasan: ${updatedOrder.paymentRejectionReason}`
+    );
   };
 
   const handleDeleteMitraOrder = (orderId: string) => {
@@ -6903,10 +6980,21 @@ export default function App() {
       updatedAt: now.toISOString()
     };
 
-    setMitraOrders((prev) => prev.map((o) => (o.id === order.id ? completedOrder : o)));
-    syncMitraOrderToSupabase(completedOrder).catch((err) =>
-      console.warn('Supabase mitra order complete sync error:', err)
-    );
+    if (!isDemoActive && !isDemoMode()) {
+      markIdsPendingSync('mitra_orders', [order.id]);
+    }
+    setMitraOrders((prev) => {
+      const next = prev.map((o) => (o.id === order.id ? completedOrder : o));
+      persistMitraOrdersNow(next);
+      return next;
+    });
+    if (!isDemoActive && !isDemoMode()) {
+      syncMitraOrderToSupabase(completedOrder)
+        .then((res) => {
+          if (res.success) confirmCloudSync('mitra_orders', [order.id]);
+        })
+        .catch((err) => console.warn('Supabase mitra order complete sync error:', err));
+    }
     broadcastMitraOrderEvent({ type: 'ORDER_UPSERT', order: completedOrder });
 
     addAuditLog(
@@ -13425,6 +13513,11 @@ export default function App() {
                 <MitraOrdersView
                   orders={mitraOrders}
                   medicines={medicines}
+                  mitraList={mitraList}
+                  patients={patients}
+                  currentBranchId={currentBranch.id}
+                  userName={userName}
+                  onSaveManualPO={handleSaveManualCustomerPO}
                   onUpdateStatus={handleUpdateMitraOrderStatus}
                   onValidatePayment={handleValidateMitraOrderPayment}
                   onConvertToPOS={handleConvertMitraOrderToPOS}
@@ -13439,6 +13532,21 @@ export default function App() {
                           success: false
                         }));
                         if (dRes.success) confirmCloudDeletes('mitra_orders', [delId]);
+                      }
+                      const pendingPushIds = getPendingSyncIdsSet('mitra_orders');
+                      const pendingLocalOrders = mitraOrdersRef.current.filter(
+                        (o) => o.id && pendingPushIds.has(o.id)
+                      );
+                      if (pendingLocalOrders.length > 0) {
+                        await Promise.all(
+                          pendingLocalOrders.map((ord) =>
+                            syncMitraOrderToSupabase(ord)
+                              .then((sRes) => {
+                                if (sRes.success) confirmCloudSync('mitra_orders', [ord.id]);
+                              })
+                              .catch(() => {})
+                          )
+                        );
                       }
                     }
                     const res = await fetchMitraOrdersFromSupabase();

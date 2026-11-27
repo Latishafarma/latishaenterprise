@@ -5489,12 +5489,26 @@ export function supabaseRowToMitraOrder(row: Record<string, any>): MitraOrder {
       ? 'Menunggu Verifikasi'
       : 'Menunggu Pembayaran');
 
+  const orderCodeStr = String(row.order_code || row.orderCode || '');
+  const categoryStr = String(row.mitra_category || row.mitraCategory || '').toLowerCase();
   const resolvedRoom: 'REGULER' | 'MITRA' =
     row.order_room === 'REGULER' ||
     row.orderRoom === 'REGULER' ||
-    String(row.order_code || row.orderCode || '').startsWith('REG-')
+    orderCodeStr.startsWith('REG-') ||
+    orderCodeStr.startsWith('PO-REG-') ||
+    categoryStr.includes('reguler')
       ? 'REGULER'
       : 'MITRA';
+
+  const itemsSubtotal = items.reduce((s, it) => s + (Number(it.subtotal) || 0), 0);
+  const rawTotalAmount = Number(row.total_amount ?? row.totalAmount ?? 0);
+  const explicitDiscount = Number(row.discount_amount ?? row.discountAmount ?? 0);
+  const inferredDiscount =
+    explicitDiscount > 0
+      ? explicitDiscount
+      : itemsSubtotal > rawTotalAmount
+      ? itemsSubtotal - rawTotalAmount
+      : 0;
 
   return {
     id: row.id || row.order_code || `ORD-${Date.now().toString().slice(-6)}`,
@@ -5509,7 +5523,12 @@ export function supabaseRowToMitraOrder(row: Record<string, any>): MitraOrder {
     items,
     totalItems: Number(row.total_items ?? row.totalItems ?? items.length),
     totalQtyBox: Number(row.total_qty_box ?? row.totalQtyBox ?? items.reduce((s, it) => s + (Number(it.qtyBox) || 0), 0)),
-    totalAmount: Number(row.total_amount ?? row.totalAmount ?? 0),
+    discountAmount: inferredDiscount > 0 ? inferredDiscount : undefined,
+    appliedDiscountLabel:
+      row.applied_discount_label ||
+      row.appliedDiscountLabel ||
+      (inferredDiscount > 0 ? 'Diskon PO Manual' : undefined),
+    totalAmount: rawTotalAmount,
     status: orderStatus,
     paymentMethod: row.payment_method || row.paymentMethod || 'Transfer Bank',
     paymentStatus: resolvedPayStatus,

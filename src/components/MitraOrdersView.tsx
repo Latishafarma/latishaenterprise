@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useDeferredValue } from 'react';
 import {
   ShoppingBag,
   Search,
@@ -28,13 +28,17 @@ import {
   Landmark,
   Image as ImageIcon,
   ZoomIn,
-  QrCode
+  QrCode,
+  ClipboardPlus,
+  Edit2
 } from 'lucide-react';
 import {
   Medicine,
+  Mitra,
   MitraOrder,
   MitraOrderStatus,
   MitraPaymentStatus,
+  Patient,
   PortalOrderRoom
 } from '../types';
 import { getAvailableBoxStock } from '../utils/batchHelper';
@@ -45,6 +49,8 @@ import {
 import { useIsOwnerAdmin } from '../utils/roleAccess';
 import { buildPortalUrl } from '../utils/portalUrlHelper';
 import { PortalQRGeneratorModal } from './PortalQRGeneratorModal';
+import { PaginationControls } from './PaginationControls';
+import { ManualCustomerPOModal } from './ManualCustomerPOModal';
 
 export interface ConvertMitraOrderOptions {
   paymentMethod: string;
@@ -56,6 +62,14 @@ export interface ConvertMitraOrderOptions {
 interface MitraOrdersViewProps {
   orders: MitraOrder[];
   medicines: Medicine[];
+  mitraList?: Mitra[];
+  patients?: Patient[];
+  currentBranchId?: string;
+  userName?: string;
+  onSaveManualPO?: (
+    order: MitraOrder,
+    isEdit: boolean
+  ) => Promise<{ success: boolean; syncedToCloud?: boolean; needsMigration?: boolean; error?: string }>;
   onUpdateStatus: (orderId: string, status: MitraOrderStatus, adminNotes?: string) => void;
   onValidatePayment: (orderId: string, decision: 'APPROVE' | 'REJECT', rejectionReason?: string) => void;
   onConvertToPOS: (order: MitraOrder, options: ConvertMitraOrderOptions) => { success: boolean; trxId?: string; error?: string };
@@ -121,6 +135,11 @@ const getPaymentBadgeInfo = (
 export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
   orders,
   medicines,
+  mitraList = [],
+  patients = [],
+  currentBranchId = 'BR-01',
+  userName = 'Admin',
+  onSaveManualPO,
   onUpdateStatus,
   onValidatePayment,
   onConvertToPOS,
@@ -133,8 +152,16 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
   const [roomFilter, setRoomFilter] = useState<'Semua' | PortalOrderRoom>('Semua');
   const [paymentFilter, setPaymentFilter] = useState<'Semua' | MitraPaymentStatus>('Semua');
   const [searchQuery, setSearchQuery] = useState('');
+  const deferredSearchQuery = useDeferredValue(searchQuery);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(25);
+
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [toastMsg, setToastMsg] = useState<{ text: string; tone: 'success' | 'warning' } | null>(null);
+
+  const [isPOModalOpen, setIsPOModalOpen] = useState(false);
+  const [editingPOOrder, setEditingPOOrder] = useState<MitraOrder | null>(null);
 
   const [detailOrderId, setDetailOrderId] = useState<string | null>(null);
   const [adminNotesDraft, setAdminNotesDraft] = useState('');
@@ -155,6 +182,22 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
   const [showSchemaModal, setShowSchemaModal] = useState(false);
   const [copiedSchema, setCopiedSchema] = useState(false);
   const [showQrModal, setShowQrModal] = useState(false);
+
+  const showNotice = (text: string, tone: 'success' | 'warning' = 'success') => {
+    setToastMsg({ text, tone });
+    setTimeout(() => {
+      setToastMsg((cur) => (cur?.text === text ? null : cur));
+    }, 5000);
+  };
+
+  // O(1) medicine lookup map to keep modal/table rendering smooth even with large inventory
+  const medicineByIdMap = useMemo(() => {
+    const map = new Map<string, Medicine>();
+    for (const m of medicines) {
+      map.set(m.id, m);
+    }
+    return map;
+  }, [medicines]);
 
   const portalUrl = useMemo(() => {
     return buildPortalUrl({ view: 'portal-pelanggan' });
@@ -187,11 +230,14 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
       openValidationModal(order);
       return;
     }
+    const ordRoom = resolveOrderRoom(order);
     setConvertOrder(order);
     setConvertPaymentMethod(order.paymentMethod || 'Transfer Bank');
     setConvertTerm('Cash / COD');
     setConvertUsePpn(false);
-    setConvertNotes(`Konversi Pesanan Portal Mitra ${order.orderCode} - ${order.mitraName}`);
+    setConvertNotes(
+      `Konversi Pesanan ${ordRoom === 'REGULER' ? 'Reguler' : 'Mitra'} ${order.orderCode} - ${order.mitraName}`
+    );
     setConvertError('');
   };
 
@@ -205,37 +251,77 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
-    await onRefreshSupabase();
+    const res = await onRefreshSupabase();
     setIsRefreshing(false);
+    if (res.success) {
+      showNotice(`Sinkronisasi dua arah Supabase selesai (${res.count ?? orders.length} pesanan/PO).`);
+    } else if (res.error) {
+      showNotice(res.error, 'warning');
+    }
   };
 
-  const kpi = useMemo(() => {
-    const pendingCount = orders.filter((o) => o.status === 'Pending').length;
-    const waitingPaymentVerifyCount = orders.filter(
-      (o) => getEffectivePaymentStatus(o) === 'Menunggu Verifikasi' && o.status !== 'Dibatalkan'
-    ).length;
-    const processingCount = orders.filter(
-      (o) => o.status === 'Dikonfirmasi' || o.status === 'Diproses'
-    ).length;
-    const completedCount = orders.filter((o) => o.status === 'Selesai').length;
-    const activeOrderValue = orders
-      .filter((o) => o.status !== 'Dibatalkan' && o.status !== 'Selesai')
-      .reduce((sum, o) => sum + (Number(o.totalAmount) || 0), 0);
+  const { kpi, statusCounts } = useMemo(() => {
+    let pendingCount = 0;
+    let waitingPaymentVerifyCount = 0;
+    let processingCount = 0;
+    let completedCount = 0;
+    let cancelledCount = 0;
+    let confirmedCount = 0;
+    let inProgressCount = 0;
+    let activeOrderValue = 0;
+
+    for (const o of orders) {
+      const pStatus = getEffectivePaymentStatus(o);
+      if (o.status === 'Pending') pendingCount++;
+      else if (o.status === 'Dikonfirmasi') {
+        confirmedCount++;
+        processingCount++;
+      } else if (o.status === 'Diproses') {
+        inProgressCount++;
+        processingCount++;
+      } else if (o.status === 'Selesai') completedCount++;
+      else if (o.status === 'Dibatalkan') cancelledCount++;
+
+      if (pStatus === 'Menunggu Verifikasi' && o.status !== 'Dibatalkan') {
+        waitingPaymentVerifyCount++;
+      }
+      if (o.status !== 'Dibatalkan' && o.status !== 'Selesai') {
+        activeOrderValue += Number(o.totalAmount) || 0;
+      }
+    }
 
     return {
-      pendingCount,
-      waitingPaymentVerifyCount,
-      processingCount,
-      completedCount,
-      activeOrderValue
+      kpi: {
+        pendingCount,
+        waitingPaymentVerifyCount,
+        processingCount,
+        completedCount,
+        activeOrderValue
+      },
+      statusCounts: {
+        Semua: orders.length,
+        Pending: pendingCount,
+        Dikonfirmasi: confirmedCount,
+        Diproses: inProgressCount,
+        Selesai: completedCount,
+        Dibatalkan: cancelledCount
+      } as Record<'Semua' | MitraOrderStatus, number>
     };
   }, [orders]);
 
-  const resolveOrderRoom = (ord: MitraOrder): PortalOrderRoom =>
-    ord.orderRoom || (String(ord.orderCode || '').startsWith('REG-') ? 'REGULER' : 'MITRA');
+  const resolveOrderRoom = (ord: MitraOrder): PortalOrderRoom => {
+    const code = String(ord.orderCode || '');
+    const cat = String(ord.mitraCategory || '').toLowerCase();
+    return (
+      ord.orderRoom ||
+      (code.startsWith('REG-') || code.startsWith('PO-REG-') || cat.includes('reguler')
+        ? 'REGULER'
+        : 'MITRA')
+    );
+  };
 
   const filteredOrders = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
+    const q = deferredSearchQuery.trim().toLowerCase();
     return orders.filter((ord) => {
       if (roomFilter !== 'Semua' && resolveOrderRoom(ord) !== roomFilter) return false;
       if (statusFilter !== 'Semua' && ord.status !== statusFilter) return false;
@@ -249,21 +335,35 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
         ord.items.some((it) => it.name.toLowerCase().includes(q))
       );
     });
-  }, [orders, roomFilter, statusFilter, paymentFilter, searchQuery]);
+  }, [orders, roomFilter, statusFilter, paymentFilter, deferredSearchQuery]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [roomFilter, statusFilter, paymentFilter, deferredSearchQuery]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredOrders.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const paginatedOrders = useMemo(() => {
+    const start = (safePage - 1) * pageSize;
+    return filteredOrders.slice(start, start + pageSize);
+  }, [filteredOrders, safePage, pageSize]);
 
   const getOrderStockIssues = (order: MitraOrder): string[] => {
     const issues: string[] = [];
     order.items.forEach((item) => {
-      const med = medicines.find((m) => m.id === item.medicineId);
+      const med = medicineByIdMap.get(item.medicineId);
       if (!med) {
         issues.push(`"${item.name}" tidak ditemukan di Master Obat`);
         return;
       }
-      const needKecil = Number(item.qtyTotalKecil) || (Number(item.qtyBox) || 0) * Math.max(1, Number(item.rasioKonversi) || 1);
+      const isSmallUnit = item.unitMode === 'KECIL';
+      const needKecil = isSmallUnit
+        ? Number(item.qtyTotalKecil) || Number(item.qtyBox) || 0
+        : Number(item.qtyTotalKecil) || (Number(item.qtyBox) || 0) * Math.max(1, Number(item.rasioKonversi) || 1);
       if ((Number(med.stock) || 0) < needKecil) {
         const availBox = getAvailableBoxStock(med);
         issues.push(
-          `"${item.name}": butuh ${item.qtyBox} ${item.satuanBesar} (${needKecil} ${item.satuanKecil}), stok tersedia ${availBox} ${med.satuanBesar || 'Box'} (${med.stock} ${med.satuanKecil || 'Tab'})`
+          `"${item.name}": butuh ${item.qtyBox} ${isSmallUnit ? item.satuanKecil : item.satuanBesar} (${needKecil} ${item.satuanKecil}), stok tersedia ${availBox} ${med.satuanBesar || 'Box'} (${med.stock} ${med.satuanKecil || 'Tab'})`
         );
       }
     });
@@ -331,6 +431,32 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
 
   return (
     <div className="space-y-5">
+      {toastMsg && (
+        <div
+          className={`rounded-2xl border px-4 py-3 text-xs font-bold flex items-center justify-between gap-3 shadow-xs ${
+            toastMsg.tone === 'warning'
+              ? 'bg-amber-50 border-amber-300 text-amber-900'
+              : 'bg-emerald-50 border-emerald-300 text-emerald-900'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {toastMsg.tone === 'warning' ? (
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            )}
+            <span>{toastMsg.text}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setToastMsg(null)}
+            className="p-1 rounded-lg hover:bg-black/5 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Header & Portal Link Bar */}
       <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div className="flex items-start gap-3.5">
@@ -342,12 +468,27 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
               Pesanan Portal Mandiri (Mitra &amp; Reguler)
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Manajemen pesanan masuk real-time dari Ruang Order Reguler/Umum (termasuk verifikasi resep) dan Ruang Order Mitra, hingga konversi ke Faktur Penjualan (POS).
+              Manajemen pesanan masuk real-time dari Ruang Order Reguler/Umum, Mitra, serta pencatatan PO Pelanggan manual hingga konversi ke Faktur Penjualan (POS).
             </p>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {onSaveManualPO && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditingPOOrder(null);
+                setIsPOModalOpen(true);
+              }}
+              className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition shadow-sm"
+              title="Catat manual Pesanan Pembelian (PO) dari pelanggan Reguler atau Mitra"
+            >
+              <ClipboardPlus className="w-4 h-4" />
+              <span>+ PO Pelanggan</span>
+            </button>
+          )}
+
           <div className="flex items-center bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 gap-2 text-xs">
             <span className="text-slate-500 font-semibold hidden sm:inline">Tautan Portal:</span>
             <code className="font-mono text-slate-800 font-bold text-[11px] max-w-[200px] truncate">
@@ -481,10 +622,7 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
         <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
           <div className="flex items-center gap-1.5 overflow-x-auto pb-1 xl:pb-0">
             {statusTabs.map((tab) => {
-              const count =
-                tab === 'Semua'
-                  ? orders.length
-                  : orders.filter((o) => o.status === tab).length;
+              const count = statusCounts[tab] ?? 0;
               return (
                 <button
                   key={tab}
@@ -533,7 +671,7 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Cari kode order, mitra, atau obat..."
+                placeholder="Cari kode PO/order, pelanggan, obat..."
                 className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-300 text-xs font-medium text-slate-800 focus:border-emerald-500 outline-none"
               />
             </div>
@@ -542,12 +680,27 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
 
         {/* Orders Table */}
         {filteredOrders.length === 0 ? (
-          <div className="py-12 text-center border border-dashed border-slate-200 rounded-2xl space-y-2">
+          <div className="py-12 text-center border border-dashed border-slate-200 rounded-2xl space-y-3">
             <ShoppingBag className="w-10 h-10 text-slate-300 mx-auto" />
-            <h3 className="text-sm font-bold text-slate-800">Belum Ada Pesanan Mitra</h3>
+            <h3 className="text-sm font-bold text-slate-800">Belum Ada Pesanan / PO Pelanggan</h3>
             <p className="text-xs text-slate-500 max-w-md mx-auto">
-              Bagikan tautan Portal Order Mandiri Mitra kepada klinik, dokter, atau apotek jejaring untuk menerima pesanan secara real-time.
+              Bagikan tautan Portal Order Mandiri kepada pelanggan atau catat PO manual dari pelanggan Reguler maupun Mitra langsung di sini.
             </p>
+            {onSaveManualPO && (
+              <div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingPOOrder(null);
+                    setIsPOModalOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer shadow-xs"
+                >
+                  <ClipboardPlus className="w-4 h-4" />
+                  <span>+ Catat PO Pelanggan Manual</span>
+                </button>
+              </div>
+            )}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -555,7 +708,7 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
                   <th className="py-3 px-3">Kode & Waktu</th>
-                  <th className="py-3 px-3">Identitas Mitra</th>
+                  <th className="py-3 px-3">Identitas Mitra / Pelanggan</th>
                   <th className="py-3 px-3">Item Pesanan</th>
                   <th className="py-3 px-3 text-right">Total Nilai</th>
                   <th className="py-3 px-3">Pembayaran</th>
@@ -564,12 +717,16 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {filteredOrders.map((ord) => {
+                {paginatedOrders.map((ord) => {
                   const canConvertStatus = ord.status !== 'Selesai' && ord.status !== 'Dibatalkan';
                   const ordRoom = resolveOrderRoom(ord);
                   const pStatus = getEffectivePaymentStatus(ord);
                   const pBadge = getPaymentBadgeInfo(pStatus);
                   const isPaymentApproved = pStatus === 'Lunas';
+                  const isManualPO =
+                    String(ord.orderCode || '').startsWith('PO-') ||
+                    String(ord.id || '').startsWith('PO-') ||
+                    String(ord.adminNotes || '').includes('PO Manual');
 
                   return (
                     <tr key={ord.id} className="hover:bg-slate-50/70 transition-colors">
@@ -587,6 +744,11 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
                           >
                             {ordRoom === 'REGULER' ? 'Reguler' : 'Mitra'}
                           </span>
+                          {isManualPO && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold border bg-indigo-50 text-indigo-700 border-indigo-200">
+                              PO Manual
+                            </span>
+                          )}
                         </div>
                         <div className="text-[11px] text-slate-400 flex items-center gap-1 mt-0.5">
                           <Clock className="w-3 h-3" />
@@ -665,6 +827,21 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
                             <Eye className="w-3.5 h-3.5" />
                             <span>Detail</span>
                           </button>
+
+                          {onSaveManualPO && canConvertStatus && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingPOOrder(ord);
+                                setIsPOModalOpen(true);
+                              }}
+                              className="px-2.5 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold flex items-center gap-1 cursor-pointer"
+                              title="Edit PO / Pesanan"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                              <span>Edit PO</span>
+                            </button>
+                          )}
 
                           {ord.status !== 'Dibatalkan' && (
                             <button
@@ -764,6 +941,18 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
                 })}
               </tbody>
             </table>
+            <PaginationControls
+              currentPage={safePage}
+              totalPages={totalPages}
+              totalCount={filteredOrders.length}
+              pageSize={pageSize}
+              onPageChange={setPage}
+              onPageSizeChange={(sz) => {
+                setPageSize(sz);
+                setPage(1);
+              }}
+              itemLabel="pesanan"
+            />
           </div>
         )}
       </div>
@@ -999,12 +1188,14 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
                       </thead>
                       <tbody className="divide-y divide-slate-100">
                         {detailOrder.items.map((it, idx) => {
-                          const med = medicines.find((m) => m.id === it.medicineId);
+                          const med = medicineByIdMap.get(it.medicineId);
                           const availKecil = med ? Number(med.stock) || 0 : 0;
                           const availBox = med ? getAvailableBoxStock(med) : 0;
-                          const needKecil = Number(it.qtyTotalKecil) || it.qtyBox * Math.max(1, it.rasioKonversi || 1);
-                          const isEnough = med ? availKecil >= needKecil : false;
                           const isSmallMode = it.unitMode === 'KECIL';
+                          const needKecil = isSmallMode
+                            ? Number(it.qtyTotalKecil) || Number(it.qtyBox) || 0
+                            : Number(it.qtyTotalKecil) || it.qtyBox * Math.max(1, it.rasioKonversi || 1);
+                          const isEnough = med ? availKecil >= needKecil : false;
                           return (
                             <tr key={`${it.medicineId}-${idx}`}>
                               <td className="py-2.5 px-3">
@@ -1623,6 +1814,39 @@ export const MitraOrdersView: React.FC<MitraOrdersViewProps> = ({
         defaultTarget="unified"
         onOpenPortalPreview={_onOpenPublicPortal ? () => _onOpenPublicPortal() : undefined}
       />
+
+      {isPOModalOpen && onSaveManualPO && (
+        <ManualCustomerPOModal
+          isOpen={isPOModalOpen}
+          editingOrder={editingPOOrder}
+          medicines={medicines}
+          mitraList={mitraList}
+          patients={patients}
+          currentBranchId={currentBranchId}
+          userName={userName}
+          onClose={() => {
+            setIsPOModalOpen(false);
+            setEditingPOOrder(null);
+          }}
+          onSaveOrder={async (order, isEdit) => {
+            const res = await onSaveManualPO(order, isEdit);
+            if (res.success) {
+              if (res.syncedToCloud === false || res.needsMigration) {
+                showNotice(
+                  res.error ||
+                    `PO ${order.orderCode} tersimpan lokal dan menunggu sinkronisasi ke Supabase.`,
+                  'warning'
+                );
+              } else {
+                showNotice(
+                  `PO Pelanggan ${order.orderCode} (${order.mitraName}) berhasil ${isEdit ? 'diperbarui' : 'dicatat'} dan disinkronkan ke Supabase.`
+                );
+              }
+            }
+            return res;
+          }}
+        />
+      )}
     </div>
   );
 };

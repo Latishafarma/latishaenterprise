@@ -52,42 +52,167 @@ export function playQueueChime(): Promise<void> {
   });
 }
 
+const LEADING_PATIENT_TITLE_RULES: Array<{ pattern: RegExp; expansion: string }> = [
+  // Must check SDRI / SDR.I / SDR/I / SDR I before SDR
+  { pattern: /^sdr[\s.,/:;-]*i(?:[\s.,/:;-]+|$)/i, expansion: 'Saudari' },
+  { pattern: /^sdr(?:[\s.,/:;-]+|$)/i, expansion: 'Saudara' },
+  { pattern: /^tn(?:[\s.,/:;-]+|$)/i, expansion: 'Tuan' },
+  { pattern: /^ny(?:[\s.,/:;-]+|$)/i, expansion: 'Nyonya' },
+  { pattern: /^an(?:[\s.,/:;-]+|$)/i, expansion: 'Anak' },
+  // Standalone initial "I" (e.g. "I. Alya", "i, siti", "I Alya") as Saudari abbreviation at start of name
+  { pattern: /^i(?:[\s.,/:;-]+|$)/i, expansion: 'Saudari' }
+];
+
+function toNaturalTitleCaseWord(word: string): string {
+  if (!word) return '';
+  const lower = word.toLowerCase();
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
+/**
+ * Normalisasi nama pasien khusus untuk Text-to-Speech (TTS) agar:
+ * 1. Singkatan awal nama (AN, TN, NY, SDR, SDRI, SDR.I, I) case-insensitive
+ *    dan berbagai pemisah (titik, koma, garis miring, spasi berlebih)
+ *    dibaca sebagai kata penuh (Anak, Tuan, Nyonya, Saudara, Saudari).
+ * 2. Huruf kapital penuh / tanda baca pemicu pengejaan per huruf dinormalisasi
+ *    menjadi kata utuh (Title Case) sehingga dibaca per kata, bukan dieja huruf demi huruf.
+ */
+export function normalizePatientNameForTTS(rawName: string): string {
+  const cleanedRaw = (rawName || '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleanedRaw) return 'Pasien';
+
+  let expandedPrefix = '';
+  let remainder = cleanedRaw;
+
+  for (const rule of LEADING_PATIENT_TITLE_RULES) {
+    const match = remainder.match(rule.pattern);
+    if (match) {
+      expandedPrefix = rule.expansion;
+      remainder = remainder.slice(match[0].length).trim();
+      break;
+    }
+  }
+
+  // Satukan huruf-huruf yang dipisahkan titik (mis. "B.U.D.I" -> "BUDI") agar tidak dieja per huruf
+  remainder = remainder.replace(
+    /(^|\s)([A-Za-z](?:\.[A-Za-z]){2,})\.?(?=\s|$)/g,
+    (_m, lead: string, dotted: string) => `${lead}${dotted.replace(/\./g, '')}`
+  );
+
+  // Bersihkan karakter aneh / tanda baca pemisah yang dapat memicu pengejaan huruf pada TTS
+  remainder = remainder
+    // Pertahankan tanda petik tunggal di tengah kata (mis. Ma'ruf), hapus petik di tepi kata
+    .replace(/(^|\s)['`’]+|['`’]+(?=\s|$)/g, '$1')
+    // Ganti tanda baca / simbol pemisah menjadi spasi
+    .replace(/[.,/\\|;:!?()[\]{}<>*#~`"+=^$@%&_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const normalizedWords = remainder
+    ? remainder
+        .split(' ')
+        .filter(Boolean)
+        .map(toNaturalTitleCaseWord)
+        .join(' ')
+    : '';
+
+  if (expandedPrefix && normalizedWords) {
+    return `${expandedPrefix} ${normalizedWords}`;
+  }
+  return expandedPrefix || normalizedWords || 'Pasien';
+}
+
+export function formatQueueNumberForTTS(nomor: string): string {
+  const clean = (nomor || '').trim();
+  if (!clean) return '';
+
+  const match = clean.match(/^([A-Za-z]+)\s*[-–—]?\s*(\d+)$/);
+  if (match) {
+    const prefix = match[1].toUpperCase();
+    const digits = match[2];
+    const leadingZerosMatch = digits.match(/^(0+)(.*)$/);
+    if (leadingZerosMatch) {
+      const zerosText = Array.from(leadingZerosMatch[1])
+        .map(() => 'kosong')
+        .join(', ');
+      const restDigits = leadingZerosMatch[2];
+      return restDigits
+        ? `${prefix}, ${zerosText}, ${restDigits}`
+        : `${prefix}, ${zerosText}`;
+    }
+    return `${prefix}, ${digits}`;
+  }
+
+  return clean
+    .replace(/A-00/gi, 'A, kosong, kosong, ')
+    .replace(/A-0/gi, 'A, kosong, ')
+    .replace(/A-/gi, 'A, ');
+}
+
+function formatDestinationForTTS(poli: string): string {
+  return (poli || 'Ruang Periksa Dokter')
+    .replace(/\s*&\s*/g, ' dan ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Indonesian Voice Announcer via Web Speech Synthesis
 export function announceQueueVoice(nomor: string, nama: string, poli: string = 'Ruang Periksa Dokter'): Promise<void> {
   return new Promise((resolve) => {
-    if (!('speechSynthesis' in window)) {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
       resolve();
       return;
     }
 
     window.speechSynthesis.cancel();
 
-    // Spacing numbers for natural phonetic reading in Indonesian (e.g., A-001 -> A, kosong kosong satu)
-    const formattedNomor = nomor
-      .replace('A-00', 'A, kosong, kosong, ')
-      .replace('A-0', 'A, kosong, ')
-      .replace('A-', 'A, ');
+    const formattedNomor = formatQueueNumberForTTS(nomor);
+    const normalizedNama = normalizePatientNameForTTS(nama);
+    const formattedPoli = formatDestinationForTTS(poli);
 
-    const text = `Nomor antrean, ${formattedNomor}, atas nama, ${nama}, silakan menuju ke ${poli}.`;
+    const text = `Nomor antrean, ${formattedNomor}, atas nama, ${normalizedNama}, silakan menuju ke ${formattedPoli}.`;
 
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'id-ID';
     utterance.rate = 0.88;
     utterance.pitch = 1.05;
 
-    // Pick Indonesian voice if available
-    const voices = window.speechSynthesis.getVoices();
-    const idVoice = voices.find(v => v.lang.includes('id') || v.lang.includes('ID') || v.name.toLowerCase().includes('indonesia'));
-    if (idVoice) {
-      utterance.voice = idVoice;
-    }
+    let settled = false;
+    let safetyTimer: ReturnType<typeof setTimeout> | null = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (safetyTimer) {
+        clearTimeout(safetyTimer);
+        safetyTimer = null;
+      }
+      resolve();
+    };
 
-    utterance.onend = () => resolve();
-    utterance.onerror = () => resolve();
+    utterance.onend = finish;
+    utterance.onerror = finish;
 
     // Play chime first then speak
     playQueueChime().then(() => {
-      window.speechSynthesis.speak(utterance);
+      try {
+        const voices = window.speechSynthesis.getVoices();
+        const idVoice = voices.find(
+          (v) =>
+            v.lang.toLowerCase().includes('id') ||
+            v.name.toLowerCase().includes('indonesia')
+        );
+        if (idVoice) {
+          utterance.voice = idVoice;
+        }
+        safetyTimer = setTimeout(finish, 15000);
+        window.speechSynthesis.speak(utterance);
+      } catch {
+        finish();
+      }
     });
   });
 }
