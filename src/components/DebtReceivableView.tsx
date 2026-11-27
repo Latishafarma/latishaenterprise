@@ -708,6 +708,22 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     } catch {}
     return [];
   });
+  const [hiddenDefaultDebtPaymentMethods, setHiddenDefaultDebtPaymentMethods] = useState<string[]>(() => {
+    try {
+      const saved = demoGetItem('latisha_hidden_debt_payment_methods_v1');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed
+            .filter((m: unknown): m is string => typeof m === 'string' && m.trim().length > 0)
+            .map((m) => m.trim());
+        }
+      }
+    } catch {}
+    return [];
+  });
+  const paymentMethodDropdownRef = useRef<HTMLDivElement | null>(null);
+  const [isPaymentMethodDropdownOpen, setIsPaymentMethodDropdownOpen] = useState(false);
   const [isAddingCustomPaymentMethod, setIsAddingCustomPaymentMethod] = useState(false);
   const [newCustomPaymentMethodName, setNewCustomPaymentMethodName] = useState('');
   const [customPaymentMethodError, setCustomPaymentMethodError] = useState<string | null>(null);
@@ -717,6 +733,38 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
       demoSetItem('latisha_custom_debt_payment_methods_v1', JSON.stringify(customDebtPaymentMethods));
     } catch {}
   }, [customDebtPaymentMethods]);
+
+  useEffect(() => {
+    try {
+      demoSetItem(
+        'latisha_hidden_debt_payment_methods_v1',
+        JSON.stringify(hiddenDefaultDebtPaymentMethods)
+      );
+    } catch {}
+  }, [hiddenDefaultDebtPaymentMethods]);
+
+  useEffect(() => {
+    if (!isPaymentMethodDropdownOpen) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        paymentMethodDropdownRef.current &&
+        !paymentMethodDropdownRef.current.contains(event.target as Node)
+      ) {
+        setIsPaymentMethodDropdownOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsPaymentMethodDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isPaymentMethodDropdownOpen]);
 
   // Form State for Payment
   const [paymentForm, setPaymentForm] = useState({
@@ -728,23 +776,31 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
   });
 
   const allDebtPaymentMethodOptions = useMemo(() => {
-    const map = new Map<string, { value: string; label: string }>();
+    const hiddenSet = new Set(hiddenDefaultDebtPaymentMethods.map((m) => m.trim().toLowerCase()));
+    const map = new Map<string, { value: string; label: string; isDefault?: boolean }>();
     DEFAULT_DEBT_PAYMENT_METHODS.forEach((m) => {
-      map.set(m.value.toLowerCase(), m);
+      if (!hiddenSet.has(m.value.toLowerCase())) {
+        map.set(m.value.toLowerCase(), { ...m, isDefault: true });
+      }
     });
     customDebtPaymentMethods.forEach((m) => {
       const clean = m.trim();
       const key = clean.toLowerCase();
       if (key && !map.has(key)) {
-        map.set(key, { value: clean, label: clean });
+        map.set(key, { value: clean, label: clean, isDefault: false });
       }
     });
     const curMethod = (paymentForm.paymentMethod || '').trim();
-    if (curMethod && !map.has(curMethod.toLowerCase())) {
-      map.set(curMethod.toLowerCase(), { value: curMethod, label: curMethod });
+    if (curMethod && !map.has(curMethod.toLowerCase()) && !hiddenSet.has(curMethod.toLowerCase())) {
+      map.set(curMethod.toLowerCase(), { value: curMethod, label: curMethod, isDefault: false });
     }
     return Array.from(map.values());
-  }, [DEFAULT_DEBT_PAYMENT_METHODS, customDebtPaymentMethods, paymentForm.paymentMethod]);
+  }, [
+    DEFAULT_DEBT_PAYMENT_METHODS,
+    customDebtPaymentMethods,
+    hiddenDefaultDebtPaymentMethods,
+    paymentForm.paymentMethod
+  ]);
 
   // Toast / Feedback notification
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -1080,10 +1136,15 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     setCustomPaymentMethodError(null);
     setNewCustomPaymentMethodName('');
     setIsAddingCustomPaymentMethod(false);
+    setIsPaymentMethodDropdownOpen(false);
+    const defaultChoice =
+      allDebtPaymentMethodOptions.find((m) => m.value === 'Transfer Bank (BCA 827-092-1122)')?.value ||
+      allDebtPaymentMethodOptions[0]?.value ||
+      'Transfer Bank (BCA 827-092-1122)';
     setSelectedInvoiceForPay(inv);
     setPaymentForm({
       amount: inv.calculatedRemaining,
-      paymentMethod: 'Transfer Bank (BCA 827-092-1122)',
+      paymentMethod: defaultChoice,
       paymentDate: new Date().toISOString().split('T')[0],
       referenceNo: `TRF-${Date.now().toString().slice(-6)}`,
       notes: `Pelunasan faktur pembelian #${inv.invoiceNo} ke ${inv.pbfName}`
@@ -1102,7 +1163,11 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     );
     const targetValue = matchedDefault ? matchedDefault.value : clean;
 
-    if (!matchedDefault) {
+    if (matchedDefault) {
+      setHiddenDefaultDebtPaymentMethods((prev) =>
+        prev.filter((m) => m.trim().toLowerCase() !== matchedDefault.value.toLowerCase())
+      );
+    } else {
       setCustomDebtPaymentMethods((prev) => [
         ...prev.filter((m) => m.trim().toLowerCase() !== clean.toLowerCase()),
         clean
@@ -1112,6 +1177,42 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     setIsAddingCustomPaymentMethod(false);
     setNewCustomPaymentMethodName('');
     showToast(`Metode pembayaran "${targetValue}" berhasil ditambahkan.`);
+  };
+
+  const handleDeleteDebtPaymentMethod = (methodValue: string, methodLabel: string) => {
+    const remainingOptions = allDebtPaymentMethodOptions.filter(
+      (opt) => opt.value.toLowerCase() !== methodValue.toLowerCase()
+    );
+    if (remainingOptions.length === 0) {
+      showToast('Minimal 1 metode pembayaran harus tetap tersedia.');
+      return;
+    }
+
+    const isDefault = DEFAULT_DEBT_PAYMENT_METHODS.some(
+      (m) => m.value.toLowerCase() === methodValue.toLowerCase()
+    );
+    if (isDefault) {
+      setHiddenDefaultDebtPaymentMethods((prev) =>
+        prev.some((m) => m.toLowerCase() === methodValue.toLowerCase()) ? prev : [...prev, methodValue]
+      );
+    } else {
+      setCustomDebtPaymentMethods((prev) =>
+        prev.filter((m) => m.trim().toLowerCase() !== methodValue.toLowerCase())
+      );
+    }
+
+    if (paymentForm.paymentMethod.toLowerCase() === methodValue.toLowerCase()) {
+      setPaymentForm((prev) => ({
+        ...prev,
+        paymentMethod: remainingOptions[0]?.value || ''
+      }));
+    }
+    showToast(`Metode pembayaran "${methodLabel}" dihapus dari daftar.`);
+  };
+
+  const handleRestoreDefaultDebtPaymentMethods = () => {
+    setHiddenDefaultDebtPaymentMethods([]);
+    showToast('Metode pembayaran bawaan berhasil dipulihkan.');
   };
 
   // ACTION: Buka Modal Bayar Piutang (POS / Pasien / Mitra)
@@ -2792,6 +2893,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                 type="button"
                 onClick={() => {
                   setIsAddingCustomPaymentMethod(false);
+                  setIsPaymentMethodDropdownOpen(false);
                   setCustomPaymentMethodError(null);
                   setSelectedInvoiceForPay(null);
                 }}
@@ -2883,22 +2985,111 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Metode Pembayaran *</label>
                   <div className="flex items-center gap-1.5">
-                    <select
-                      value={paymentForm.paymentMethod}
-                      onChange={(e) => setPaymentForm({ ...paymentForm, paymentMethod: e.target.value })}
-                      className="w-full flex-1 p-2.5 border border-slate-300 rounded-xl font-semibold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-rose-500"
-                    >
-                      {allDebtPaymentMethodOptions.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="relative flex-1 min-w-0" ref={paymentMethodDropdownRef}>
+                      <button
+                        type="button"
+                        onClick={() => setIsPaymentMethodDropdownOpen((prev) => !prev)}
+                        aria-haspopup="listbox"
+                        aria-expanded={isPaymentMethodDropdownOpen}
+                        className="w-full p-2.5 border border-slate-300 rounded-xl font-semibold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-rose-500 flex items-center justify-between gap-2 text-left cursor-pointer"
+                      >
+                        <span className="truncate">
+                          {allDebtPaymentMethodOptions.find(
+                            (opt) => opt.value === paymentForm.paymentMethod
+                          )?.label || paymentForm.paymentMethod}
+                        </span>
+                        <ChevronDown
+                          className={`w-4 h-4 text-slate-400 shrink-0 transition-transform ${
+                            isPaymentMethodDropdownOpen ? 'rotate-180 text-rose-600' : ''
+                          }`}
+                        />
+                      </button>
+
+                      {isPaymentMethodDropdownOpen && (
+                        <div
+                          role="listbox"
+                          className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-40 max-h-52 overflow-y-auto divide-y divide-slate-100"
+                        >
+                          {allDebtPaymentMethodOptions.map((opt) => {
+                            const isSelected = opt.value === paymentForm.paymentMethod;
+                            const canDelete = allDebtPaymentMethodOptions.length > 1;
+                            return (
+                              <div
+                                key={opt.value}
+                                className={`flex items-center justify-between gap-1 px-2.5 py-1.5 transition ${
+                                  isSelected ? 'bg-rose-50/90' : 'hover:bg-slate-50'
+                                }`}
+                              >
+                                <button
+                                  type="button"
+                                  role="option"
+                                  aria-selected={isSelected}
+                                  onClick={() => {
+                                    setPaymentForm({ ...paymentForm, paymentMethod: opt.value });
+                                    setIsPaymentMethodDropdownOpen(false);
+                                  }}
+                                  className="flex-1 min-w-0 text-left py-1 flex items-center gap-1.5 cursor-pointer"
+                                >
+                                  <Check
+                                    className={`w-3.5 h-3.5 shrink-0 ${
+                                      isSelected ? 'text-rose-700 opacity-100' : 'opacity-0'
+                                    }`}
+                                  />
+                                  <span
+                                    className={`truncate text-xs ${
+                                      isSelected ? 'font-bold text-rose-900' : 'font-semibold text-slate-700'
+                                    }`}
+                                  >
+                                    {opt.label}
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={!canDelete}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteDebtPaymentMethod(opt.value, opt.label);
+                                  }}
+                                  title={
+                                    canDelete
+                                      ? `Hapus "${opt.label}" dari daftar`
+                                      : 'Minimal 1 metode pembayaran harus tersedia'
+                                  }
+                                  aria-label={`Hapus metode pembayaran ${opt.label}`}
+                                  className={`p-1.5 rounded-lg transition shrink-0 ${
+                                    canDelete
+                                      ? 'text-slate-400 hover:text-rose-600 hover:bg-rose-100/80 cursor-pointer'
+                                      : 'text-slate-300 cursor-not-allowed'
+                                  }`}
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            );
+                          })}
+                          {hiddenDefaultDebtPaymentMethods.length > 0 && (
+                            <div className="px-3 py-1.5 bg-slate-50 flex justify-end">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleRestoreDefaultDebtPaymentMethods();
+                                }}
+                                className="text-[11px] font-bold text-rose-700 hover:text-rose-900 underline cursor-pointer"
+                              >
+                                Pulihkan metode bawaan
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                     <button
                       type="button"
                       onClick={() => {
                         setCustomPaymentMethodError(null);
                         setNewCustomPaymentMethodName('');
+                        setIsPaymentMethodDropdownOpen(false);
                         setIsAddingCustomPaymentMethod((prev) => !prev);
                       }}
                       title="Tambah jenis metode pembayaran baru"
@@ -3027,6 +3218,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                   onClick={() => {
                     setPaymentError(null);
                     setIsAddingCustomPaymentMethod(false);
+                    setIsPaymentMethodDropdownOpen(false);
                     setCustomPaymentMethodError(null);
                     setSelectedInvoiceForPay(null);
                   }}
