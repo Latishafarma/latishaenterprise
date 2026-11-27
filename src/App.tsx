@@ -13742,19 +13742,55 @@ export default function App() {
                 <DebtReceivableView
                   purchaseInvoices={purchaseInvoices}
                   transactions={transactions}
-                  onUpdatePurchaseInvoices={(updated) => {
+                  suppliers={suppliers}
+                  branches={branches}
+                  currentBranch={currentBranch}
+                  onUpdatePurchaseInvoices={(updated, options) => {
+                    const prevMap = new Map(purchaseInvoicesRef.current.map((inv) => [inv.id, inv]));
                     setPurchaseInvoices(updated);
-                    try {
-                      demoSetItem('latisha_purchase_invoices', JSON.stringify(updated));
-                    } catch (e) {}
-                    if (!isDemoActive && !isDemoMode()) {
-                      const prevMap = new Map(purchaseInvoices.map((inv) => [inv.id, inv]));
-                      const changed = updated.filter((inv) => prevMap.get(inv.id) !== inv);
-                      if (changed.length > 0) {
-                        seedPurchaseInvoicesToSupabase(changed).catch((err) =>
-                          console.warn('Supabase hutang PBF invoice update error:', err)
-                        );
+                    persistPurchaseInvoicesNow(updated);
+                    if (!options?.skipRemoteUpload && !isDemoActive && !isDemoMode()) {
+                      const changed = updated.filter((inv) => {
+                        const prev = prevMap.get(inv.id);
+                        return !prev || JSON.stringify(prev) !== JSON.stringify(inv);
+                      });
+                      const changedIds = changed
+                        .map((inv) => inv.id)
+                        .filter((id) => Boolean(id) && !isDemoPurchaseInvoiceId(id));
+                      if (changed.length > 0 && changedIds.length > 0) {
+                        markIdsPendingSync('purchase_invoices', changedIds);
+                        seedPurchaseInvoicesToSupabase(changed)
+                          .then((res) => {
+                            if (res.success) confirmCloudSync('purchase_invoices', changedIds);
+                          })
+                          .catch((err) =>
+                            console.warn('Supabase hutang PBF invoice update error:', err)
+                          );
                       }
+                    }
+                  }}
+                  onDeleteOpeningDebtRecord={(id) => {
+                    const target = purchaseInvoicesRef.current.find((inv) => inv.id === id);
+                    const next = purchaseInvoicesRef.current.filter((inv) => inv.id !== id);
+                    setPurchaseInvoices(next);
+                    persistPurchaseInvoicesNow(next);
+                    markIdsDeleted('purchase_invoices', [id]);
+                    if (!isDemoActive && !isDemoMode()) {
+                      deletePurchaseInvoiceFromSupabase(id)
+                        .then((res) => {
+                          if (res.success) confirmCloudDeletes('purchase_invoices', [id]);
+                        })
+                        .catch((err) =>
+                          console.warn('Supabase opening debt delete error:', err)
+                        );
+                    } else {
+                      confirmCloudDeletes('purchase_invoices', [id]);
+                    }
+                    if (target) {
+                      addAuditLog(
+                        'Hutang & Piutang',
+                        `Hapus pencatatan hutang awal distributor #${target.invoiceNo} (${target.pbfName})`
+                      );
                     }
                   }}
                   onUpdateTransactions={(updated) => {

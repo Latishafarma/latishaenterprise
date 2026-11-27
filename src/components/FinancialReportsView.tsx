@@ -40,6 +40,7 @@ import {
   isOwnerAdminRole
 } from '../types';
 import { openPrintWindow } from '../utils/printHelper';
+import { isOpeningDebtInvoice } from '../utils/supabaseClient';
 import { PaginationControls } from './PaginationControls';
 import { MedicineCategorySymbol } from './MedicineCategorySymbol';
 import { useFacilityProfiles, formatPharmacyAddress } from '../utils/facilityProfileHelper';
@@ -846,9 +847,13 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
   const totalRetailValue = medicines.reduce((acc, m) => acc + m.stock * m.sellPrice, 0);
   const totalStockItems = medicines.reduce((acc, m) => acc + m.stock, 0);
 
-  // Accounts Payable to PBF
-  const unpaidInvoices = purchaseInvoices.filter((i) => i.status === 'Belum Lunas');
-  const totalHutangPbf = unpaidInvoices.reduce((acc, i) => acc + i.totalTagihan, 0);
+  // Accounts Payable to PBF (termasuk faktur pembelian & saldo hutang awal yang belum/sebagian lunas)
+  const unpaidInvoices = purchaseInvoices.filter((i) => i.status !== 'Lunas');
+  const totalHutangPbf = unpaidInvoices.reduce((acc, i) => {
+    const paid = i.paidAmount !== undefined ? i.paidAmount : 0;
+    const rem = i.remainingAmount !== undefined ? i.remainingAmount : Math.max(0, i.totalTagihan - paid);
+    return acc + rem;
+  }, 0);
 
   return (
     <div className="space-y-4">
@@ -2017,28 +2022,46 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y font-medium text-slate-700">
-                {purchaseInvoices.map((inv) => (
-                  <tr key={inv.id} className="border-b hover:bg-slate-50">
-                    <td className="p-2.5 border font-mono font-bold text-sky-700">{inv.invoiceNo}</td>
-                    <td className="p-2.5 border font-bold">{inv.pbfName}</td>
-                    <td className="p-2.5 border font-mono">{inv.date}</td>
-                    <td className="p-2.5 border font-mono font-bold text-rose-600">{inv.dueDate}</td>
-                    <td className="p-2.5 border text-right font-mono font-black">
-                      Rp {inv.totalTagihan.toLocaleString('id-ID')}
-                    </td>
-                    <td className="p-2.5 border text-center">
-                      <span
-                        className={`px-2.5 py-1 rounded-full font-bold text-[10px] ${
-                          inv.status === 'Lunas'
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : 'bg-amber-100 text-amber-800'
-                        }`}
-                      >
-                        {inv.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
+                {purchaseInvoices.map((inv) => {
+                  const paid = inv.paidAmount !== undefined ? inv.paidAmount : inv.status === 'Lunas' ? inv.totalTagihan : 0;
+                  const rem = inv.remainingAmount !== undefined ? inv.remainingAmount : Math.max(0, inv.totalTagihan - paid);
+                  return (
+                    <tr key={inv.id} className="border-b hover:bg-slate-50">
+                      <td className="p-2.5 border font-mono font-bold text-sky-700">
+                        <span>{inv.invoiceNo}</span>
+                        {isOpeningDebtInvoice(inv) && (
+                          <span className="ml-1.5 inline-block px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800 text-[9px] font-extrabold uppercase">
+                            Hutang Awal
+                          </span>
+                        )}
+                      </td>
+                      <td className="p-2.5 border font-bold">{inv.pbfName}</td>
+                      <td className="p-2.5 border font-mono">{inv.date}</td>
+                      <td className="p-2.5 border font-mono font-bold text-rose-600">{inv.dueDate}</td>
+                      <td className="p-2.5 border text-right font-mono font-black">
+                        <div>Rp {inv.totalTagihan.toLocaleString('id-ID')}</div>
+                        {inv.status !== 'Lunas' && rem !== inv.totalTagihan && (
+                          <div className="text-[10px] font-semibold text-rose-600">
+                            Sisa: Rp {rem.toLocaleString('id-ID')}
+                          </div>
+                        )}
+                      </td>
+                      <td className="p-2.5 border text-center">
+                        <span
+                          className={`px-2.5 py-1 rounded-full font-bold text-[10px] ${
+                            inv.status === 'Lunas'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : inv.status === 'Sebagian'
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-rose-100 text-rose-800'
+                          }`}
+                        >
+                          {inv.status}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
             <div className="text-right text-sm font-bold font-mono text-rose-700 pt-2">

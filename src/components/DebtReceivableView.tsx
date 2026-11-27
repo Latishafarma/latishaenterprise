@@ -26,14 +26,19 @@ import {
   Copy,
   Check,
   Code2,
-  AlertCircle
+  AlertCircle,
+  Edit2,
+  Trash2,
+  Landmark
 } from 'lucide-react';
 import {
   PurchaseInvoice,
   Transaction,
   DebtPaymentRecord,
   ReceivablePaymentRecord,
-  CashFlowRecord
+  CashFlowRecord,
+  Supplier,
+  Branch
 } from '../types';
 import { useFacilityProfiles, formatPharmacyAddress } from '../utils/facilityProfileHelper';
 import { openPrintWindow } from '../utils/printHelper';
@@ -44,9 +49,11 @@ import {
   fetchPurchaseInvoicesFromSupabase,
   syncPurchaseInvoiceToSupabase,
   seedPurchaseInvoicesToSupabase,
+  deletePurchaseInvoiceFromSupabase,
+  isDemoPurchaseInvoiceId,
+  isOpeningDebtInvoice,
   fetchTransactionsFromSupabase,
   syncTransactionToSupabase,
-  seedTransactionsToSupabase,
   fetchDebtPaymentsFromSupabase,
   syncDebtPaymentToSupabase,
   seedDebtPaymentsToSupabase,
@@ -65,12 +72,29 @@ import {
   clearSupabaseTableSchemaCache,
   SUPABASE_DEBT_RECEIVABLE_SQL_SCHEMA
 } from '../utils/supabaseClient';
+import {
+  confirmCloudDeletes,
+  confirmCloudSync,
+  getDeletedIdsSet,
+  getPendingDeleteIds,
+  getPendingSyncIdsSet,
+  hasCompletedInitialCloudSync,
+  markInitialCloudSyncCompleted,
+  markIdsPendingSync
+} from '../utils/deletionRegistry';
 import { useIsOwnerAdmin } from '../utils/roleAccess';
 
 interface DebtReceivableViewProps {
   purchaseInvoices: PurchaseInvoice[];
   transactions: Transaction[];
-  onUpdatePurchaseInvoices: (invoices: PurchaseInvoice[]) => void;
+  suppliers?: Supplier[];
+  branches?: Branch[];
+  currentBranch?: Branch;
+  onUpdatePurchaseInvoices: (
+    invoices: PurchaseInvoice[],
+    options?: { skipRemoteUpload?: boolean }
+  ) => void;
+  onDeleteOpeningDebtRecord?: (id: string) => void;
   onUpdateTransactions: (transactions: Transaction[]) => void;
   userName?: string;
   onAddAuditLog?: (module: string, action: string) => void;
@@ -80,7 +104,11 @@ interface DebtReceivableViewProps {
 export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
   purchaseInvoices,
   transactions,
+  suppliers = [],
+  branches = [],
+  currentBranch,
   onUpdatePurchaseInvoices,
+  onDeleteOpeningDebtRecord,
   onUpdateTransactions,
   userName = 'apt. Mardin, S.Farm',
   onAddAuditLog,
@@ -94,6 +122,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
   // Search and filters
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'belum_lunas' | 'sebagian' | 'lunas' | 'overdue'>('all');
+  const [debtSourceFilter, setDebtSourceFilter] = useState<'all' | 'purchase' | 'opening'>('all');
 
   // Local storage for payment history and cash flow ledger
   const [debtPayments, setDebtPayments] = useState<DebtPaymentRecord[]>(() => {
@@ -333,6 +362,18 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     setIsSyncingSupabase(true);
     try {
       clearSupabaseTableSchemaCache();
+
+      // Replay pending purchase invoice deletes first so deleted records never resurrect
+      const pendingDeleteInvIds = getPendingDeleteIds('purchase_invoices');
+      if (pendingDeleteInvIds.length > 0) {
+        for (const delId of pendingDeleteInvIds) {
+          const delRes = await deletePurchaseInvoiceFromSupabase(delId).catch(() => ({
+            success: false
+          }));
+          if (delRes.success) confirmCloudDeletes('purchase_invoices', [delId]);
+        }
+      }
+
       const [invRes, trxRes, debtPayRes, recPayRes, cfRes] = await Promise.all([
         fetchPurchaseInvoicesFromSupabase({ forceRefresh: true }),
         fetchTransactionsFromSupabase({ forceRefresh: true }),
@@ -355,15 +396,66 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
         return;
       }
 
-      // 1. Merge & seed PurchaseInvoices (faktur_pembelian)
-      const invMap = new Map<string, PurchaseInvoice>();
-      purchaseInvoices.forEach((i) => invMap.set(i.id, i));
-      (invRes.data || []).forEach((i) => invMap.set(i.id, i));
-      const mergedInvoices = Array.from(invMap.values());
-      onUpdatePurchaseInvoices(mergedInvoices);
-      if (mergedInvoices.length > 0) {
-        await seedPurchaseInvoicesToSupabase(mergedInvoices);
+      // 1. Merge & seed PurchaseInvoices (faktur_pembelian) secara tombstone-safe
+      const deletedInvSet = getDeletedIdsSet('purchase_invoices');
+      const pendingInvSyncSet = getPendingSyncIdsSet('purchase_invoices');
+      const syncedOnceBefore = hasCompletedInitialCloudSync('purchase_invoices');
+      const remoteInvAll = invRes.data || [];
+
+      const stubbornInvIds = remoteInvAll
+        .filter((inv) => inv.id && deletedInvSet.has(inv.id))
+        .map((inv) => inv.id);
+      if (stubbornInvIds.length > 0) {
+        await Promise.all(
+          stubbornInvIds.map((sid) =>
+            deletePurchaseInvoiceFromSupabase(sid)
+              .then((dRes) => {
+                if (dRes.success) confirmCloudDeletes('purchase_invoices', [sid]);
+              })
+              .catch(() => {})
+          )
+        );
       }
+
+      const remoteInvClean = remoteInvAll.filter(
+        (inv) => inv.id && !isDemoPurchaseInvoiceId(inv.id) && !deletedInvSet.has(inv.id)
+      );
+      const remoteInvIds = new Set(remoteInvClean.map((inv) => inv.id));
+      const localInvValid = purchaseInvoices.filter(
+        (inv) => inv.id && !isDemoPurchaseInvoiceId(inv.id) && !deletedInvSet.has(inv.id)
+      );
+      const localInvToUpload = localInvValid.filter(
+        (inv) => pendingInvSyncSet.has(inv.id) || (!syncedOnceBefore && !remoteInvIds.has(inv.id))
+      );
+
+      if (localInvToUpload.length > 0) {
+        const seedInvRes = await seedPurchaseInvoicesToSupabase(localInvToUpload);
+        if (seedInvRes.needsTableSetup) {
+          setNeedsTableSetup(true);
+          setShowSqlModal(true);
+          setIsSyncingSupabase(false);
+          return;
+        }
+        if (seedInvRes.success) {
+          confirmCloudSync(
+            'purchase_invoices',
+            localInvToUpload.map((inv) => inv.id)
+          );
+        }
+      }
+
+      const invMap = new Map<string, PurchaseInvoice>();
+      remoteInvClean.forEach((inv) => invMap.set(inv.id, inv));
+      localInvToUpload.forEach((inv) => {
+        if (!invMap.has(inv.id) || pendingInvSyncSet.has(inv.id)) {
+          invMap.set(inv.id, inv);
+        }
+      });
+      const mergedInvoices = Array.from(invMap.values()).sort((a, b) =>
+        (b.date || '').localeCompare(a.date || '')
+      );
+      onUpdatePurchaseInvoices(mergedInvoices, { skipRemoteUpload: true });
+      markInitialCloudSyncCompleted('purchase_invoices');
 
       // 2. Merge & seed Transactions (riwayat_penjualan)
       if (trxRes.data && trxRes.data.length > 0) {
@@ -418,7 +510,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
         })
       );
       showToast(
-        `Sinkronisasi Supabase berhasil! ${mergedInvoices.length} Faktur PBF, ${mergedDebtPays.length} Bayar Hutang, ${mergedRecPays.length} Pelunasan Piutang & ${mergedCashFlows.length} Buku Kas tersinkronisasi.`
+        `Sinkronisasi Supabase berhasil! ${mergedInvoices.length} Hutang/Faktur PBF, ${mergedDebtPays.length} Bayar Hutang, ${mergedRecPays.length} Pelunasan Piutang & ${mergedCashFlows.length} Buku Kas tersinkronisasi.`
       );
     } catch (err: any) {
       showToast(`Gagal sinkronisasi Supabase: ${err?.message || String(err)}`);
@@ -444,6 +536,40 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     previousBalance: number;
     remainingBalance: number;
   } | null>(null);
+
+  // Opening Distributor Debt (Hutang Awal) Modal States
+  const [isOpeningDebtModalOpen, setIsOpeningDebtModalOpen] = useState(false);
+  const [editingOpeningDebtId, setEditingOpeningDebtId] = useState<string | null>(null);
+  const [openingDebtError, setOpeningDebtError] = useState<string | null>(null);
+  const [isSavingOpeningDebt, setIsSavingOpeningDebt] = useState(false);
+  const [deleteOpeningTarget, setDeleteOpeningTarget] = useState<PurchaseInvoice | null>(null);
+  const [openingDebtForm, setOpeningDebtForm] = useState<{
+    supplierMode: 'master' | 'custom';
+    selectedSupplierId: string;
+    pbfName: string;
+    invoiceNo: string;
+    date: string;
+    term: PurchaseInvoice['term'];
+    dueDate: string;
+    salesman: string;
+    totalTagihan: number;
+    priorPaidAmount: number;
+    branchId: string;
+    notes: string;
+  }>({
+    supplierMode: suppliers.length > 0 ? 'master' : 'custom',
+    selectedSupplierId: '',
+    pbfName: '',
+    invoiceNo: '',
+    date: new Date().toISOString().split('T')[0],
+    term: '30 Hari',
+    dueDate: '',
+    salesman: '',
+    totalTagihan: 0,
+    priorPaidAmount: 0,
+    branchId: currentBranch?.id || branches[0]?.id || 'BR-01',
+    notes: ''
+  });
 
   // Form State for Payment
   const [paymentForm, setPaymentForm] = useState({
@@ -568,13 +694,35 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     return receivableItems.filter((it) => it.calculatedStatus !== 'Lunas' && it.isOverdue).length;
   }, [receivableItems]);
 
+  const openingDebtCount = useMemo(() => {
+    return debtItems.filter((it) => isOpeningDebtInvoice(it)).length;
+  }, [debtItems]);
+
+  const debtPaymentStatsByInvoiceId = useMemo(() => {
+    const map = new Map<string, { count: number; totalPaid: number }>();
+    debtPayments.forEach((p) => {
+      if (!p.invoiceId) return;
+      const cur = map.get(p.invoiceId) || { count: 0, totalPaid: 0 };
+      map.set(p.invoiceId, {
+        count: cur.count + 1,
+        totalPaid: cur.totalPaid + (Number(p.amount) || 0)
+      });
+    });
+    return map;
+  }, [debtPayments]);
+
   // Filtered Debt List
   const filteredDebtList = useMemo(() => {
     return debtItems.filter((inv) => {
+      if (debtSourceFilter === 'opening' && !isOpeningDebtInvoice(inv)) return false;
+      if (debtSourceFilter === 'purchase' && isOpeningDebtInvoice(inv)) return false;
+
+      const q = searchTerm.toLowerCase();
       const matchSearch =
-        inv.invoiceNo.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        inv.pbfName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (inv.salesman && inv.salesman.toLowerCase().includes(searchTerm.toLowerCase()));
+        inv.invoiceNo.toLowerCase().includes(q) ||
+        inv.pbfName.toLowerCase().includes(q) ||
+        (inv.salesman && inv.salesman.toLowerCase().includes(q)) ||
+        (inv.notes && inv.notes.toLowerCase().includes(q));
 
       if (!matchSearch) return false;
 
@@ -586,7 +734,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
 
       return true;
     });
-  }, [debtItems, searchTerm, statusFilter]);
+  }, [debtItems, debtSourceFilter, searchTerm, statusFilter]);
 
   // Filtered Receivable List
   const filteredReceivableList = useMemo(() => {
@@ -618,7 +766,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
   useEffect(() => {
     setDebtPage(1);
     setReceivablePage(1);
-  }, [searchTerm, statusFilter]);
+  }, [searchTerm, statusFilter, debtSourceFilter]);
 
   const debtTotalPages = Math.max(1, Math.ceil(filteredDebtList.length / debtPageSize));
   const safeDebtPage = Math.min(debtPage, debtTotalPages);
@@ -699,15 +847,15 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
       remainingAmount: newRemaining
     };
 
-    // 1. UPDATE TABEL UTAMA PEMBELIAN & FAKTUR PBF
+    // 1. UPDATE TABEL UTAMA PEMBELIAN & FAKTUR PBF (with pending sync lock)
     const updatedInvoices = purchaseInvoices.map((inv) =>
       inv.id === selectedInvoiceForPay.id ? updatedTargetInvoice : inv
     );
 
-    onUpdatePurchaseInvoices(updatedInvoices);
-    try {
-      demoSetItem('latisha_purchase_invoices', JSON.stringify(updatedInvoices));
-    } catch (e) {}
+    if (!isDemoSandbox && !isDemoMode() && !isDemoPurchaseInvoiceId(updatedTargetInvoice.id)) {
+      markIdsPendingSync('purchase_invoices', [updatedTargetInvoice.id]);
+    }
+    onUpdatePurchaseInvoices(updatedInvoices, { skipRemoteUpload: true });
 
     // 2. CATAT KE RIWAYAT PEMBAYARAN HUTANG
     const paymentRecordId = `PAY-HUTANG-${Date.now().toString().slice(-6)}`;
@@ -745,7 +893,9 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
       referenceNo: selectedInvoiceForPay.invoiceNo,
       partyName: selectedInvoiceForPay.pbfName,
       paymentMethod: paymentForm.paymentMethod,
-      description: paymentForm.notes || `Pembayaran hutang faktur PBF #${selectedInvoiceForPay.invoiceNo}`,
+      description:
+        paymentForm.notes ||
+        `Pembayaran hutang ${isOpeningDebtInvoice(selectedInvoiceForPay) ? 'awal distributor' : 'faktur PBF'} #${selectedInvoiceForPay.invoiceNo}`,
       petugas: userName,
       createdAt: new Date().toISOString()
     };
@@ -761,6 +911,9 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
       syncPurchaseInvoiceToSupabase(updatedTargetInvoice)
         .then((res) => {
           if (res.needsTableSetup) setNeedsTableSetup(true);
+          if (res.success && !isDemoPurchaseInvoiceId(updatedTargetInvoice.id)) {
+            confirmCloudSync('purchase_invoices', [updatedTargetInvoice.id]);
+          }
         })
         .catch(() => {});
       syncDebtPaymentToSupabase(newDebtPayment)
@@ -955,6 +1108,236 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     showToast(
       `Pelunasan piutang transaksi #${selectedTrxForPay.id} sebesar Rp ${payAmount.toLocaleString('id-ID')} berhasil dicatat & disinkronkan! Status transaksi POS diperbarui menjadi ${newStatus}.`
     );
+  };
+
+  // Helper: Hitung jatuh tempo otomatis dari tanggal + termin
+  const calculateDueDateByTerm = (baseDateStr: string, term: PurchaseInvoice['term']) => {
+    const base = baseDateStr ? new Date(baseDateStr) : new Date();
+    if (Number.isNaN(base.getTime())) return baseDateStr;
+    const days = term === '14 Hari' ? 14 : term === '30 Hari' ? 30 : term === '60 Hari' ? 60 : 0;
+    base.setDate(base.getDate() + days);
+    return base.toISOString().split('T')[0];
+  };
+
+  const generateOpeningDebtRefNo = (baseDateStr?: string) => {
+    const cleanDate = (baseDateStr || new Date().toISOString().split('T')[0]).replace(/-/g, '');
+    const suffix = Math.floor(100 + Math.random() * 900);
+    return `AWAL-PBF-${cleanDate}-${suffix}`;
+  };
+
+  const handleOpenAddOpeningDebt = () => {
+    const today = new Date().toISOString().split('T')[0];
+    setOpeningDebtError(null);
+    setEditingOpeningDebtId(null);
+    setOpeningDebtForm({
+      supplierMode: suppliers.length > 0 ? 'master' : 'custom',
+      selectedSupplierId: '',
+      pbfName: '',
+      invoiceNo: '',
+      date: today,
+      term: '30 Hari',
+      dueDate: calculateDueDateByTerm(today, '30 Hari'),
+      salesman: '',
+      totalTagihan: 0,
+      priorPaidAmount: 0,
+      branchId: currentBranch?.id || branches[0]?.id || 'BR-01',
+      notes: ''
+    });
+    setIsOpeningDebtModalOpen(true);
+  };
+
+  const handleOpenEditOpeningDebt = (inv: PurchaseInvoice) => {
+    setOpeningDebtError(null);
+    setEditingOpeningDebtId(inv.id);
+    const matchedSupplier = suppliers.find(
+      (s) => s.name.trim().toLowerCase() === inv.pbfName.trim().toLowerCase()
+    );
+    const appPaid = debtPaymentStatsByInvoiceId.get(inv.id)?.totalPaid || 0;
+    const totalPaid =
+      inv.paidAmount !== undefined
+        ? Number(inv.paidAmount)
+        : inv.status === 'Lunas'
+        ? Number(inv.totalTagihan)
+        : 0;
+    const priorPaid = Math.max(0, totalPaid - appPaid);
+
+    setOpeningDebtForm({
+      supplierMode: matchedSupplier ? 'master' : 'custom',
+      selectedSupplierId: matchedSupplier?.id || '',
+      pbfName: inv.pbfName || '',
+      invoiceNo: inv.invoiceNo || '',
+      date: inv.date || new Date().toISOString().split('T')[0],
+      term: inv.term || '30 Hari',
+      dueDate: inv.dueDate || inv.date || '',
+      salesman: inv.salesman || '',
+      totalTagihan: Number(inv.totalTagihan) || 0,
+      priorPaidAmount: priorPaid,
+      branchId: inv.branchId || currentBranch?.id || branches[0]?.id || 'BR-01',
+      notes: inv.notes || ''
+    });
+    setIsOpeningDebtModalOpen(true);
+  };
+
+  const handleSaveOpeningDebt = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setOpeningDebtError(null);
+
+    const pbfNameClean = openingDebtForm.pbfName.trim();
+    const invoiceNoClean = openingDebtForm.invoiceNo.trim();
+    const totalVal = Math.round(Number(openingDebtForm.totalTagihan) || 0);
+    const priorPaidVal = Math.max(0, Math.round(Number(openingDebtForm.priorPaidAmount) || 0));
+
+    if (!pbfNameClean) {
+      setOpeningDebtError('Nama Distributor / PBF wajib diisi atau dipilih.');
+      return;
+    }
+    if (!invoiceNoClean) {
+      setOpeningDebtError('No. Faktur / Nomor Referensi hutang awal wajib diisi.');
+      return;
+    }
+    if (!openingDebtForm.date) {
+      setOpeningDebtError('Tanggal hutang awal wajib diisi.');
+      return;
+    }
+    if (totalVal <= 0) {
+      setOpeningDebtError('Total nilai hutang awal harus lebih dari Rp 0.');
+      return;
+    }
+
+    const appPaid = editingOpeningDebtId
+      ? debtPaymentStatsByInvoiceId.get(editingOpeningDebtId)?.totalPaid || 0
+      : 0;
+    const combinedPaid = priorPaidVal + appPaid;
+
+    if (combinedPaid > totalVal) {
+      setOpeningDebtError(
+        `Total sudah dibayar (Rp ${combinedPaid.toLocaleString('id-ID')}) melebihi total hutang awal (Rp ${totalVal.toLocaleString('id-ID')}).`
+      );
+      return;
+    }
+    if (!editingOpeningDebtId && priorPaidVal >= totalVal) {
+      setOpeningDebtError(
+        'Nominal sudah terbayar sebelumnya harus lebih kecil dari Total Hutang Awal agar masih ada sisa hutang aktif yang dicatat.'
+      );
+      return;
+    }
+
+    const duplicate = purchaseInvoices.find(
+      (inv) =>
+        inv.id !== editingOpeningDebtId &&
+        inv.invoiceNo.trim().toLowerCase() === invoiceNoClean.toLowerCase() &&
+        inv.pbfName.trim().toLowerCase() === pbfNameClean.toLowerCase()
+    );
+    if (duplicate) {
+      setOpeningDebtError(
+        `No. Faktur/Referensi "${invoiceNoClean}" untuk distributor "${pbfNameClean}" sudah tercatat sebelumnya.`
+      );
+      return;
+    }
+
+    const remainingVal = Math.max(0, totalVal - combinedPaid);
+    const computedStatus: PurchaseInvoice['status'] =
+      remainingVal <= 0 ? 'Lunas' : combinedPaid > 0 ? 'Sebagian' : 'Belum Lunas';
+
+    const recordId =
+      editingOpeningDebtId ||
+      `HTG-AWAL-${Date.now().toString().slice(-6)}-${Math.random()
+        .toString(36)
+        .slice(2, 5)
+        .toUpperCase()}`;
+
+    const record: PurchaseInvoice = {
+      id: recordId,
+      pbfName: pbfNameClean,
+      invoiceNo: invoiceNoClean,
+      date: openingDebtForm.date,
+      dueDate: openingDebtForm.dueDate || openingDebtForm.date,
+      salesman: openingDebtForm.salesman.trim(),
+      term: openingDebtForm.term,
+      usePpn: false,
+      items: [],
+      grossDpp: 0,
+      totalDiscountAmount: 0,
+      dpp: 0,
+      ppn: 0,
+      totalTagihan: totalVal,
+      paidAmount: combinedPaid,
+      remainingAmount: remainingVal,
+      status: computedStatus,
+      branchId: openingDebtForm.branchId || currentBranch?.id || 'BR-01',
+      recordType: 'OPENING_DEBT',
+      notes: openingDebtForm.notes.trim() || undefined
+    };
+
+    const nextList = editingOpeningDebtId
+      ? purchaseInvoices.map((inv) => (inv.id === editingOpeningDebtId ? record : inv))
+      : [record, ...purchaseInvoices];
+
+    setIsSavingOpeningDebt(true);
+    try {
+      if (!isDemoSandbox && !isDemoMode()) {
+        markIdsPendingSync('purchase_invoices', [record.id]);
+      }
+      onUpdatePurchaseInvoices(nextList, { skipRemoteUpload: true });
+
+      if (onAddAuditLog) {
+        onAddAuditLog(
+          'Hutang & Piutang',
+          `${editingOpeningDebtId ? 'Edit' : 'Catat'} hutang awal distributor #${record.invoiceNo} (${record.pbfName}) total Rp ${totalVal.toLocaleString('id-ID')} · Sisa Rp ${remainingVal.toLocaleString('id-ID')}`
+        );
+      }
+
+      if (!isDemoSandbox && !isDemoMode()) {
+        const syncRes = await syncPurchaseInvoiceToSupabase(record);
+        if (syncRes.needsTableSetup) {
+          setNeedsTableSetup(true);
+          showToast(
+            `Hutang awal #${record.invoiceNo} disimpan lokal. Tabel Supabase belum tersedia — klik Setup Tabel SQL lalu Sinkronkan.`
+          );
+        } else if (syncRes.success) {
+          confirmCloudSync('purchase_invoices', [record.id]);
+          setLastSyncedAt(
+            new Date().toLocaleTimeString('id-ID', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit'
+            })
+          );
+          showToast(
+            `Hutang awal distributor ${record.pbfName} (#${record.invoiceNo}) berhasil ${editingOpeningDebtId ? 'diperbarui' : 'dicatat'} & tersinkron ke Supabase!`
+          );
+        } else {
+          showToast(
+            `Hutang awal #${record.invoiceNo} tersimpan lokal (antre sinkronisasi Supabase: ${syncRes.error || 'offline'}).`
+          );
+        }
+      } else {
+        showToast(
+          `Hutang awal distributor ${record.pbfName} (#${record.invoiceNo}) berhasil ${editingOpeningDebtId ? 'diperbarui' : 'dicatat'}.`
+        );
+      }
+
+      setIsOpeningDebtModalOpen(false);
+      setEditingOpeningDebtId(null);
+    } finally {
+      setIsSavingOpeningDebt(false);
+    }
+  };
+
+  const handleConfirmDeleteOpeningDebt = () => {
+    if (!deleteOpeningTarget) return;
+    const target = deleteOpeningTarget;
+    if (onDeleteOpeningDebtRecord) {
+      onDeleteOpeningDebtRecord(target.id);
+    } else {
+      const next = purchaseInvoices.filter((inv) => inv.id !== target.id);
+      onUpdatePurchaseInvoices(next, { skipRemoteUpload: true });
+      if (!isDemoSandbox && !isDemoMode()) {
+        deletePurchaseInvoiceFromSupabase(target.id).catch(() => {});
+      }
+    }
+    setDeleteOpeningTarget(null);
+    showToast(`Pencatatan hutang awal #${target.invoiceNo} (${target.pbfName}) berhasil dihapus.`);
   };
 
   // Cetak Kuitansi
@@ -1275,21 +1658,64 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
         )}
       </div>
 
-      {/* TAB CONTENT 1: MANAJEMEN HUTANG (FAKTUR PBF) */}
+      {/* TAB CONTENT 1: MANAJEMEN HUTANG (FAKTUR PBF & HUTANG AWAL DISTRIBUTOR) */}
       {activeTab === 'hutang' && (
         <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
-          <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex flex-wrap justify-between items-center gap-2">
+          <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex flex-wrap justify-between items-center gap-3">
             <div>
               <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
                 <Building2 className="w-4 h-4 text-rose-700" />
-                <span>Daftar Hutang Pembelian Barang Ke Distributor / PBF</span>
+                <span>Daftar Hutang Pembelian & Saldo Awal Distributor / PBF</span>
               </h3>
               <p className="text-[11px] text-slate-500">
-                Terintegrasi langsung dengan tabel utama Pembelian & Faktur PBF
+                Terintegrasi real-time dengan Faktur Pembelian PBF, Pencatatan Hutang Awal Distributor, dan Supabase Cloud
               </p>
             </div>
-            <div className="text-xs text-slate-500">
-              Menampilkan <strong>{filteredDebtList.length}</strong> dari {debtItems.length} faktur
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="inline-flex items-center bg-white border border-slate-200 rounded-xl p-0.5 text-[11px] font-bold">
+                <button
+                  type="button"
+                  onClick={() => setDebtSourceFilter('all')}
+                  className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
+                    debtSourceFilter === 'all'
+                      ? 'bg-slate-800 text-white'
+                      : 'text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  Semua ({debtItems.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDebtSourceFilter('purchase')}
+                  className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
+                    debtSourceFilter === 'purchase'
+                      ? 'bg-teal-700 text-white'
+                      : 'text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  Faktur PBF ({debtItems.length - openingDebtCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDebtSourceFilter('opening')}
+                  className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
+                    debtSourceFilter === 'opening'
+                      ? 'bg-indigo-700 text-white'
+                      : 'text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  Hutang Awal ({openingDebtCount})
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleOpenAddOpeningDebt}
+                className="px-3.5 py-2 bg-indigo-700 hover:bg-indigo-800 text-white rounded-xl font-bold text-xs shadow-xs flex items-center gap-1.5 transition active:scale-95 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Catat Hutang Awal Distributor</span>
+              </button>
             </div>
           </div>
 
@@ -1321,16 +1747,31 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                   paginatedDebtList.map((inv, idx) => {
                     const isFullyPaid = inv.status === 'Lunas' || inv.calculatedRemaining <= 0;
                     const rowNum = (safeDebtPage - 1) * debtPageSize + idx + 1;
+                    const isOpening = isOpeningDebtInvoice(inv);
+                    const payStat = debtPaymentStatsByInvoiceId.get(inv.id);
+                    const hasAppPayments = (payStat?.count || 0) > 0;
                     return (
                       <tr key={inv.id} className="hover:bg-slate-50/80 transition-colors">
                         <td className="p-3 text-center font-mono text-slate-400">{rowNum}</td>
                         <td className="p-3 font-mono font-bold text-slate-900">
-                          <div>{inv.invoiceNo}</div>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span>{inv.invoiceNo}</span>
+                            {isOpening && (
+                              <span className="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800 border border-indigo-200 font-sans text-[9px] font-black uppercase tracking-wide">
+                                Hutang Awal
+                              </span>
+                            )}
+                          </div>
                           <div className="text-[10px] text-slate-400 font-normal">ID: {inv.id}</div>
                         </td>
                         <td className="p-3">
                           <div className="font-bold text-slate-800">{inv.pbfName}</div>
                           <div className="text-[10px] text-slate-500">Sales: {inv.salesman || '-'}</div>
+                          {inv.notes && (
+                            <div className="text-[10px] text-indigo-700 italic mt-0.5 line-clamp-1" title={inv.notes}>
+                              {inv.notes}
+                            </div>
+                          )}
                         </td>
                         <td className="p-3 font-mono text-slate-600">{inv.date}</td>
                         <td className="p-3 font-mono">
@@ -1378,20 +1819,59 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                           )}
                         </td>
                         <td className="p-3 text-center">
-                          {!isFullyPaid ? (
-                            <button
-                              onClick={() => handleOpenPayDebt(inv)}
-                              className="px-3 py-1.5 bg-rose-700 hover:bg-rose-800 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 mx-auto transition active:scale-95 cursor-pointer"
-                            >
-                              <DollarSign className="w-3.5 h-3.5" />
-                              <span>Bayar Hutang</span>
-                            </button>
-                          ) : (
-                            <span className="text-[11px] text-emerald-600 font-bold flex items-center justify-center gap-1">
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                              <span>Selesai</span>
-                            </span>
-                          )}
+                          <div className="flex items-center justify-center gap-1.5">
+                            {!isFullyPaid ? (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenPayDebt(inv)}
+                                className="px-2.5 py-1.5 bg-rose-700 hover:bg-rose-800 text-white rounded-xl text-[11px] font-bold shadow-xs flex items-center gap-1 transition active:scale-95 cursor-pointer whitespace-nowrap"
+                              >
+                                <DollarSign className="w-3.5 h-3.5" />
+                                <span>Bayar</span>
+                              </button>
+                            ) : (
+                              <span className="text-[11px] text-emerald-600 font-bold flex items-center justify-center gap-1">
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                <span>Selesai</span>
+                              </span>
+                            )}
+                            {isOpening && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenEditOpeningDebt(inv)}
+                                  title="Edit Hutang Awal Distributor"
+                                  className="p-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 transition cursor-pointer"
+                                >
+                                  <Edit2 className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (hasAppPayments) {
+                                      showToast(
+                                        `Hutang awal #${inv.invoiceNo} sudah memiliki ${payStat?.count} riwayat pembayaran di Buku Kas dan tidak dapat dihapus demi integritas kas.`
+                                      );
+                                      return;
+                                    }
+                                    setDeleteOpeningTarget(inv);
+                                  }}
+                                  title={
+                                    hasAppPayments
+                                      ? 'Tidak dapat dihapus karena sudah ada transaksi pembayaran di Buku Kas'
+                                      : 'Hapus Pencatatan Hutang Awal'
+                                  }
+                                  className={`p-1.5 rounded-lg border transition ${
+                                    hasAppPayments
+                                      ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed opacity-60'
+                                      : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200 cursor-pointer'
+                                  }`}
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );
@@ -2286,6 +2766,427 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                 <RefreshCw className="w-3.5 h-3.5" />
                 <span>Cek & Sinkronkan Sekarang</span>
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* MODAL 5: PENCATATAN & EDIT HUTANG AWAL DISTRIBUTOR */}
+      {isOpeningDebtModalOpen && (
+        <div className="fixed inset-0 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center z-50 p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl w-full max-w-2xl shadow-2xl overflow-hidden border border-slate-200 my-6 animate-scale-up">
+            <div className="px-6 py-4 bg-indigo-950 text-white flex justify-between items-center">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-indigo-800/80 rounded-xl text-indigo-200 border border-indigo-600/40">
+                  <Landmark className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-black text-sm">
+                    {editingOpeningDebtId
+                      ? 'Edit Pencatatan Hutang Awal Distributor'
+                      : 'Catat Hutang Awal Distributor (Saldo Awal PBF)'}
+                  </h3>
+                  <p className="text-[11px] text-indigo-200">
+                    Mencatat saldo hutang lama ke distributor tanpa mengubah stok barang saat ini & tersinkron ke Supabase
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsOpeningDebtModalOpen(false);
+                  setOpeningDebtError(null);
+                }}
+                className="text-indigo-300 hover:text-white p-1 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveOpeningDebt} className="p-6 space-y-4 text-xs">
+              {/* Pilihan Distributor / PBF */}
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="font-black text-slate-800">
+                    Distributor / PBF *
+                  </label>
+                  {suppliers.length > 0 && (
+                    <div className="inline-flex rounded-lg bg-white border border-slate-300 p-0.5 text-[11px] font-bold">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpeningDebtForm((prev) => ({
+                            ...prev,
+                            supplierMode: 'master'
+                          }))
+                        }
+                        className={`px-2.5 py-1 rounded-md transition cursor-pointer ${
+                          openingDebtForm.supplierMode === 'master'
+                            ? 'bg-indigo-700 text-white'
+                            : 'text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        Pilih Master PBF
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpeningDebtForm((prev) => ({
+                            ...prev,
+                            supplierMode: 'custom',
+                            selectedSupplierId: ''
+                          }))
+                        }
+                        className={`px-2.5 py-1 rounded-md transition cursor-pointer ${
+                          openingDebtForm.supplierMode === 'custom'
+                            ? 'bg-indigo-700 text-white'
+                            : 'text-slate-600 hover:bg-slate-100'
+                        }`}
+                      >
+                        Ketik Manual
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {openingDebtForm.supplierMode === 'master' && suppliers.length > 0 ? (
+                  <select
+                    value={openingDebtForm.selectedSupplierId}
+                    onChange={(e) => {
+                      const supId = e.target.value;
+                      const found = suppliers.find((s) => s.id === supId);
+                      setOpeningDebtForm((prev) => ({
+                        ...prev,
+                        selectedSupplierId: supId,
+                        pbfName: found?.name || prev.pbfName,
+                        salesman: prev.salesman || found?.picName || ''
+                      }));
+                    }}
+                    className="w-full p-2.5 border border-slate-300 rounded-xl font-bold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="">-- Pilih Distributor / PBF Terdaftar --</option>
+                    {suppliers.map((sup) => (
+                      <option key={sup.id} value={sup.id}>
+                        {sup.name} {sup.picName ? `(PIC: ${sup.picName})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    placeholder="Contoh: PT Bina San Prima / PT Enseval Putera Megatrading"
+                    value={openingDebtForm.pbfName}
+                    onChange={(e) =>
+                      setOpeningDebtForm((prev) => ({ ...prev, pbfName: e.target.value }))
+                    }
+                    className="w-full p-2.5 border border-slate-300 rounded-xl font-bold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                )}
+              </div>
+
+              {/* No Referensi & Cabang */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="font-bold text-slate-700">
+                      No. Faktur / Referensi Hutang Awal *
+                    </label>
+                    {!editingOpeningDebtId && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpeningDebtForm((prev) => ({
+                            ...prev,
+                            invoiceNo: generateOpeningDebtRefNo(prev.date)
+                          }))
+                        }
+                        className="text-[10px] font-bold text-indigo-700 hover:text-indigo-900 underline cursor-pointer"
+                      >
+                        Isi Nomor Otomatis
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="Cth: FKT-LAMA-0012 / AWAL-PBF-01"
+                    value={openingDebtForm.invoiceNo}
+                    onChange={(e) =>
+                      setOpeningDebtForm((prev) => ({ ...prev, invoiceNo: e.target.value }))
+                    }
+                    className="w-full p-2.5 border border-slate-300 rounded-xl font-mono font-bold text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Salesman / PIC Distributor
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Nama salesman / kontak tagihan (opsional)"
+                    value={openingDebtForm.salesman}
+                    onChange={(e) =>
+                      setOpeningDebtForm((prev) => ({ ...prev, salesman: e.target.value }))
+                    }
+                    className="w-full p-2.5 border border-slate-300 rounded-xl text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+              </div>
+
+              {/* Tanggal Hutang, Termin & Jatuh Tempo */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Tanggal Faktur / Hutang *</label>
+                  <input
+                    type="date"
+                    value={openingDebtForm.date}
+                    onChange={(e) => {
+                      const nextDate = e.target.value;
+                      setOpeningDebtForm((prev) => ({
+                        ...prev,
+                        date: nextDate,
+                        dueDate: calculateDueDateByTerm(nextDate, prev.term)
+                      }));
+                    }}
+                    className="w-full p-2.5 border border-slate-300 rounded-xl font-mono text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Termin Tempo</label>
+                  <select
+                    value={openingDebtForm.term}
+                    onChange={(e) => {
+                      const nextTerm = e.target.value as PurchaseInvoice['term'];
+                      setOpeningDebtForm((prev) => ({
+                        ...prev,
+                        term: nextTerm,
+                        dueDate: calculateDueDateByTerm(prev.date, nextTerm)
+                      }));
+                    }}
+                    className="w-full p-2.5 border border-slate-300 rounded-xl font-semibold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="Cash / COD">Cash / COD</option>
+                    <option value="14 Hari">14 Hari</option>
+                    <option value="30 Hari">30 Hari</option>
+                    <option value="60 Hari">60 Hari</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Tanggal Jatuh Tempo *</label>
+                  <input
+                    type="date"
+                    value={openingDebtForm.dueDate}
+                    onChange={(e) =>
+                      setOpeningDebtForm((prev) => ({ ...prev, dueDate: e.target.value }))
+                    }
+                    className="w-full p-2.5 border border-slate-300 rounded-xl font-mono text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+              </div>
+
+              {/* Nominal Hutang & Sudah Dibayar */}
+              {(() => {
+                const appPaidSum = editingOpeningDebtId
+                  ? debtPaymentStatsByInvoiceId.get(editingOpeningDebtId)?.totalPaid || 0
+                  : 0;
+                const totalNum = Math.round(Number(openingDebtForm.totalTagihan) || 0);
+                const priorNum = Math.max(0, Math.round(Number(openingDebtForm.priorPaidAmount) || 0));
+                const remainingPreview = Math.max(0, totalNum - priorNum - appPaidSum);
+                return (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block font-bold text-slate-700 mb-1">
+                          Total Nilai Hutang Awal (Rp) *
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          value={openingDebtForm.totalTagihan || ''}
+                          placeholder="0"
+                          onChange={(e) =>
+                            setOpeningDebtForm((prev) => ({
+                              ...prev,
+                              totalTagihan: Number(e.target.value) || 0
+                            }))
+                          }
+                          className="w-full p-3 border-2 border-indigo-300 rounded-xl font-mono font-black text-base text-indigo-950 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block font-bold text-slate-700 mb-1">
+                          Sudah Terbayar Sebelumnya (Rp)
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={openingDebtForm.priorPaidAmount || ''}
+                          placeholder="0 (jika belum ada cicilan lama)"
+                          onChange={(e) =>
+                            setOpeningDebtForm((prev) => ({
+                              ...prev,
+                              priorPaidAmount: Math.max(0, Number(e.target.value) || 0)
+                            }))
+                          }
+                          className="w-full p-3 border border-slate-300 rounded-xl font-mono font-bold text-base text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="bg-indigo-50/80 border border-indigo-200 rounded-2xl p-3.5 space-y-1.5">
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-600 font-medium">Total Hutang Awal:</span>
+                        <span className="font-mono font-bold text-slate-900">
+                          Rp {totalNum.toLocaleString('id-ID')}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-600 font-medium">Terbayar Sebelum Aplikasi:</span>
+                        <span className="font-mono font-semibold text-emerald-700">
+                          Rp {priorNum.toLocaleString('id-ID')}
+                        </span>
+                      </div>
+                      {appPaidSum > 0 && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-slate-600 font-medium">Pembayaran Tercatat di Buku Kas:</span>
+                          <span className="font-mono font-semibold text-emerald-700">
+                            Rp {appPaidSum.toLocaleString('id-ID')}
+                          </span>
+                        </div>
+                      )}
+                      <div className="flex justify-between items-center border-t border-indigo-200 pt-2">
+                        <span className="font-black text-indigo-950">SISA HUTANG AKTIF TERCATAT:</span>
+                        <span className="font-mono font-black text-base text-rose-700">
+                          Rp {remainingPreview.toLocaleString('id-ID')}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Cabang & Catatan */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {branches.length > 0 && (
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1">Cabang Apotek</label>
+                    <select
+                      value={openingDebtForm.branchId}
+                      onChange={(e) =>
+                        setOpeningDebtForm((prev) => ({ ...prev, branchId: e.target.value }))
+                      }
+                      className="w-full p-2.5 border border-slate-300 rounded-xl font-semibold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    >
+                      {branches.map((br) => (
+                        <option key={br.id} value={br.id}>
+                          {br.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                <div className={branches.length > 0 ? '' : 'sm:col-span-2'}>
+                  <label className="block font-bold text-slate-700 mb-1">Catatan / Keterangan</label>
+                  <input
+                    type="text"
+                    placeholder="Cth: Saldo awal hutang faktur sebelum cutover sistem"
+                    value={openingDebtForm.notes}
+                    onChange={(e) =>
+                      setOpeningDebtForm((prev) => ({ ...prev, notes: e.target.value }))
+                    }
+                    className="w-full p-2.5 border border-slate-300 rounded-xl text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+              </div>
+
+              {openingDebtError && (
+                <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <span>{openingDebtError}</span>
+                </div>
+              )}
+
+              <div className="pt-4 flex items-center justify-end gap-2 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsOpeningDebtModalOpen(false);
+                    setOpeningDebtError(null);
+                  }}
+                  className="px-5 py-2.5 bg-slate-200 hover:bg-slate-300 rounded-xl font-bold text-slate-700 transition cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingOpeningDebt}
+                  className="px-6 py-2.5 bg-indigo-700 hover:bg-indigo-800 disabled:opacity-60 text-white rounded-xl font-black shadow-md flex items-center gap-2 transition active:scale-95 cursor-pointer"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>
+                    {isSavingOpeningDebt
+                      ? 'Menyimpan...'
+                      : editingOpeningDebtId
+                      ? 'Simpan Perubahan Hutang Awal'
+                      : 'Simpan & Sinkronkan Hutang Awal'}
+                  </span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 6: KONFIRMASI HAPUS HUTANG AWAL DISTRIBUTOR */}
+      {deleteOpeningTarget && (
+        <div className="fixed inset-0 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl overflow-hidden border border-slate-200 animate-scale-up">
+            <div className="px-6 py-4 bg-rose-900 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <AlertTriangle className="w-5 h-5 text-amber-300" />
+                <h3 className="font-black text-sm">Hapus Pencatatan Hutang Awal?</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeleteOpeningTarget(null)}
+                className="text-rose-200 hover:text-white p-1 rounded-lg cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4 text-xs text-slate-700">
+              <p>
+                Anda akan menghapus pencatatan hutang awal distributor{' '}
+                <strong className="text-slate-900">{deleteOpeningTarget.pbfName}</strong> dengan No.
+                Referensi <strong className="font-mono text-rose-700">#{deleteOpeningTarget.invoiceNo}</strong>{' '}
+                sebesar{' '}
+                <strong className="font-mono text-slate-900">
+                  Rp {deleteOpeningTarget.totalTagihan.toLocaleString('id-ID')}
+                </strong>.
+              </p>
+              <p className="text-[11px] text-slate-500 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                Penghapusan ini akan langsung tersinkronisasi ke database Supabase dan tidak mengubah stok obat di gudang.
+              </p>
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteOpeningTarget(null)}
+                  className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl font-bold cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmDeleteOpeningDebt}
+                  className="px-5 py-2 bg-rose-700 hover:bg-rose-800 text-white rounded-xl font-black flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Ya, Hapus Permanen</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>

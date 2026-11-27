@@ -875,6 +875,8 @@ export interface PurchaseInvoice {
   paidAmount?: number;
   remainingAmount?: number;
   branchId: string;
+  recordType?: 'PURCHASE_INVOICE' | 'OPENING_DEBT';
+  notes?: string;
 }
 
 export interface StockTransfer {

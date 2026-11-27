@@ -12257,6 +12257,14 @@ export function isDemoCashFlowId(id?: string): boolean {
   return DEMO_CASH_FLOW_IDS.has(clean) || clean.toUpperCase().includes('DEMO');
 }
 
+const OPENING_DEBT_META_FLAG = '__openingDebtMeta';
+
+export function isOpeningDebtInvoice(inv?: Partial<PurchaseInvoice> | null): boolean {
+  if (!inv) return false;
+  if (inv.recordType === 'OPENING_DEBT') return true;
+  return String(inv.id || '').trim().toUpperCase().startsWith('HTG-AWAL-');
+}
+
 // 1. Mappers: PurchaseInvoice <-> faktur_pembelian
 export function purchaseInvoiceToSupabaseRow(inv: PurchaseInvoice): Record<string, any> {
   const total = Number(inv.totalTagihan) || 0;
@@ -12271,6 +12279,23 @@ export function purchaseInvoiceToSupabaseRow(inv: PurchaseInvoice): Record<strin
       ? Number(inv.remainingAmount)
       : Math.max(0, total - paid);
 
+  const cleanItems = Array.isArray(inv.items)
+    ? inv.items.filter((it: any) => !it?.[OPENING_DEBT_META_FLAG])
+    : [];
+  const openingDebt = isOpeningDebtInvoice(inv);
+  const trimmedNotes = (inv.notes || '').trim();
+  const serializedItems: any[] =
+    openingDebt || trimmedNotes
+      ? [
+          ...cleanItems,
+          {
+            [OPENING_DEBT_META_FLAG]: true,
+            recordType: openingDebt ? 'OPENING_DEBT' : 'PURCHASE_INVOICE',
+            notes: trimmedNotes
+          }
+        ]
+      : cleanItems;
+
   return {
     id: inv.id,
     pbf_name: inv.pbfName || '',
@@ -12280,13 +12305,13 @@ export function purchaseInvoiceToSupabaseRow(inv: PurchaseInvoice): Record<strin
     salesman: inv.salesman || '',
     term: inv.term || '30 Hari',
     use_ppn: Boolean(inv.usePpn),
-    items: Array.isArray(inv.items) ? inv.items : [],
+    items: serializedItems,
     gross_dpp: Number(inv.grossDpp) || 0,
     total_discount_amount: Number(inv.totalDiscountAmount) || 0,
     dpp: Number(inv.dpp) || 0,
     ppn: Number(inv.ppn) || 0,
     total_tagihan: total,
-    status: inv.status || (remaining <= 0 ? 'Lunas' : paid > 0 ? 'Sebagian' : 'Belum Lunas'),
+    status: inv.status || (total > 0 && remaining <= 0 ? 'Lunas' : paid > 0 ? 'Sebagian' : 'Belum Lunas'),
     paid_amount: paid,
     remaining_amount: remaining,
     branch_id: inv.branchId || 'BR-01',
@@ -12296,11 +12321,27 @@ export function purchaseInvoiceToSupabaseRow(inv: PurchaseInvoice): Record<strin
 
 export function supabaseRowToPurchaseInvoice(row: Record<string, any>): PurchaseInvoice {
   let items: PurchaseItem[] = [];
+  let metaRecordType: PurchaseInvoice['recordType'] | undefined;
+  let metaNotes: string | undefined;
+
   const rawItems = row.items;
   if (rawItems) {
     try {
       const parsed = typeof rawItems === 'string' ? JSON.parse(rawItems) : rawItems;
-      if (Array.isArray(parsed)) items = parsed;
+      if (Array.isArray(parsed)) {
+        parsed.forEach((entry: any) => {
+          if (entry && entry[OPENING_DEBT_META_FLAG]) {
+            if (entry.recordType === 'OPENING_DEBT' || entry.recordType === 'PURCHASE_INVOICE') {
+              metaRecordType = entry.recordType;
+            }
+            if (typeof entry.notes === 'string' && entry.notes.trim()) {
+              metaNotes = entry.notes.trim();
+            }
+          } else if (entry) {
+            items.push(entry);
+          }
+        });
+      }
     } catch {}
   }
 
@@ -12331,8 +12372,17 @@ export function supabaseRowToPurchaseInvoice(row: Record<string, any>): Purchase
     ? (rawTerm as PurchaseInvoice['term'])
     : '30 Hari';
 
+  const idStr = String(row.id || `INV-PBF-${Date.now()}`);
+  const isOpeningDebt =
+    metaRecordType === 'OPENING_DEBT' ||
+    row.record_type === 'OPENING_DEBT' ||
+    idStr.toUpperCase().startsWith('HTG-AWAL-');
+  const notes =
+    metaNotes ||
+    (typeof row.notes === 'string' && row.notes.trim() ? row.notes.trim() : undefined);
+
   return {
-    id: String(row.id || `INV-PBF-${Date.now()}`),
+    id: idStr,
     pbfName: String(row.pbf_name ?? row.pbfName ?? ''),
     invoiceNo: String(row.invoice_no ?? row.invoiceNo ?? ''),
     date: String(row.date || new Date().toISOString().split('T')[0]),
@@ -12349,7 +12399,9 @@ export function supabaseRowToPurchaseInvoice(row: Record<string, any>): Purchase
     status: remainingAmount <= 0 && totalTagihan > 0 ? 'Lunas' : paidAmount > 0 ? 'Sebagian' : status,
     paidAmount,
     remainingAmount,
-    branchId: String(row.branch_id ?? row.branchId ?? 'BR-01')
+    branchId: String(row.branch_id ?? row.branchId ?? 'BR-01'),
+    ...(isOpeningDebt ? { recordType: 'OPENING_DEBT' as const } : {}),
+    ...(notes ? { notes } : {})
   };
 }
 

@@ -3,6 +3,7 @@ import { demoSetItem } from '../utils/demoSandbox';
 import { Truck, Search, Printer, Trash2, RotateCcw, Calendar, Receipt, Plus, X, Edit2 } from 'lucide-react';
 import { PurchaseReturnRecord, PurchaseReturnItem, PurchaseInvoice } from '../types';
 import { openPrintWindow } from '../utils/printHelper';
+import { isOpeningDebtInvoice } from '../utils/supabaseClient';
 
 interface PurchaseReturnHistoryViewProps {
   returns: PurchaseReturnRecord[];
@@ -697,11 +698,13 @@ export const PurchaseReturnHistoryView: React.FC<PurchaseReturnHistoryViewProps>
                   }`}
                 >
                   <option value="">-- Pilih Faktur Pembelian untuk Diretur --</option>
-                  {invoices.map((inv) => (
-                    <option key={inv.id} value={inv.id}>
-                      Faktur #{inv.invoiceNo} — PBF: {inv.pbfName} ({inv.date}) — Total: Rp {inv.totalTagihan?.toLocaleString('id-ID') || 0}
-                    </option>
-                  ))}
+                  {invoices
+                    .filter((inv) => !isOpeningDebtInvoice(inv))
+                    .map((inv) => (
+                      <option key={inv.id} value={inv.id}>
+                        Faktur #{inv.invoiceNo} — PBF: {inv.pbfName} ({inv.date}) — Total: Rp {inv.totalTagihan?.toLocaleString('id-ID') || 0}
+                      </option>
+                    ))}
                 </select>
               </div>
 

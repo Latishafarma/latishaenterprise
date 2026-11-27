@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { PurchaseInvoice, PurchaseItem, Medicine, Supplier } from '../types';
 import { openPrintWindow } from '../utils/printHelper';
+import { isOpeningDebtInvoice } from '../utils/supabaseClient';
 import { PaginationControls } from './PaginationControls';
 
 interface PurchaseInvoiceViewProps {
@@ -313,9 +314,10 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
   };
 
   const filteredInvoices = useMemo(() => {
+    const purchaseOnlyInvoices = invoices.filter((inv) => !isOpeningDebtInvoice(inv));
     const q = searchTerm.trim().toLowerCase();
-    if (!q) return invoices;
-    return invoices.filter(
+    if (!q) return purchaseOnlyInvoices;
+    return purchaseOnlyInvoices.filter(
       (inv) =>
         inv.invoiceNo.toLowerCase().includes(q) ||
         inv.pbfName.toLowerCase().includes(q) ||
