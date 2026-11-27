@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { demoSetItem } from '../utils/demoSandbox';
+import { demoGetItem, demoSetItem } from '../utils/demoSandbox';
 import {
   Truck,
   Plus,
@@ -50,16 +50,70 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingInvoiceId, setEditingInvoiceId] = useState<string | null>(null);
 
+  // Custom Termin Pembayaran Options (shared with Hutang Awal via latisha_custom_debt_terms_v1)
+  const DEFAULT_INVOICE_TERMS = useMemo(
+    () => [
+      { label: 'Cash / COD', displayLabel: 'Cash / COD (Tunai Saat Terima)', days: 0 },
+      { label: '14 Hari', displayLabel: 'Tempo 14 Hari', days: 14 },
+      { label: '30 Hari', displayLabel: 'Tempo 30 Hari', days: 30 },
+      { label: '60 Hari', displayLabel: 'Tempo 60 Hari', days: 60 }
+    ],
+    []
+  );
+  const [customInvoiceTerms, setCustomInvoiceTerms] = useState<{ label: string; days: number }[]>(() => {
+    try {
+      const saved = demoGetItem('latisha_custom_debt_terms_v1');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter(
+            (t: any) => t && typeof t.label === 'string' && t.label.trim() && Number.isFinite(Number(t.days))
+          );
+        }
+      }
+    } catch {}
+    return [];
+  });
+  const [isAddingCustomTerm, setIsAddingCustomTerm] = useState(false);
+  const [newCustomTermLabel, setNewCustomTermLabel] = useState('');
+  const [newCustomTermDays, setNewCustomTermDays] = useState<number>(45);
+  const [customTermError, setCustomTermError] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      demoSetItem('latisha_custom_debt_terms_v1', JSON.stringify(customInvoiceTerms));
+    } catch {}
+  }, [customInvoiceTerms]);
+
+  const parseTermDays = (termStr: string, customList = customInvoiceTerms): number => {
+    const clean = (termStr || '').trim();
+    if (!clean) return 0;
+    const allKnown = [
+      ...DEFAULT_INVOICE_TERMS.map((t) => ({ label: t.label, days: t.days })),
+      ...customList
+    ];
+    const matched = allKnown.find((t) => t.label.toLowerCase() === clean.toLowerCase());
+    if (matched) return Math.max(0, Number(matched.days) || 0);
+    if (/cod|cash|tunai/i.test(clean)) return 0;
+    const dayMatch = clean.match(/(\d+)\s*hari/i);
+    if (dayMatch) return parseInt(dayMatch[1], 10);
+    const weekMatch = clean.match(/(\d+)\s*minggu/i);
+    if (weekMatch) return parseInt(weekMatch[1], 10) * 7;
+    const monthMatch = clean.match(/(\d+)\s*bulan/i);
+    if (monthMatch) return parseInt(monthMatch[1], 10) * 30;
+    return 30;
+  };
+
   // Calculate Due Date based on term
-  const calculateDueDate = (dateStr: string, term: PurchaseInvoice['term']) => {
+  const calculateDueDate = (
+    dateStr: string,
+    term: PurchaseInvoice['term'],
+    customList = customInvoiceTerms
+  ) => {
     if (!dateStr) return '';
     const [year, month, day] = dateStr.split('-').map(Number);
     const d = new Date(year, month - 1, day);
-    let days = 30;
-    if (term === 'Cash / COD') days = 0;
-    else if (term === '14 Hari') days = 14;
-    else if (term === '30 Hari') days = 30;
-    else if (term === '60 Hari') days = 60;
+    const days = parseTermDays(String(term || ''), customList);
     d.setDate(d.getDate() + days);
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -81,6 +135,62 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
     diskonTotalNominal: 0,
     diskonTotalPersen: 0
   });
+
+  const allInvoiceTermOptions = useMemo(() => {
+    const map = new Map<string, { label: string; displayLabel: string; days: number }>();
+    DEFAULT_INVOICE_TERMS.forEach((t) => {
+      map.set(t.label.toLowerCase(), t);
+    });
+    customInvoiceTerms.forEach((t) => {
+      const clean = t.label.trim();
+      const key = clean.toLowerCase();
+      if (key && !map.has(key)) {
+        const d = Math.max(0, Number(t.days) || 0);
+        map.set(key, {
+          label: clean,
+          displayLabel: clean.toLowerCase().includes('hari') || d === 0 ? clean : `${clean} (${d} Hari)`,
+          days: d
+        });
+      }
+    });
+    const curTerm = (form.term || '').trim();
+    if (curTerm && !map.has(curTerm.toLowerCase())) {
+      const d = parseTermDays(curTerm);
+      map.set(curTerm.toLowerCase(), {
+        label: curTerm,
+        displayLabel: curTerm,
+        days: d
+      });
+    }
+    return Array.from(map.values());
+  }, [DEFAULT_INVOICE_TERMS, customInvoiceTerms, form.term]);
+
+  const handleSaveCustomTerm = () => {
+    setCustomTermError(null);
+    const daysVal = Math.round(Number(newCustomTermDays));
+    if (!Number.isFinite(daysVal) || daysVal < 0) {
+      setCustomTermError('Waktu termin (jumlah hari) harus berupa angka 0 atau lebih.');
+      return;
+    }
+    const labelClean =
+      newCustomTermLabel.trim() || (daysVal === 0 ? 'Cash / COD' : `${daysVal} Hari`);
+
+    const nextCustomList = [
+      ...customInvoiceTerms.filter((t) => t.label.trim().toLowerCase() !== labelClean.toLowerCase()),
+      ...(DEFAULT_INVOICE_TERMS.some((t) => t.label.toLowerCase() === labelClean.toLowerCase())
+        ? []
+        : [{ label: labelClean, days: daysVal }])
+    ];
+
+    setCustomInvoiceTerms(nextCustomList);
+    setForm((prev) => ({
+      ...prev,
+      term: labelClean,
+      dueDate: calculateDueDate(prev.date, labelClean, nextCustomList)
+    }));
+    setIsAddingCustomTerm(false);
+    setNewCustomTermLabel('');
+  };
 
   // Supplier live search in modal
   const [supplierSearch, setSupplierSearch] = useState('');
@@ -234,6 +344,8 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
       return;
     }
     setEditingInvoiceId(inv.id);
+    setIsAddingCustomTerm(false);
+    setCustomTermError(null);
     setForm({
       pbfName: inv.pbfName,
       invoiceNo: inv.invoiceNo,
@@ -362,6 +474,8 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
             onClick={() => {
               const now = new Date().toISOString().split('T')[0];
               setEditingInvoiceId(null);
+              setIsAddingCustomTerm(false);
+              setCustomTermError(null);
               setForm({
                 pbfName: '',
                 invoiceNo: '',
@@ -668,16 +782,37 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
                 {/* 4. Termin Pembayaran */}
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Termin Pembayaran *</label>
-                  <select
-                    value={form.term}
-                    onChange={(e) => handleTermChange(e.target.value as PurchaseInvoice['term'])}
-                    className="w-full p-2.5 border rounded-xl font-bold bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
-                  >
-                    <option value="Cash / COD">Cash / COD (Tunai Saat Terima)</option>
-                    <option value="14 Hari">Tempo 14 Hari</option>
-                    <option value="30 Hari">Tempo 30 Hari</option>
-                    <option value="60 Hari">Tempo 60 Hari</option>
-                  </select>
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      value={form.term}
+                      onChange={(e) => handleTermChange(e.target.value as PurchaseInvoice['term'])}
+                      className="w-full flex-1 p-2.5 border rounded-xl font-bold bg-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
+                    >
+                      {allInvoiceTermOptions.map((opt) => (
+                        <option key={opt.label} value={opt.label}>
+                          {opt.displayLabel}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomTermError(null);
+                        setNewCustomTermLabel('');
+                        setNewCustomTermDays(45);
+                        setIsAddingCustomTerm((prev) => !prev);
+                      }}
+                      title="Tambah jenis atau waktu termin pembayaran baru"
+                      aria-label="Tambah jenis atau waktu termin pembayaran baru"
+                      className={`p-2.5 rounded-xl border font-bold transition cursor-pointer shrink-0 ${
+                        isAddingCustomTerm
+                          ? 'bg-teal-600 text-white border-teal-600'
+                          : 'bg-teal-50 hover:bg-teal-100 text-teal-700 border-teal-300'
+                      }`}
+                    >
+                      <Plus className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
 
                 {/* 5. Tanggal Jatuh Tempo (Otomatis Terisi Sesuai Termin) */}
@@ -694,9 +829,9 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
                     className="w-full p-2.5 border rounded-xl font-bold bg-amber-50 text-amber-900 border-amber-200 focus:ring-2 focus:ring-teal-500 focus:outline-none"
                   />
                   <div className="text-[9px] text-slate-400 mt-1">
-                    {form.term === 'Cash / COD'
+                    {parseTermDays(String(form.term || '')) === 0
                       ? 'Hari yang sama (0 hari)'
-                      : `Dihitung otomatis +${form.term} dari tanggal faktur`}
+                      : `Dihitung otomatis +${parseTermDays(String(form.term || ''))} Hari (${form.term}) dari tanggal faktur`}
                   </div>
                 </div>
 
@@ -711,6 +846,76 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
                     className="w-full p-2.5 border rounded-xl bg-white font-medium focus:ring-2 focus:ring-teal-500 focus:outline-none"
                   />
                 </div>
+
+                {isAddingCustomTerm && (
+                  <div className="md:col-span-3 bg-teal-50/80 border border-teal-200 rounded-2xl p-3.5 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="font-black text-teal-950 text-[11px] uppercase tracking-wide">
+                        Tambah Jenis / Waktu Termin Pembayaran Baru
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsAddingCustomTerm(false);
+                          setCustomTermError(null);
+                        }}
+                        className="text-slate-400 hover:text-slate-700 cursor-pointer"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-end">
+                      <div className="sm:col-span-6">
+                        <label className="block font-bold text-slate-700 mb-1 text-[11px]">
+                          Nama / Jenis Termin
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="Cth: 45 Hari / 90 Hari / Tempo Khusus"
+                          value={newCustomTermLabel}
+                          onChange={(e) => setNewCustomTermLabel(e.target.value)}
+                          className="w-full p-2 border border-slate-300 rounded-xl text-xs font-semibold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                        />
+                      </div>
+                      <div className="sm:col-span-3">
+                        <label className="block font-bold text-slate-700 mb-1 text-[11px]">
+                          Waktu (Hari) *
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={newCustomTermDays}
+                          onChange={(e) =>
+                            setNewCustomTermDays(Math.max(0, Number(e.target.value) || 0))
+                          }
+                          className="w-full p-2 border border-slate-300 rounded-xl text-xs font-mono font-bold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                        />
+                      </div>
+                      <div className="sm:col-span-3 flex gap-1.5">
+                        <button
+                          type="button"
+                          onClick={handleSaveCustomTerm}
+                          className="flex-1 py-2 px-3 bg-teal-600 hover:bg-teal-700 text-white rounded-xl font-bold text-xs transition cursor-pointer"
+                        >
+                          Simpan
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsAddingCustomTerm(false);
+                            setCustomTermError(null);
+                          }}
+                          className="py-2 px-2.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl font-bold text-xs transition cursor-pointer"
+                        >
+                          Batal
+                        </button>
+                      </div>
+                    </div>
+                    {customTermError && (
+                      <p className="text-[11px] font-bold text-rose-700">{customTermError}</p>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Add Item Bar with Diskon Item */}
