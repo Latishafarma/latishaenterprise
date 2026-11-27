@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   CreditCard,
   TrendingDown,
@@ -32,7 +32,9 @@ import {
   Landmark,
   ArrowUpDown,
   ArrowUp,
-  ArrowDown
+  ArrowDown,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import {
   PurchaseInvoice,
@@ -128,6 +130,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
   const [debtSourceFilter, setDebtSourceFilter] = useState<'all' | 'purchase' | 'opening'>('all');
   const [debtSortKey, setDebtSortKey] = useState<'date' | 'dueDate' | null>(null);
   const [debtSortOrder, setDebtSortOrder] = useState<'asc' | 'desc'>('asc');
+  const [showPbfSummaryPanel, setShowPbfSummaryPanel] = useState<boolean>(true);
 
   // Local storage for payment history and cash flow ledger
   const [debtPayments, setDebtPayments] = useState<DebtPaymentRecord[]>(() => {
@@ -548,6 +551,48 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
   const [openingDebtError, setOpeningDebtError] = useState<string | null>(null);
   const [isSavingOpeningDebt, setIsSavingOpeningDebt] = useState(false);
   const [deleteOpeningTarget, setDeleteOpeningTarget] = useState<PurchaseInvoice | null>(null);
+  // Custom Termin Tempo Options (default + user-added persisted locally)
+  const DEFAULT_DEBT_TERMS = useMemo(
+    () => [
+      { label: 'Cash / COD', days: 0 },
+      { label: '14 Hari', days: 14 },
+      { label: '30 Hari', days: 30 },
+      { label: '60 Hari', days: 60 }
+    ],
+    []
+  );
+  const [customDebtTerms, setCustomDebtTerms] = useState<{ label: string; days: number }[]>(() => {
+    try {
+      const saved = demoGetItem('latisha_custom_debt_terms_v1');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter(
+            (t: any) => t && typeof t.label === 'string' && t.label.trim() && Number.isFinite(Number(t.days))
+          );
+        }
+      }
+    } catch {}
+    return [];
+  });
+  const [isAddingCustomTerm, setIsAddingCustomTerm] = useState(false);
+  const [newCustomTermLabel, setNewCustomTermLabel] = useState('');
+  const [newCustomTermDays, setNewCustomTermDays] = useState<number>(45);
+  const [customTermError, setCustomTermError] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      demoSetItem('latisha_custom_debt_terms_v1', JSON.stringify(customDebtTerms));
+    } catch {}
+  }, [customDebtTerms]);
+
+  // Searchable Distributor / PBF combobox states for Opening Debt Modal
+  const openingSupplierContainerRef = useRef<HTMLDivElement | null>(null);
+  const [openingSupplierSearch, setOpeningSupplierSearch] = useState('');
+  const [isOpeningSupplierDropdownOpen, setIsOpeningSupplierDropdownOpen] = useState(false);
+  const [isSupplierSearchFiltering, setIsSupplierSearchFiltering] = useState(false);
+  const [activeSupplierIndex, setActiveSupplierIndex] = useState(0);
+
   const [openingDebtForm, setOpeningDebtForm] = useState<{
     supplierMode: 'master' | 'custom';
     selectedSupplierId: string;
@@ -575,6 +620,68 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     branchId: currentBranch?.id || branches[0]?.id || 'BR-01',
     notes: ''
   });
+
+  const filteredOpeningSuppliers = useMemo(() => {
+    const q = isSupplierSearchFiltering ? openingSupplierSearch.trim().toLowerCase() : '';
+    if (!q) return suppliers;
+    return suppliers.filter((sup) => {
+      const nameMatch = sup.name.toLowerCase().includes(q);
+      const picMatch = (sup.picName || '').toLowerCase().includes(q);
+      const phoneMatch = (sup.phone || '').toLowerCase().includes(q);
+      const addrMatch = (sup.address || '').toLowerCase().includes(q);
+      const idMatch = (sup.id || '').toLowerCase().includes(q);
+      const licenseMatch = (sup.licenseNo || '').toLowerCase().includes(q);
+      return nameMatch || picMatch || phoneMatch || addrMatch || idMatch || licenseMatch;
+    });
+  }, [suppliers, openingSupplierSearch, isSupplierSearchFiltering]);
+
+  const selectedOpeningSupplier = useMemo(
+    () => suppliers.find((s) => s.id === openingDebtForm.selectedSupplierId) || null,
+    [suppliers, openingDebtForm.selectedSupplierId]
+  );
+
+  useEffect(() => {
+    if (!isOpeningSupplierDropdownOpen) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        openingSupplierContainerRef.current &&
+        !openingSupplierContainerRef.current.contains(event.target as Node)
+      ) {
+        setIsOpeningSupplierDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isOpeningSupplierDropdownOpen]);
+
+  const parseTermDays = (termStr: string, customList = customDebtTerms): number => {
+    const clean = (termStr || '').trim();
+    if (!clean) return 0;
+    const allKnown = [...DEFAULT_DEBT_TERMS, ...customList];
+    const matched = allKnown.find((t) => t.label.toLowerCase() === clean.toLowerCase());
+    if (matched) return Math.max(0, Number(matched.days) || 0);
+    if (/cod|cash|tunai/i.test(clean)) return 0;
+    const dayMatch = clean.match(/(\d+)\s*hari/i);
+    if (dayMatch) return parseInt(dayMatch[1], 10);
+    const weekMatch = clean.match(/(\d+)\s*minggu/i);
+    if (weekMatch) return parseInt(weekMatch[1], 10) * 7;
+    const monthMatch = clean.match(/(\d+)\s*bulan/i);
+    if (monthMatch) return parseInt(monthMatch[1], 10) * 30;
+    return 0;
+  };
+
+  const allDebtTermOptions = useMemo(() => {
+    const map = new Map<string, { label: string; days: number }>();
+    [...DEFAULT_DEBT_TERMS, ...customDebtTerms].forEach((t) => {
+      const key = t.label.trim().toLowerCase();
+      if (key) map.set(key, { label: t.label.trim(), days: Math.max(0, Number(t.days) || 0) });
+    });
+    const curTerm = (openingDebtForm.term || '').trim();
+    if (curTerm && !map.has(curTerm.toLowerCase())) {
+      map.set(curTerm.toLowerCase(), { label: curTerm, days: parseTermDays(curTerm) });
+    }
+    return Array.from(map.values());
+  }, [DEFAULT_DEBT_TERMS, customDebtTerms, openingDebtForm.term]);
 
   // Form State for Payment
   const [paymentForm, setPaymentForm] = useState({
@@ -701,6 +808,79 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
 
   const openingDebtCount = useMemo(() => {
     return debtItems.filter((it) => isOpeningDebtInvoice(it)).length;
+  }, [debtItems]);
+
+  // Ringkasan hutang aktif per PBF (jatuh tempo <= 30 hari ke depan, terlambat, dan total keseluruhan)
+  const pbfDebtSummary = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        pbfName: string;
+        dueIn30DaysDebt: number;
+        dueIn30DaysCount: number;
+        overdueDebt: number;
+        overdueCount: number;
+        totalDebt: number;
+        invoiceCount: number;
+      }
+    >();
+
+    let grandDueIn30DaysDebt = 0;
+    let grandOverdueDebt = 0;
+    let grandTotalDebt = 0;
+    let grandInvoiceCount = 0;
+
+    debtItems.forEach((it) => {
+      if (it.status === 'Lunas' || it.calculatedRemaining <= 0) return;
+
+      const displayName = (it.pbfName || 'Tanpa Nama PBF').trim() || 'Tanpa Nama PBF';
+      const key = displayName.toLowerCase();
+      const remaining = Number(it.calculatedRemaining) || 0;
+      const isLate = Boolean(it.isOverdue) || (it.daysRemaining !== null && it.daysRemaining < 0);
+      const isDueWithin30Days =
+        !isLate && it.daysRemaining !== null && it.daysRemaining >= 0 && it.daysRemaining <= 30;
+
+      const existing = map.get(key) || {
+        pbfName: displayName,
+        dueIn30DaysDebt: 0,
+        dueIn30DaysCount: 0,
+        overdueDebt: 0,
+        overdueCount: 0,
+        totalDebt: 0,
+        invoiceCount: 0
+      };
+
+      existing.totalDebt += remaining;
+      existing.invoiceCount += 1;
+      grandTotalDebt += remaining;
+      grandInvoiceCount += 1;
+
+      if (isLate) {
+        existing.overdueDebt += remaining;
+        existing.overdueCount += 1;
+        grandOverdueDebt += remaining;
+      } else if (isDueWithin30Days) {
+        existing.dueIn30DaysDebt += remaining;
+        existing.dueIn30DaysCount += 1;
+        grandDueIn30DaysDebt += remaining;
+      }
+
+      map.set(key, existing);
+    });
+
+    const rows = Array.from(map.values()).sort((a, b) => {
+      if (b.overdueDebt !== a.overdueDebt) return b.overdueDebt - a.overdueDebt;
+      if (b.dueIn30DaysDebt !== a.dueIn30DaysDebt) return b.dueIn30DaysDebt - a.dueIn30DaysDebt;
+      return b.totalDebt - a.totalDebt;
+    });
+
+    return {
+      rows,
+      grandDueIn30DaysDebt,
+      grandOverdueDebt,
+      grandTotalDebt,
+      grandInvoiceCount
+    };
   }, [debtItems]);
 
   const debtPaymentStatsByInvoiceId = useMemo(() => {
@@ -1162,12 +1342,44 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
   };
 
   // Helper: Hitung jatuh tempo otomatis dari tanggal + termin
-  const calculateDueDateByTerm = (baseDateStr: string, term: PurchaseInvoice['term']) => {
+  const calculateDueDateByTerm = (
+    baseDateStr: string,
+    term: PurchaseInvoice['term'],
+    customList = customDebtTerms
+  ) => {
     const base = baseDateStr ? new Date(baseDateStr) : new Date();
     if (Number.isNaN(base.getTime())) return baseDateStr;
-    const days = term === '14 Hari' ? 14 : term === '30 Hari' ? 30 : term === '60 Hari' ? 60 : 0;
+    const days = parseTermDays(String(term || ''), customList);
     base.setDate(base.getDate() + days);
     return base.toISOString().split('T')[0];
+  };
+
+  const handleSaveCustomDebtTerm = () => {
+    setCustomTermError(null);
+    const daysVal = Math.round(Number(newCustomTermDays));
+    if (!Number.isFinite(daysVal) || daysVal < 0) {
+      setCustomTermError('Waktu termin (jumlah hari) harus berupa angka 0 atau lebih.');
+      return;
+    }
+    const labelClean =
+      newCustomTermLabel.trim() || (daysVal === 0 ? 'Cash / COD' : `${daysVal} Hari`);
+
+    const nextCustomList = [
+      ...customDebtTerms.filter((t) => t.label.trim().toLowerCase() !== labelClean.toLowerCase()),
+      ...(DEFAULT_DEBT_TERMS.some((t) => t.label.toLowerCase() === labelClean.toLowerCase())
+        ? []
+        : [{ label: labelClean, days: daysVal }])
+    ];
+
+    setCustomDebtTerms(nextCustomList);
+    setOpeningDebtForm((prev) => ({
+      ...prev,
+      term: labelClean,
+      dueDate: calculateDueDateByTerm(prev.date, labelClean, nextCustomList)
+    }));
+    setIsAddingCustomTerm(false);
+    setNewCustomTermLabel('');
+    showToast(`Jenis termin "${labelClean}" (${daysVal} hari) berhasil ditambahkan.`);
   };
 
   const generateOpeningDebtRefNo = (baseDateStr?: string) => {
@@ -1176,9 +1388,33 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     return `AWAL-PBF-${cleanDate}-${suffix}`;
   };
 
+  const handleSelectOpeningSupplier = (sup: Supplier) => {
+    setOpeningDebtForm((prev) => {
+      const prevMatched = suppliers.find((s) => s.id === prev.selectedSupplierId);
+      const shouldUpdateSalesman =
+        !prev.salesman.trim() || prev.salesman === (prevMatched?.picName || '');
+      return {
+        ...prev,
+        supplierMode: 'master',
+        selectedSupplierId: sup.id,
+        pbfName: sup.name,
+        salesman: shouldUpdateSalesman ? sup.picName || '' : prev.salesman
+      };
+    });
+    setOpeningSupplierSearch(sup.name);
+    setIsSupplierSearchFiltering(false);
+    setIsOpeningSupplierDropdownOpen(false);
+  };
+
   const handleOpenAddOpeningDebt = () => {
     const today = new Date().toISOString().split('T')[0];
     setOpeningDebtError(null);
+    setCustomTermError(null);
+    setIsAddingCustomTerm(false);
+    setOpeningSupplierSearch('');
+    setIsOpeningSupplierDropdownOpen(false);
+    setIsSupplierSearchFiltering(false);
+    setActiveSupplierIndex(0);
     setEditingOpeningDebtId(null);
     setOpeningDebtForm({
       supplierMode: suppliers.length > 0 ? 'master' : 'custom',
@@ -1199,10 +1435,16 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
 
   const handleOpenEditOpeningDebt = (inv: PurchaseInvoice) => {
     setOpeningDebtError(null);
+    setCustomTermError(null);
+    setIsAddingCustomTerm(false);
+    setIsOpeningSupplierDropdownOpen(false);
+    setIsSupplierSearchFiltering(false);
+    setActiveSupplierIndex(0);
     setEditingOpeningDebtId(inv.id);
     const matchedSupplier = suppliers.find(
       (s) => s.name.trim().toLowerCase() === inv.pbfName.trim().toLowerCase()
     );
+    setOpeningSupplierSearch(matchedSupplier ? matchedSupplier.name : inv.pbfName || '');
     const appPaid = debtPaymentStatsByInvoiceId.get(inv.id)?.totalPaid || 0;
     const totalPaid =
       inv.paidAmount !== undefined
@@ -1711,7 +1953,183 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
 
       {/* TAB CONTENT 1: MANAJEMEN HUTANG (FAKTUR PBF & HUTANG AWAL DISTRIBUTOR) */}
       {activeTab === 'hutang' && (
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+        <div className="space-y-4">
+          {/* PANEL RINGKASAN HUTANG PER PBF */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+            <div className="px-6 py-4 bg-gradient-to-r from-slate-50 via-white to-indigo-50/40 border-b border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              <div>
+                <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                  <Landmark className="w-4 h-4 text-indigo-700" />
+                  <span>Ringkasan Hutang per PBF / Distributor</span>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-indigo-100 text-indigo-800 border border-indigo-200">
+                    {pbfDebtSummary.rows.length} PBF Aktif
+                  </span>
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Rekap sisa hutang aktif per distributor untuk jatuh tempo 30 hari ke depan, hutang terlambat, dan total keseluruhan
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="px-3 py-1.5 rounded-xl bg-amber-50 border border-amber-200 text-xs">
+                  <span className="text-[10px] font-bold uppercase text-amber-700 block">
+                    Jatuh Tempo &le; 30 Hari
+                  </span>
+                  <span className="font-mono font-black text-amber-900">
+                    Rp {pbfDebtSummary.grandDueIn30DaysDebt.toLocaleString('id-ID')}
+                  </span>
+                </div>
+                <div className="px-3 py-1.5 rounded-xl bg-rose-50 border border-rose-200 text-xs">
+                  <span className="text-[10px] font-bold uppercase text-rose-700 block">
+                    Hutang Terlambat
+                  </span>
+                  <span className="font-mono font-black text-rose-900">
+                    Rp {pbfDebtSummary.grandOverdueDebt.toLocaleString('id-ID')}
+                  </span>
+                </div>
+                <div className="px-3 py-1.5 rounded-xl bg-indigo-50 border border-indigo-200 text-xs">
+                  <span className="text-[10px] font-bold uppercase text-indigo-700 block">
+                    Total Keseluruhan
+                  </span>
+                  <span className="font-mono font-black text-indigo-950">
+                    Rp {pbfDebtSummary.grandTotalDebt.toLocaleString('id-ID')}
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowPbfSummaryPanel((prev) => !prev)}
+                  className="px-3 py-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 text-xs font-bold flex items-center gap-1 transition cursor-pointer"
+                >
+                  <span>{showPbfSummaryPanel ? 'Tutup Panel' : 'Buka Panel'}</span>
+                  {showPbfSummaryPanel ? (
+                    <ChevronUp className="w-4 h-4" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {showPbfSummaryPanel && (
+              <div className="overflow-x-auto max-h-72 overflow-y-auto">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead className="bg-slate-100/90 text-slate-700 uppercase font-bold text-[10px] tracking-wider border-b border-slate-200 sticky top-0 z-10">
+                    <tr>
+                      <th className="p-3 text-center w-10">No</th>
+                      <th className="p-3">Distributor / PBF</th>
+                      <th className="p-3 text-right text-amber-800">Jatuh Tempo 30 Hari Ke Depan</th>
+                      <th className="p-3 text-right text-rose-800">Hutang Terlambat</th>
+                      <th className="p-3 text-right text-indigo-900">Total Hutang Keseluruhan</th>
+                      <th className="p-3 text-center w-28">Filter</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-medium">
+                    {pbfDebtSummary.rows.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="p-6 text-center text-slate-400">
+                          <CheckCircle2 className="w-6 h-6 mx-auto mb-1.5 text-emerald-500 opacity-70" />
+                          <p className="font-bold text-slate-500">Tidak ada saldo hutang PBF aktif yang belum lunas.</p>
+                        </td>
+                      </tr>
+                    ) : (
+                      pbfDebtSummary.rows.map((row, idx) => {
+                        const isFilteredToPbf =
+                          searchTerm.trim().toLowerCase() === row.pbfName.trim().toLowerCase();
+                        return (
+                          <tr
+                            key={row.pbfName}
+                            className={`transition-colors ${
+                              isFilteredToPbf ? 'bg-indigo-50/70' : 'hover:bg-slate-50/80'
+                            }`}
+                          >
+                            <td className="p-3 text-center font-mono text-slate-400">{idx + 1}</td>
+                            <td className="p-3">
+                              <div className="font-bold text-slate-900">{row.pbfName}</div>
+                              <div className="text-[10px] text-slate-500">
+                                {row.invoiceCount} tagihan aktif
+                              </div>
+                            </td>
+                            <td className="p-3 text-right font-mono">
+                              <div
+                                className={
+                                  row.dueIn30DaysDebt > 0
+                                    ? 'font-bold text-amber-700'
+                                    : 'text-slate-400'
+                                }
+                              >
+                                Rp {row.dueIn30DaysDebt.toLocaleString('id-ID')}
+                              </div>
+                              {row.dueIn30DaysCount > 0 && (
+                                <div className="text-[10px] text-amber-600 font-sans">
+                                  {row.dueIn30DaysCount} faktur (&le; 30 hr)
+                                </div>
+                              )}
+                            </td>
+                            <td className="p-3 text-right font-mono">
+                              <div
+                                className={
+                                  row.overdueDebt > 0
+                                    ? 'font-black text-rose-700'
+                                    : 'text-slate-400'
+                                }
+                              >
+                                Rp {row.overdueDebt.toLocaleString('id-ID')}
+                              </div>
+                              {row.overdueCount > 0 && (
+                                <div className="text-[10px] text-rose-600 font-sans font-semibold">
+                                  {row.overdueCount} faktur lewat tempo
+                                </div>
+                              )}
+                            </td>
+                            <td className="p-3 text-right font-mono font-black text-slate-900">
+                              Rp {row.totalDebt.toLocaleString('id-ID')}
+                            </td>
+                            <td className="p-3 text-center">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSearchTerm(isFilteredToPbf ? '' : row.pbfName)
+                                }
+                                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition cursor-pointer ${
+                                  isFilteredToPbf
+                                    ? 'bg-indigo-700 text-white border-indigo-700'
+                                    : 'bg-white hover:bg-indigo-50 text-indigo-700 border-indigo-200'
+                                }`}
+                              >
+                                {isFilteredToPbf ? 'Reset' : 'Lihat Detail'}
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                  {pbfDebtSummary.rows.length > 0 && (
+                    <tfoot className="bg-slate-100 border-t-2 border-slate-200 font-black text-xs text-slate-900">
+                      <tr>
+                        <td colSpan={2} className="p-3">
+                          TOTAL KESELURUHAN ({pbfDebtSummary.rows.length} PBF · {pbfDebtSummary.grandInvoiceCount} Tagihan Aktif)
+                        </td>
+                        <td className="p-3 text-right font-mono text-amber-800">
+                          Rp {pbfDebtSummary.grandDueIn30DaysDebt.toLocaleString('id-ID')}
+                        </td>
+                        <td className="p-3 text-right font-mono text-rose-800">
+                          Rp {pbfDebtSummary.grandOverdueDebt.toLocaleString('id-ID')}
+                        </td>
+                        <td className="p-3 text-right font-mono text-indigo-950">
+                          Rp {pbfDebtSummary.grandTotalDebt.toLocaleString('id-ID')}
+                        </td>
+                        <td className="p-3" />
+                      </tr>
+                    </tfoot>
+                  )}
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
           <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex flex-wrap justify-between items-center gap-3">
             <div>
               <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
@@ -2001,6 +2419,7 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
             }}
             itemLabel="faktur hutang"
           />
+          </div>
         </div>
       )}
 
@@ -2922,12 +3341,13 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                     <div className="inline-flex rounded-lg bg-white border border-slate-300 p-0.5 text-[11px] font-bold">
                       <button
                         type="button"
-                        onClick={() =>
+                        onClick={() => {
+                          setIsOpeningSupplierDropdownOpen(false);
                           setOpeningDebtForm((prev) => ({
                             ...prev,
                             supplierMode: 'master'
-                          }))
-                        }
+                          }));
+                        }}
                         className={`px-2.5 py-1 rounded-md transition cursor-pointer ${
                           openingDebtForm.supplierMode === 'master'
                             ? 'bg-indigo-700 text-white'
@@ -2938,13 +3358,14 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                       </button>
                       <button
                         type="button"
-                        onClick={() =>
+                        onClick={() => {
+                          setIsOpeningSupplierDropdownOpen(false);
                           setOpeningDebtForm((prev) => ({
                             ...prev,
                             supplierMode: 'custom',
                             selectedSupplierId: ''
-                          }))
-                        }
+                          }));
+                        }}
                         className={`px-2.5 py-1 rounded-md transition cursor-pointer ${
                           openingDebtForm.supplierMode === 'custom'
                             ? 'bg-indigo-700 text-white'
@@ -2958,27 +3379,185 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                 </div>
 
                 {openingDebtForm.supplierMode === 'master' && suppliers.length > 0 ? (
-                  <select
-                    value={openingDebtForm.selectedSupplierId}
-                    onChange={(e) => {
-                      const supId = e.target.value;
-                      const found = suppliers.find((s) => s.id === supId);
-                      setOpeningDebtForm((prev) => ({
-                        ...prev,
-                        selectedSupplierId: supId,
-                        pbfName: found?.name || prev.pbfName,
-                        salesman: prev.salesman || found?.picName || ''
-                      }));
-                    }}
-                    className="w-full p-2.5 border border-slate-300 rounded-xl font-bold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  >
-                    <option value="">-- Pilih Distributor / PBF Terdaftar --</option>
-                    {suppliers.map((sup) => (
-                      <option key={sup.id} value={sup.id}>
-                        {sup.name} {sup.picName ? `(PIC: ${sup.picName})` : ''}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="relative" ref={openingSupplierContainerRef}>
+                    <div className="relative">
+                      <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        type="text"
+                        placeholder="Ketik untuk mencari nama Distributor / PBF, PIC, atau telepon..."
+                        value={openingSupplierSearch}
+                        onFocus={(e) => {
+                          e.currentTarget.select();
+                          setIsSupplierSearchFiltering(false);
+                          setActiveSupplierIndex(0);
+                          setIsOpeningSupplierDropdownOpen(true);
+                        }}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setOpeningSupplierSearch(val);
+                          setIsSupplierSearchFiltering(Boolean(val.trim()));
+                          setActiveSupplierIndex(0);
+                          setIsOpeningSupplierDropdownOpen(true);
+                          setOpeningDebtForm((prev) => ({
+                            ...prev,
+                            selectedSupplierId: '',
+                            pbfName: ''
+                          }));
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'ArrowDown') {
+                            e.preventDefault();
+                            setIsOpeningSupplierDropdownOpen(true);
+                            setActiveSupplierIndex((prev) =>
+                              filteredOpeningSuppliers.length > 0
+                                ? Math.min(prev + 1, filteredOpeningSuppliers.length - 1)
+                                : 0
+                            );
+                          } else if (e.key === 'ArrowUp') {
+                            e.preventDefault();
+                            setActiveSupplierIndex((prev) => Math.max(prev - 1, 0));
+                          } else if (e.key === 'Enter') {
+                            if (
+                              isOpeningSupplierDropdownOpen &&
+                              filteredOpeningSuppliers.length > 0
+                            ) {
+                              e.preventDefault();
+                              const target =
+                                filteredOpeningSuppliers[activeSupplierIndex] ||
+                                filteredOpeningSuppliers[0];
+                              if (target) handleSelectOpeningSupplier(target);
+                            }
+                          } else if (e.key === 'Escape') {
+                            setIsOpeningSupplierDropdownOpen(false);
+                          }
+                        }}
+                        className="w-full pl-9 pr-16 py-2.5 border border-slate-300 rounded-xl font-bold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                      <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                        {openingSupplierSearch && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setOpeningSupplierSearch('');
+                              setIsSupplierSearchFiltering(false);
+                              setActiveSupplierIndex(0);
+                              setIsOpeningSupplierDropdownOpen(true);
+                              setOpeningDebtForm((prev) => ({
+                                ...prev,
+                                selectedSupplierId: '',
+                                pbfName: ''
+                              }));
+                            }}
+                            title="Bersihkan pencarian"
+                            className="p-1 text-slate-400 hover:text-slate-700 rounded-md cursor-pointer"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsSupplierSearchFiltering(false);
+                            setActiveSupplierIndex(0);
+                            setIsOpeningSupplierDropdownOpen((prev) => !prev);
+                          }}
+                          title="Tampilkan daftar PBF"
+                          className="p-1 text-slate-400 hover:text-indigo-700 rounded-md cursor-pointer"
+                        >
+                          <ChevronDown
+                            className={`w-4 h-4 transition-transform ${
+                              isOpeningSupplierDropdownOpen ? 'rotate-180 text-indigo-600' : ''
+                            }`}
+                          />
+                        </button>
+                      </div>
+                    </div>
+
+                    {isOpeningSupplierDropdownOpen && (
+                      <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-40 max-h-56 overflow-y-auto divide-y divide-slate-100">
+                        {filteredOpeningSuppliers.length === 0 ? (
+                          <div className="p-3 text-center space-y-2">
+                            <p className="text-slate-500 text-[11px]">
+                              Tidak ditemukan PBF yang cocok dengan &quot;{openingSupplierSearch}&quot;.
+                            </p>
+                            {openingSupplierSearch.trim() && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const manualName = openingSupplierSearch.trim();
+                                  setOpeningDebtForm((prev) => ({
+                                    ...prev,
+                                    supplierMode: 'custom',
+                                    selectedSupplierId: '',
+                                    pbfName: manualName
+                                  }));
+                                  setIsOpeningSupplierDropdownOpen(false);
+                                }}
+                                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 font-bold text-[11px] cursor-pointer"
+                              >
+                                <Plus className="w-3 h-3" />
+                                Gunakan &quot;{openingSupplierSearch.trim()}&quot; secara manual
+                              </button>
+                            )}
+                          </div>
+                        ) : (
+                          filteredOpeningSuppliers.map((sup, idx) => {
+                            const isSelected = openingDebtForm.selectedSupplierId === sup.id;
+                            const isHighlighted = idx === activeSupplierIndex;
+                            return (
+                              <button
+                                key={sup.id}
+                                type="button"
+                                onMouseEnter={() => setActiveSupplierIndex(idx)}
+                                onClick={() => handleSelectOpeningSupplier(sup)}
+                                className={`w-full px-3 py-2 text-left transition cursor-pointer flex items-start justify-between gap-2 ${
+                                  isSelected
+                                    ? 'bg-indigo-50/90'
+                                    : isHighlighted
+                                    ? 'bg-slate-50'
+                                    : 'hover:bg-slate-50'
+                                }`}
+                              >
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5 font-bold text-slate-800 truncate">
+                                    <span className="truncate">{sup.name}</span>
+                                    {sup.picName && (
+                                      <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded shrink-0">
+                                        PIC: {sup.picName}
+                                      </span>
+                                    )}
+                                  </div>
+                                  {(sup.address || sup.phone) && (
+                                    <div className="text-[10px] text-slate-500 truncate mt-0.5">
+                                      {[sup.phone, sup.address].filter(Boolean).join(' • ')}
+                                    </div>
+                                  )}
+                                </div>
+                                {isSelected && (
+                                  <Check className="w-4 h-4 text-indigo-700 shrink-0 mt-0.5" />
+                                )}
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+                    )}
+
+                    {selectedOpeningSupplier && (
+                      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-slate-500 px-1">
+                        <span className="inline-flex items-center gap-1 font-semibold text-indigo-700">
+                          <Building2 className="w-3 h-3" />
+                          {selectedOpeningSupplier.name}
+                        </span>
+                        {selectedOpeningSupplier.picName && (
+                          <span>PIC: {selectedOpeningSupplier.picName}</span>
+                        )}
+                        {selectedOpeningSupplier.phone && (
+                          <span>Telp: {selectedOpeningSupplier.phone}</span>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   <input
                     type="text"
@@ -3062,23 +3641,44 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
 
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Termin Tempo</label>
-                  <select
-                    value={openingDebtForm.term}
-                    onChange={(e) => {
-                      const nextTerm = e.target.value as PurchaseInvoice['term'];
-                      setOpeningDebtForm((prev) => ({
-                        ...prev,
-                        term: nextTerm,
-                        dueDate: calculateDueDateByTerm(prev.date, nextTerm)
-                      }));
-                    }}
-                    className="w-full p-2.5 border border-slate-300 rounded-xl font-semibold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  >
-                    <option value="Cash / COD">Cash / COD</option>
-                    <option value="14 Hari">14 Hari</option>
-                    <option value="30 Hari">30 Hari</option>
-                    <option value="60 Hari">60 Hari</option>
-                  </select>
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      value={openingDebtForm.term}
+                      onChange={(e) => {
+                        const nextTerm = e.target.value as PurchaseInvoice['term'];
+                        setOpeningDebtForm((prev) => ({
+                          ...prev,
+                          term: nextTerm,
+                          dueDate: calculateDueDateByTerm(prev.date, nextTerm)
+                        }));
+                      }}
+                      className="w-full flex-1 p-2.5 border border-slate-300 rounded-xl font-semibold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    >
+                      {allDebtTermOptions.map((opt) => (
+                        <option key={opt.label} value={opt.label}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomTermError(null);
+                        setNewCustomTermLabel('');
+                        setNewCustomTermDays(45);
+                        setIsAddingCustomTerm((prev) => !prev);
+                      }}
+                      title="Tambah jenis atau waktu termin baru"
+                      aria-label="Tambah jenis atau waktu termin baru"
+                      className={`p-2.5 rounded-xl border font-bold transition cursor-pointer shrink-0 ${
+                        isAddingCustomTerm
+                          ? 'bg-indigo-700 text-white border-indigo-700'
+                          : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-300'
+                      }`}
+                    >
+                      <Plus className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
 
                 <div>
@@ -3093,6 +3693,76 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                   />
                 </div>
               </div>
+
+              {isAddingCustomTerm && (
+                <div className="bg-indigo-50/70 border border-indigo-200 rounded-2xl p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-black text-indigo-950 text-[11px] uppercase tracking-wide">
+                      Tambah Jenis / Waktu Termin Baru
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsAddingCustomTerm(false);
+                        setCustomTermError(null);
+                      }}
+                      className="text-slate-400 hover:text-slate-700 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-end">
+                    <div className="sm:col-span-6">
+                      <label className="block font-bold text-slate-700 mb-1 text-[11px]">
+                        Nama / Jenis Termin
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="Cth: 45 Hari / 90 Hari / Tempo Khusus"
+                        value={newCustomTermLabel}
+                        onChange={(e) => setNewCustomTermLabel(e.target.value)}
+                        className="w-full p-2 border border-slate-300 rounded-xl text-xs font-semibold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+                    <div className="sm:col-span-3">
+                      <label className="block font-bold text-slate-700 mb-1 text-[11px]">
+                        Waktu (Hari) *
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={newCustomTermDays}
+                        onChange={(e) =>
+                          setNewCustomTermDays(Math.max(0, Number(e.target.value) || 0))
+                        }
+                        className="w-full p-2 border border-slate-300 rounded-xl text-xs font-mono font-bold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+                    <div className="sm:col-span-3 flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={handleSaveCustomDebtTerm}
+                        className="flex-1 py-2 px-3 bg-indigo-700 hover:bg-indigo-800 text-white rounded-xl font-bold text-xs transition cursor-pointer"
+                      >
+                        Simpan
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsAddingCustomTerm(false);
+                          setCustomTermError(null);
+                        }}
+                        className="py-2 px-2.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl font-bold text-xs transition cursor-pointer"
+                      >
+                        Batal
+                      </button>
+                    </div>
+                  </div>
+                  {customTermError && (
+                    <p className="text-[11px] font-bold text-rose-700">{customTermError}</p>
+                  )}
+                </div>
+              )}
 
               {/* Nominal Hutang & Sudah Dibayar */}
               {(() => {

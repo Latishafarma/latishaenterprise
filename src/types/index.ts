@@ -863,7 +863,7 @@ export interface PurchaseInvoice {
   date: string;
   dueDate: string;
   salesman: string;
-  term: 'Cash / COD' | '14 Hari' | '30 Hari' | '60 Hari';
+  term: 'Cash / COD' | '14 Hari' | '30 Hari' | '60 Hari' | (string & {});
   usePpn: boolean;
   items: PurchaseItem[];
   grossDpp: number;

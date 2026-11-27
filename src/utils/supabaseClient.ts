@@ -12366,11 +12366,8 @@ export function supabaseRowToPurchaseInvoice(row: Record<string, any>): Purchase
       ? Number(row.remainingAmount)
       : Math.max(0, totalTagihan - paidAmount);
 
-  const rawTerm = String(row.term || '30 Hari');
-  const validTerms: PurchaseInvoice['term'][] = ['Cash / COD', '14 Hari', '30 Hari', '60 Hari'];
-  const term: PurchaseInvoice['term'] = validTerms.includes(rawTerm as PurchaseInvoice['term'])
-    ? (rawTerm as PurchaseInvoice['term'])
-    : '30 Hari';
+  const rawTerm = String(row.term || '30 Hari').trim();
+  const term: PurchaseInvoice['term'] = rawTerm || '30 Hari';
 
   const idStr = String(row.id || `INV-PBF-${Date.now()}`);
   const isOpeningDebt =
