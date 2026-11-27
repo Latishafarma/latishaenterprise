@@ -683,6 +683,41 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     return Array.from(map.values());
   }, [DEFAULT_DEBT_TERMS, customDebtTerms, openingDebtForm.term]);
 
+  // Custom Metode Pembayaran Options for PBF Debt Payment (persisted locally)
+  const DEFAULT_DEBT_PAYMENT_METHODS = useMemo(
+    () => [
+      { value: 'Transfer Bank (BCA 827-092-1122)', label: 'Transfer BCA (827-092-1122)' },
+      { value: 'Transfer Bank (Mandiri)', label: 'Transfer Mandiri' },
+      { value: 'Transfer Bank (BRI)', label: 'Transfer BRI' },
+      { value: 'Kas Apotek (Tunai)', label: 'Kas Apotek (Tunai)' },
+      { value: 'Giro / Cek Tempo', label: 'Giro / Cek Tempo' }
+    ],
+    []
+  );
+  const [customDebtPaymentMethods, setCustomDebtPaymentMethods] = useState<string[]>(() => {
+    try {
+      const saved = demoGetItem('latisha_custom_debt_payment_methods_v1');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed
+            .filter((m: unknown): m is string => typeof m === 'string' && m.trim().length > 0)
+            .map((m) => m.trim());
+        }
+      }
+    } catch {}
+    return [];
+  });
+  const [isAddingCustomPaymentMethod, setIsAddingCustomPaymentMethod] = useState(false);
+  const [newCustomPaymentMethodName, setNewCustomPaymentMethodName] = useState('');
+  const [customPaymentMethodError, setCustomPaymentMethodError] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      demoSetItem('latisha_custom_debt_payment_methods_v1', JSON.stringify(customDebtPaymentMethods));
+    } catch {}
+  }, [customDebtPaymentMethods]);
+
   // Form State for Payment
   const [paymentForm, setPaymentForm] = useState({
     amount: 0,
@@ -691,6 +726,25 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     referenceNo: '',
     notes: ''
   });
+
+  const allDebtPaymentMethodOptions = useMemo(() => {
+    const map = new Map<string, { value: string; label: string }>();
+    DEFAULT_DEBT_PAYMENT_METHODS.forEach((m) => {
+      map.set(m.value.toLowerCase(), m);
+    });
+    customDebtPaymentMethods.forEach((m) => {
+      const clean = m.trim();
+      const key = clean.toLowerCase();
+      if (key && !map.has(key)) {
+        map.set(key, { value: clean, label: clean });
+      }
+    });
+    const curMethod = (paymentForm.paymentMethod || '').trim();
+    if (curMethod && !map.has(curMethod.toLowerCase())) {
+      map.set(curMethod.toLowerCase(), { value: curMethod, label: curMethod });
+    }
+    return Array.from(map.values());
+  }, [DEFAULT_DEBT_PAYMENT_METHODS, customDebtPaymentMethods, paymentForm.paymentMethod]);
 
   // Toast / Feedback notification
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -1023,6 +1077,9 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
   // ACTION: Buka Modal Bayar Hutang (PBF)
   const handleOpenPayDebt = (inv: PurchaseInvoice & { calculatedRemaining: number; calculatedPaid: number }) => {
     setPaymentError(null);
+    setCustomPaymentMethodError(null);
+    setNewCustomPaymentMethodName('');
+    setIsAddingCustomPaymentMethod(false);
     setSelectedInvoiceForPay(inv);
     setPaymentForm({
       amount: inv.calculatedRemaining,
@@ -1031,6 +1088,30 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
       referenceNo: `TRF-${Date.now().toString().slice(-6)}`,
       notes: `Pelunasan faktur pembelian #${inv.invoiceNo} ke ${inv.pbfName}`
     });
+  };
+
+  const handleSaveCustomDebtPaymentMethod = () => {
+    setCustomPaymentMethodError(null);
+    const clean = newCustomPaymentMethodName.trim();
+    if (!clean) {
+      setCustomPaymentMethodError('Nama jenis metode pembayaran wajib diisi.');
+      return;
+    }
+    const matchedDefault = DEFAULT_DEBT_PAYMENT_METHODS.find(
+      (m) => m.value.toLowerCase() === clean.toLowerCase() || m.label.toLowerCase() === clean.toLowerCase()
+    );
+    const targetValue = matchedDefault ? matchedDefault.value : clean;
+
+    if (!matchedDefault) {
+      setCustomDebtPaymentMethods((prev) => [
+        ...prev.filter((m) => m.trim().toLowerCase() !== clean.toLowerCase()),
+        clean
+      ]);
+    }
+    setPaymentForm((prev) => ({ ...prev, paymentMethod: targetValue }));
+    setIsAddingCustomPaymentMethod(false);
+    setNewCustomPaymentMethodName('');
+    showToast(`Metode pembayaran "${targetValue}" berhasil ditambahkan.`);
   };
 
   // ACTION: Buka Modal Bayar Piutang (POS / Pasien / Mitra)
@@ -2708,8 +2789,13 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                 </div>
               </div>
               <button
-                onClick={() => setSelectedInvoiceForPay(null)}
-                className="text-rose-300 hover:text-white p-1 rounded-lg"
+                type="button"
+                onClick={() => {
+                  setIsAddingCustomPaymentMethod(false);
+                  setCustomPaymentMethodError(null);
+                  setSelectedInvoiceForPay(null);
+                }}
+                className="text-rose-300 hover:text-white p-1 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -2793,20 +2879,39 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
               </div>
 
               {/* Metode Pembayaran */}
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Metode Pembayaran *</label>
-                  <select
-                    value={paymentForm.paymentMethod}
-                    onChange={(e) => setPaymentForm({ ...paymentForm, paymentMethod: e.target.value })}
-                    className="w-full p-2.5 border border-slate-300 rounded-xl font-semibold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-rose-500"
-                  >
-                    <option value="Transfer Bank (BCA 827-092-1122)">Transfer BCA (827-092-1122)</option>
-                    <option value="Transfer Bank (Mandiri)">Transfer Mandiri</option>
-                    <option value="Transfer Bank (BRI)">Transfer BRI</option>
-                    <option value="Kas Apotek (Tunai)">Kas Apotek (Tunai)</option>
-                    <option value="Giro / Cek Tempo">Giro / Cek Tempo</option>
-                  </select>
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      value={paymentForm.paymentMethod}
+                      onChange={(e) => setPaymentForm({ ...paymentForm, paymentMethod: e.target.value })}
+                      className="w-full flex-1 p-2.5 border border-slate-300 rounded-xl font-semibold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-rose-500"
+                    >
+                      {allDebtPaymentMethodOptions.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomPaymentMethodError(null);
+                        setNewCustomPaymentMethodName('');
+                        setIsAddingCustomPaymentMethod((prev) => !prev);
+                      }}
+                      title="Tambah jenis metode pembayaran baru"
+                      aria-label="Tambah jenis metode pembayaran baru"
+                      className={`p-2.5 rounded-xl border font-bold transition cursor-pointer shrink-0 ${
+                        isAddingCustomPaymentMethod
+                          ? 'bg-rose-700 text-white border-rose-700'
+                          : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-300'
+                      }`}
+                    >
+                      <Plus className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
 
                 <div>
@@ -2819,6 +2924,68 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                   />
                 </div>
               </div>
+
+              {isAddingCustomPaymentMethod && (
+                <div className="bg-rose-50/75 border border-rose-200 rounded-2xl p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-black text-rose-950 text-[11px] uppercase tracking-wide">
+                      Tambah Jenis Metode Pembayaran Baru
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsAddingCustomPaymentMethod(false);
+                        setCustomPaymentMethodError(null);
+                      }}
+                      className="text-slate-400 hover:text-slate-700 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-end">
+                    <div className="sm:col-span-8">
+                      <label className="block font-bold text-slate-700 mb-1 text-[11px]">
+                        Nama Metode / Akun Pembayaran *
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="Cth: Transfer Bank BNI / QRIS Apotek / Petty Cash"
+                        value={newCustomPaymentMethodName}
+                        onChange={(e) => setNewCustomPaymentMethodName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleSaveCustomDebtPaymentMethod();
+                          }
+                        }}
+                        className="w-full p-2 border border-slate-300 rounded-xl text-xs font-semibold text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-rose-500"
+                      />
+                    </div>
+                    <div className="sm:col-span-4 flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={handleSaveCustomDebtPaymentMethod}
+                        className="flex-1 py-2 px-3 bg-rose-700 hover:bg-rose-800 text-white rounded-xl font-bold text-xs transition cursor-pointer"
+                      >
+                        Simpan
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsAddingCustomPaymentMethod(false);
+                          setCustomPaymentMethodError(null);
+                        }}
+                        className="py-2 px-2.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl font-bold text-xs transition cursor-pointer"
+                      >
+                        Batal
+                      </button>
+                    </div>
+                  </div>
+                  {customPaymentMethodError && (
+                    <p className="text-[11px] font-bold text-rose-700">{customPaymentMethodError}</p>
+                  )}
+                </div>
+              )}
 
               {/* No Bukti Transfer / Referensi */}
               <div>
@@ -2859,6 +3026,8 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                   type="button"
                   onClick={() => {
                     setPaymentError(null);
+                    setIsAddingCustomPaymentMethod(false);
+                    setCustomPaymentMethodError(null);
                     setSelectedInvoiceForPay(null);
                   }}
                   className="px-5 py-2.5 bg-slate-200 hover:bg-slate-300 rounded-xl font-bold text-slate-700 transition cursor-pointer"
