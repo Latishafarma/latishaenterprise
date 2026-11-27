@@ -29,7 +29,10 @@ import {
   AlertCircle,
   Edit2,
   Trash2,
-  Landmark
+  Landmark,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown
 } from 'lucide-react';
 import {
   PurchaseInvoice,
@@ -123,6 +126,8 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'belum_lunas' | 'sebagian' | 'lunas' | 'overdue'>('all');
   const [debtSourceFilter, setDebtSourceFilter] = useState<'all' | 'purchase' | 'opening'>('all');
+  const [debtSortKey, setDebtSortKey] = useState<'date' | 'dueDate' | null>(null);
+  const [debtSortOrder, setDebtSortOrder] = useState<'asc' | 'desc'>('asc');
 
   // Local storage for payment history and cash flow ledger
   const [debtPayments, setDebtPayments] = useState<DebtPaymentRecord[]>(() => {
@@ -711,9 +716,37 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     return map;
   }, [debtPayments]);
 
-  // Filtered Debt List
+  const toDebtSortTimestamp = (dateStr?: string): number | null => {
+    const raw = (dateStr || '').trim();
+    if (!raw) return null;
+    const dmyMatch = raw.match(/^(\d{2})[/-](\d{2})[/-](\d{4})$/);
+    if (dmyMatch) {
+      const ts = new Date(`${dmyMatch[3]}-${dmyMatch[2]}-${dmyMatch[1]}T00:00:00`).getTime();
+      return Number.isNaN(ts) ? null : ts;
+    }
+    const ymdPrefix = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (ymdPrefix) {
+      const ts = new Date(`${ymdPrefix[1]}-${ymdPrefix[2]}-${ymdPrefix[3]}T00:00:00`).getTime();
+      return Number.isNaN(ts) ? null : ts;
+    }
+    const parsed = Date.parse(raw);
+    return Number.isNaN(parsed) ? null : parsed;
+  };
+
+  const handleToggleDebtSort = (key: 'date' | 'dueDate') => {
+    if (debtSortKey === key) {
+      setDebtSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setDebtSortKey(key);
+      // Tgl Faktur default terbaru dulu (desc), Jatuh Tempo default terdekat/lewat tempo dulu (asc)
+      setDebtSortOrder(key === 'dueDate' ? 'asc' : 'desc');
+    }
+    setDebtPage(1);
+  };
+
+  // Filtered & Sorted Debt List
   const filteredDebtList = useMemo(() => {
-    return debtItems.filter((inv) => {
+    const filtered = debtItems.filter((inv) => {
       if (debtSourceFilter === 'opening' && !isOpeningDebtInvoice(inv)) return false;
       if (debtSourceFilter === 'purchase' && isOpeningDebtInvoice(inv)) return false;
 
@@ -734,7 +767,25 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
 
       return true;
     });
-  }, [debtItems, debtSourceFilter, searchTerm, statusFilter]);
+
+    if (!debtSortKey) return filtered;
+
+    return [...filtered].sort((a, b) => {
+      const tsA = toDebtSortTimestamp(debtSortKey === 'dueDate' ? a.dueDate : a.date);
+      const tsB = toDebtSortTimestamp(debtSortKey === 'dueDate' ? b.dueDate : b.date);
+
+      if (tsA === null && tsB === null) {
+        return (a.invoiceNo || '').localeCompare(b.invoiceNo || '');
+      }
+      if (tsA === null) return 1;
+      if (tsB === null) return -1;
+
+      if (tsA !== tsB) {
+        return debtSortOrder === 'asc' ? tsA - tsB : tsB - tsA;
+      }
+      return (a.invoiceNo || '').localeCompare(b.invoiceNo || '');
+    });
+  }, [debtItems, debtSourceFilter, searchTerm, statusFilter, debtSortKey, debtSortOrder]);
 
   // Filtered Receivable List
   const filteredReceivableList = useMemo(() => {
@@ -1726,8 +1777,66 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
                   <th className="p-3 text-center w-10">No</th>
                   <th className="p-3">No. Faktur PBF</th>
                   <th className="p-3">Distributor / PBF</th>
-                  <th className="p-3">Tgl Faktur</th>
-                  <th className="p-3">Jatuh Tempo</th>
+                  <th
+                    className="p-3"
+                    aria-sort={
+                      debtSortKey === 'date'
+                        ? debtSortOrder === 'asc'
+                          ? 'ascending'
+                          : 'descending'
+                        : 'none'
+                    }
+                  >
+                    <button
+                      type="button"
+                      onClick={() => handleToggleDebtSort('date')}
+                      title="Urutkan berdasarkan Tanggal Faktur"
+                      className={`inline-flex items-center gap-1 uppercase font-bold tracking-wider transition cursor-pointer hover:text-rose-700 ${
+                        debtSortKey === 'date' ? 'text-rose-700' : 'text-slate-700'
+                      }`}
+                    >
+                      <span>Tgl Faktur</span>
+                      {debtSortKey === 'date' ? (
+                        debtSortOrder === 'asc' ? (
+                          <ArrowUp className="w-3.5 h-3.5 text-rose-700" />
+                        ) : (
+                          <ArrowDown className="w-3.5 h-3.5 text-rose-700" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
+                      )}
+                    </button>
+                  </th>
+                  <th
+                    className="p-3"
+                    aria-sort={
+                      debtSortKey === 'dueDate'
+                        ? debtSortOrder === 'asc'
+                          ? 'ascending'
+                          : 'descending'
+                        : 'none'
+                    }
+                  >
+                    <button
+                      type="button"
+                      onClick={() => handleToggleDebtSort('dueDate')}
+                      title="Urutkan berdasarkan Tanggal Jatuh Tempo"
+                      className={`inline-flex items-center gap-1 uppercase font-bold tracking-wider transition cursor-pointer hover:text-rose-700 ${
+                        debtSortKey === 'dueDate' ? 'text-rose-700' : 'text-slate-700'
+                      }`}
+                    >
+                      <span>Jatuh Tempo</span>
+                      {debtSortKey === 'dueDate' ? (
+                        debtSortOrder === 'asc' ? (
+                          <ArrowUp className="w-3.5 h-3.5 text-rose-700" />
+                        ) : (
+                          <ArrowDown className="w-3.5 h-3.5 text-rose-700" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
+                      )}
+                    </button>
+                  </th>
                   <th className="p-3 text-right">Total Tagihan</th>
                   <th className="p-3 text-right">Sudah Dibayar</th>
                   <th className="p-3 text-right">Sisa Hutang</th>
