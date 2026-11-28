@@ -2947,17 +2947,7 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
             </div>
           ) : (
             <div className="grid grid-cols-2 pt-8 text-xs">
-              <div className="text-center space-y-12">
-                <p className="font-semibold text-slate-700">
-                  Mengetahui,<br />
-                  Dokter Penanggung Jawab Klinis (DPJ),
-                </p>
-                <div>
-                  <p className="font-extrabold underline text-slate-900">{dpjProfile.name}</p>
-                  <p className="text-[10px] text-slate-600 font-mono">SIP: {dpjProfile.sip}</p>
-                  <p className="text-[10px] text-slate-500 font-mono">{dpjProfile.idi}</p>
-                </div>
-              </div>
+              <div />
               <div className="text-center space-y-12">
                 <p className="font-semibold text-slate-700">
                   {pharmacyProfile.city}, {new Date().toLocaleDateString('id-ID')}<br />
