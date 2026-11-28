@@ -296,6 +296,7 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
     isPartialSp?: boolean;
   } | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isSavingOrder, setIsSavingOrder] = useState(false);
   const [sendingWaPoId, setSendingWaPoId] = useState<string | null>(null);
   const [waPreviewModal, setWaPreviewModal] = useState<PurchaseOrderPdfPreviewData | null>(null);
   const [waPhoneInput, setWaPhoneInput] = useState('');
@@ -1000,6 +1001,7 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
   // Save Order
   const handleSaveOrder = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSavingOrder) return;
     setOrderFormError(null);
     if (!orderForm.supplierName.trim()) {
       setOrderFormError('Nama Supplier / PBF wajib dipilih!');
@@ -1010,86 +1012,100 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
       return;
     }
 
-    const orderDateObj = new Date(orderForm.date);
-    const validOrderDate = isNaN(orderDateObj.getTime()) ? new Date() : orderDateObj;
-    const yyyyMm = `${validOrderDate.getFullYear()}${String(validOrderDate.getMonth() + 1).padStart(2, '0')}`;
+    setIsSavingOrder(true);
+    try {
+      const orderDateObj = new Date(orderForm.date);
+      const validOrderDate = isNaN(orderDateObj.getTime()) ? new Date() : orderDateObj;
+      const yyyyMm = `${validOrderDate.getFullYear()}${String(validOrderDate.getMonth() + 1).padStart(2, '0')}`;
 
-    const maxSeq = purchaseOrders.reduce((max, existingPo) => {
-      const m = existingPo.poNumber?.match(/(\d{3,})$/);
-      const num = m ? parseInt(m[1], 10) : 0;
-      return Math.max(max, isNaN(num) ? 0 : num);
-    }, 0);
+      const maxSeq = purchaseOrders.reduce((max, existingPo) => {
+        const m = existingPo.poNumber?.match(/(\d{3,})$/);
+        const num = m ? parseInt(m[1], 10) : 0;
+        return Math.max(max, isNaN(num) ? 0 : num);
+      }, 0);
 
-    const orderIndex = editingOrderId
-      ? parseInt(editingOrderId.replace(/\D/g, '').slice(-3), 10) || maxSeq + 1
-      : maxSeq + 1;
+      const orderIndex = editingOrderId
+        ? parseInt(editingOrderId.replace(/\D/g, '').slice(-3), 10) || maxSeq + 1
+        : maxSeq + 1;
 
-    const spNumbers: Record<SPGroupType, string> = {
-      REG: generateSPNumber('REG', orderIndex, orderForm.date),
-      ALK: generateSPNumber('ALK', orderIndex, orderForm.date),
-      PRE: generateSPNumber('PRE', orderIndex, orderForm.date),
-      OOT: generateSPNumber('OOT', orderIndex, orderForm.date),
-      PSI: generateSPNumber('PSI', orderIndex, orderForm.date),
-      NAR: generateSPNumber('NAR', orderIndex, orderForm.date)
-    };
-
-    const totalCost = orderForm.items.reduce((sum, it) => sum + it.subtotal, 0);
-
-    let savedPo: PurchaseOrder;
-    if (editingOrderId) {
-      const existing = purchaseOrders.find((p) => p.id === editingOrderId);
-      savedPo = {
-        ...(existing || ({} as PurchaseOrder)),
-        id: editingOrderId,
-        poNumber: existing?.poNumber || editingOrderId,
-        date: orderForm.date,
-        supplierId: orderForm.supplierId,
-        supplierName: orderForm.supplierName,
-        supplierAddress: orderForm.supplierAddress,
-        supplierPhone: orderForm.supplierPhone,
-        supplierLicenseNo: orderForm.supplierLicenseNo,
-        spNumbers: existing?.spNumbers || spNumbers,
-        status: existing?.status || 'Diproses',
-        items: orderForm.items,
-        notes: orderForm.notes,
-        totalEstimatedCost: totalCost,
-        branchId: existing?.branchId || currentBranch?.id || 'BR-01',
-        petugas: existing?.petugas || userName,
-        updatedAt: new Date().toISOString()
+      const spNumbers: Record<SPGroupType, string> = {
+        REG: generateSPNumber('REG', orderIndex, orderForm.date),
+        ALK: generateSPNumber('ALK', orderIndex, orderForm.date),
+        PRE: generateSPNumber('PRE', orderIndex, orderForm.date),
+        OOT: generateSPNumber('OOT', orderIndex, orderForm.date),
+        PSI: generateSPNumber('PSI', orderIndex, orderForm.date),
+        NAR: generateSPNumber('NAR', orderIndex, orderForm.date)
       };
-    } else {
-      const uniqueSuffix = isDemoSandbox ? `-DEMO-${String(Date.now()).slice(-4)}` : `-${String(Date.now()).slice(-4)}`;
-      const generatedPoId = `PO-${yyyyMm}-${String(orderIndex).padStart(3, '0')}`;
-      const existingSameId = purchaseOrders.some((p) => p.id === generatedPoId);
-      const finalId = existingSameId ? `${generatedPoId}${uniqueSuffix}` : generatedPoId;
 
-      savedPo = {
-        id: finalId,
-        poNumber: generatedPoId,
-        date: orderForm.date,
-        supplierId: orderForm.supplierId,
-        supplierName: orderForm.supplierName,
-        supplierAddress: orderForm.supplierAddress,
-        supplierPhone: orderForm.supplierPhone,
-        supplierLicenseNo: orderForm.supplierLicenseNo,
-        spNumbers,
-        status: 'Diproses',
-        items: orderForm.items,
-        notes: orderForm.notes,
-        totalEstimatedCost: totalCost,
-        branchId: currentBranch?.id || 'BR-01',
-        petugas: userName,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
+      const totalCost = orderForm.items.reduce((sum, it) => sum + it.subtotal, 0);
+
+      let savedPo: PurchaseOrder;
+      if (editingOrderId) {
+        const existing = purchaseOrders.find((p) => p.id === editingOrderId);
+        savedPo = {
+          ...(existing || ({} as PurchaseOrder)),
+          id: editingOrderId,
+          poNumber: existing?.poNumber || editingOrderId,
+          date: orderForm.date,
+          supplierId: orderForm.supplierId,
+          supplierName: orderForm.supplierName,
+          supplierAddress: orderForm.supplierAddress,
+          supplierPhone: orderForm.supplierPhone,
+          supplierLicenseNo: orderForm.supplierLicenseNo,
+          spNumbers: existing?.spNumbers || spNumbers,
+          status: existing?.status || 'Diproses',
+          items: orderForm.items,
+          notes: orderForm.notes,
+          totalEstimatedCost: totalCost,
+          branchId: existing?.branchId || currentBranch?.id || 'BR-01',
+          petugas: existing?.petugas || userName,
+          updatedAt: new Date().toISOString()
+        };
+      } else {
+        const uniqueSuffix = isDemoSandbox ? `-DEMO-${String(Date.now()).slice(-4)}` : `-${String(Date.now()).slice(-4)}`;
+        const generatedPoId = `PO-${yyyyMm}-${String(orderIndex).padStart(3, '0')}`;
+        const existingSameId = purchaseOrders.some((p) => p.id === generatedPoId);
+        const finalId = existingSameId ? `${generatedPoId}${uniqueSuffix}` : generatedPoId;
+
+        savedPo = {
+          id: finalId,
+          poNumber: generatedPoId,
+          date: orderForm.date,
+          supplierId: orderForm.supplierId,
+          supplierName: orderForm.supplierName,
+          supplierAddress: orderForm.supplierAddress,
+          supplierPhone: orderForm.supplierPhone,
+          supplierLicenseNo: orderForm.supplierLicenseNo,
+          spNumbers,
+          status: 'Diproses',
+          items: orderForm.items,
+          notes: orderForm.notes,
+          totalEstimatedCost: totalCost,
+          branchId: currentBranch?.id || 'BR-01',
+          petugas: userName,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+      }
+
+      const persistedOk = await persistPurchaseOrder(savedPo);
+      if (persistedOk) {
+        setSyncToast({
+          type: 'success',
+          message: isDemoSandbox
+            ? `Pesanan Pembelian #${savedPo.poNumber} berhasil disimpan di Mode Demo.`
+            : `Pesanan Pembelian #${savedPo.poNumber} & Riwayat SP berhasil disimpan dan tersinkronisasi ke Supabase.`
+        });
+      }
+
+      setIsOrderModalOpen(false);
+      setEditingOrderId(null);
+      setCheckedMedicineIds(new Set());
+      setActiveTab('orders');
+      setPrintModalPo(savedPo);
+    } finally {
+      setIsSavingOrder(false);
     }
-
-    await persistPurchaseOrder(savedPo);
-
-    setIsOrderModalOpen(false);
-    setCheckedMedicineIds(new Set());
-    setActiveTab('orders');
-    setPrintModalPo(savedPo);
   };
 
   // Change Qty in Order Form
@@ -1182,7 +1198,7 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
   }, [orderForm.items]);
 
   // Print SP Handler for a specific PO and category + update print log 2-way to Supabase
-  const handlePrintSpecificSP = (po: PurchaseOrder, spType: SPGroupType | 'ALL') => {
+  const handlePrintSpecificSP = async (po: PurchaseOrder, spType: SPGroupType | 'ALL') => {
     const isAll = spType === 'ALL';
     const filteredItems = isAll ? po.items : po.items.filter((it) => it.spType === spType);
     if (filteredItems.length === 0) {
@@ -1250,6 +1266,7 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
       spPrintLogs: nextPrintLogs,
       updatedAt: new Date().toISOString()
     };
+    setPrintModalPo((prev) => (prev && prev.id === po.id ? updatedPo : prev));
     void persistPurchaseOrder(updatedPo, { skipAudit: true });
 
     const serializedData = encodeURIComponent(JSON.stringify(spData));
@@ -2683,15 +2700,21 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
                   <button
                     type="button"
                     onClick={() => setIsOrderModalOpen(false)}
-                    className="px-4 py-2.5 bg-slate-200 hover:bg-slate-300 rounded-xl font-bold text-xs cursor-pointer"
+                    disabled={isSavingOrder}
+                    className="px-4 py-2.5 bg-slate-200 hover:bg-slate-300 disabled:opacity-50 rounded-xl font-bold text-xs cursor-pointer"
                   >
                     Batal
                   </button>
                   <button
                     type="submit"
-                    className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-xl shadow-md uppercase tracking-wider text-xs cursor-pointer"
+                    disabled={isSavingOrder}
+                    className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-black rounded-xl shadow-md uppercase tracking-wider text-xs cursor-pointer"
                   >
-                    {editingOrderId ? 'Simpan Perubahan Pesanan' : 'Proses & Simpan Pesanan Pembelian'}
+                    {isSavingOrder
+                      ? 'Menyimpan ke Supabase...'
+                      : editingOrderId
+                      ? 'Simpan Perubahan Pesanan'
+                      : 'Proses & Simpan Pesanan Pembelian'}
                   </button>
                 </div>
               </div>
@@ -2819,6 +2842,19 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
             </div>
 
             <div className="p-6 space-y-4 text-xs max-h-[82vh] overflow-y-auto custom-scrollbar">
+              {syncToast && (
+                <div
+                  className={`p-3 rounded-xl border text-xs flex items-center justify-between gap-2 ${
+                    syncToast.type === 'success'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                      : syncToast.type === 'warning'
+                      ? 'bg-amber-50 border-amber-200 text-amber-900'
+                      : 'bg-rose-50 border-rose-200 text-rose-900'
+                  }`}
+                >
+                  <span className="font-semibold">{syncToast.message}</span>
+                </div>
+              )}
               <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl flex flex-wrap justify-between items-center gap-2">
                 <div>
                   <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">

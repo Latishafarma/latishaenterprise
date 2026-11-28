@@ -100,7 +100,10 @@ interface DebtReceivableViewProps {
     options?: { skipRemoteUpload?: boolean }
   ) => void;
   onDeleteOpeningDebtRecord?: (id: string) => void;
-  onUpdateTransactions: (transactions: Transaction[]) => void;
+  onUpdateTransactions: (
+    transactions: Transaction[],
+    options?: { skipRemoteUpload?: boolean }
+  ) => void;
   userName?: string;
   onAddAuditLog?: (module: string, action: string) => void;
   isDemoSandbox?: boolean;
@@ -465,13 +468,33 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
       onUpdatePurchaseInvoices(mergedInvoices, { skipRemoteUpload: true });
       markInitialCloudSyncCompleted('purchase_invoices');
 
-      // 2. Merge & seed Transactions (riwayat_penjualan)
-      if (trxRes.data && trxRes.data.length > 0) {
-        const trxMap = new Map<string, Transaction>();
-        transactions.forEach((t) => trxMap.set(t.id, t));
-        trxRes.data.forEach((t) => trxMap.set(t.id, t));
+      // 2. Merge & seed Transactions (riwayat_penjualan) secara tombstone-safe & preserve shippingFee
+      if (trxRes.data) {
+        const deletedTrxSet = getDeletedIdsSet('transactions');
+        const pendingTrxSyncSet = getPendingSyncIdsSet('transactions');
+        const localTrxMap = new Map<string, Transaction>();
+        transactions
+          .filter((t) => t.id && !deletedTrxSet.has(t.id))
+          .forEach((t) => localTrxMap.set(t.id, t));
+
+        const trxMap = new Map<string, Transaction>(localTrxMap);
+        trxRes.data.forEach((remoteTrx) => {
+          if (!remoteTrx.id || deletedTrxSet.has(remoteTrx.id)) return;
+          if (pendingTrxSyncSet.has(remoteTrx.id) && localTrxMap.has(remoteTrx.id)) {
+            trxMap.set(remoteTrx.id, localTrxMap.get(remoteTrx.id)!);
+            return;
+          }
+          const localMatch = localTrxMap.get(remoteTrx.id);
+          trxMap.set(remoteTrx.id, {
+            ...remoteTrx,
+            shippingFee:
+              remoteTrx.shippingFee !== undefined
+                ? remoteTrx.shippingFee
+                : localMatch?.shippingFee
+          });
+        });
         const mergedTrx = Array.from(trxMap.values());
-        onUpdateTransactions(mergedTrx);
+        onUpdateTransactions(mergedTrx, { skipRemoteUpload: true });
       }
 
       // 3. Merge & seed DebtPayments (pembayaran_hutang)
@@ -826,26 +849,28 @@ export const DebtReceivableView: React.FC<DebtReceivableViewProps> = ({
     return diff;
   };
 
-  // 1. DATA HUTANG (Dari purchaseInvoices)
+  // 1. DATA HUTANG (Dari purchaseInvoices yang sudah diproses)
   const debtItems = useMemo(() => {
-    return purchaseInvoices.map((inv) => {
-      const total = inv.totalTagihan;
-      let paid = inv.paidAmount;
-      if (paid === undefined) {
-        paid = inv.status === 'Lunas' ? total : 0;
-      }
-      const remaining = inv.remainingAmount !== undefined ? inv.remainingAmount : Math.max(0, total - paid);
-      const overdue = remaining > 0 && isOverdue(inv.dueDate);
-      const days = getDaysRemaining(inv.dueDate);
+    return purchaseInvoices
+      .filter((inv) => inv.processingStatus !== 'DRAFT')
+      .map((inv) => {
+        const total = inv.totalTagihan;
+        let paid = inv.paidAmount;
+        if (paid === undefined) {
+          paid = inv.status === 'Lunas' ? total : 0;
+        }
+        const remaining = inv.remainingAmount !== undefined ? inv.remainingAmount : Math.max(0, total - paid);
+        const overdue = remaining > 0 && isOverdue(inv.dueDate);
+        const days = getDaysRemaining(inv.dueDate);
 
-      return {
-        ...inv,
-        calculatedPaid: paid,
-        calculatedRemaining: remaining,
-        isOverdue: overdue,
-        daysRemaining: days
-      };
-    });
+        return {
+          ...inv,
+          calculatedPaid: paid,
+          calculatedRemaining: remaining,
+          isOverdue: overdue,
+          daysRemaining: days
+        };
+      });
   }, [purchaseInvoices]);
 
   // 2. DATA PIUTANG (Dari transactions)

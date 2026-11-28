@@ -847,8 +847,8 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
   const totalRetailValue = medicines.reduce((acc, m) => acc + m.stock * m.sellPrice, 0);
   const totalStockItems = medicines.reduce((acc, m) => acc + m.stock, 0);
 
-  // Accounts Payable to PBF (termasuk faktur pembelian & saldo hutang awal yang belum/sebagian lunas)
-  const unpaidInvoices = purchaseInvoices.filter((i) => i.status !== 'Lunas');
+  // Accounts Payable to PBF (termasuk faktur pembelian yang sudah diproses & saldo hutang awal yang belum/sebagian lunas)
+  const unpaidInvoices = purchaseInvoices.filter((i) => i.processingStatus !== 'DRAFT' && i.status !== 'Lunas');
   const totalHutangPbf = unpaidInvoices.reduce((acc, i) => {
     const paid = i.paidAmount !== undefined ? i.paidAmount : 0;
     const rem = i.remainingAmount !== undefined ? i.remainingAmount : Math.max(0, i.totalTagihan - paid);
@@ -2022,7 +2022,9 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y font-medium text-slate-700">
-                {purchaseInvoices.map((inv) => {
+                {purchaseInvoices
+                  .filter((inv) => inv.processingStatus !== 'DRAFT')
+                  .map((inv) => {
                   const paid = inv.paidAmount !== undefined ? inv.paidAmount : inv.status === 'Lunas' ? inv.totalTagihan : 0;
                   const rem = inv.remainingAmount !== undefined ? inv.remainingAmount : Math.max(0, inv.totalTagihan - paid);
                   return (

@@ -425,6 +425,15 @@
   ],
   "medicines": [
     {
+      "name": "ALAT NEBULIZER ABN COMP 1",
+      "category": "Alat Kesehatan",
+      "kelas": "Alat Kesehatan & Respirasi",
+      "kekuatan": "-",
+      "stock": 0,
+      "unit": "BOX",
+      "sellPrice": 750000
+    },
+    {
       "name": "PRATIFAR 20 mg",
       "category": "Obat Keras",
       "kelas": "Antagonis Reseptor H2 / Saluran Pencernaan",
@@ -434,6 +443,15 @@
       "sellPrice": 668
     },
     {
+      "name": "BENEURON TABLET",
+      "category": "Vitamin/Suplemen",
+      "kelas": "Vitamin & Suplemen / Neurotropik",
+      "kekuatan": "Vit B1, B6, B12",
+      "stock": 0,
+      "unit": "Strip",
+      "sellPrice": 8318
+    },
+    {
       "name": "PRATIFAR 40 MG",
       "category": "Obat Keras",
       "kelas": "Antagonis Reseptor H2 / Saluran Pencernaan",
@@ -441,6 +459,24 @@
       "stock": 0,
       "unit": "Tablet",
       "sellPrice": 898
+    },
+    {
+      "name": "MOLACORT 0.5MG TABLET",
+      "category": "Obat Keras (Merah/K)",
+      "kelas": "Kortikosteroid / Antiinflamasi",
+      "kekuatan": "Dexamethasone 0.5mg",
+      "stock": 0,
+      "unit": "STRIP",
+      "sellPrice": 2984
+    },
+    {
+      "name": "MOLACORT 0.75MG TABLET",
+      "category": "Obat Keras (Merah/K)",
+      "kelas": "Kortikosteroid / Antiinflamasi",
+      "kekuatan": "Dexamethasone 0.75mg",
+      "stock": 0,
+      "unit": "STRIP",
+      "sellPrice": 2828
     },
     {
       "name": "SANMOL SYR 60ML",
@@ -2591,7 +2627,7 @@
       "kekuatan": "Cookies Ingredients",
       "stock": 0,
       "unit": "PCS",
-      "sellPrice": 5000
+      "sellPrice": 6000
     },
     {
       "name": "HALOCOKO ICE CREAM SUTACO TARO",
@@ -2609,7 +2645,7 @@
       "kekuatan": "Ice Cream Ingredients (Chocolate)",
       "stock": 0,
       "unit": "PCS",
-      "sellPrice": 3453
+      "sellPrice": 3000
     },
     {
       "name": "HALOCOKO YOGURT KRISPI",
@@ -2618,7 +2654,7 @@
       "kekuatan": "Yogurt Confectionery Ingredients",
       "stock": 0,
       "unit": "PCS",
-      "sellPrice": 3453
+      "sellPrice": 2000
     },
     {
       "name": "ANTIMO BOX 30 STRIP @ 10 TABLET",
@@ -3698,7 +3734,7 @@
       "kekuatan": "Chocolate Confectionery Ingredients",
       "stock": 0,
       "unit": "PCS",
-      "sellPrice": 6661
+      "sellPrice": 6000
     },
     {
       "name": "IMODIAR 2 MG BOX 10 STR @ 10 TAB",
@@ -4418,7 +4454,7 @@
       "kekuatan": "Yogurt Confectionery Ingredients",
       "stock": 0,
       "unit": "PCS",
-      "sellPrice": 2295
+      "sellPrice": 2000
     },
     {
       "name": "KATERGI YEKATRIA 50MG BOX 10 STR @ 10 TAB",
@@ -9806,10 +9842,10 @@
       "name": "PARAFLU BOX 10 STR @ 10 CAP",
       "category": "Obat Bebas Terbatas (Biru)",
       "kelas": "Saluran Pernafasan / Batuk & Pilek",
-      "kekuatan": "Paracetamol, Phenylpropanolamine, CTM",
+      "kekuatan": "PPA 12.5MG",
       "stock": 0,
       "unit": "CAP",
-      "sellPrice": 870
+      "sellPrice": 668
     },
     {
       "name": "PARAFLU SYR 60 ML",
@@ -12374,7 +12410,7 @@
       "kekuatan": "Phenylpropanolamine 15mg",
       "stock": 0,
       "unit": "TAB",
-      "sellPrice": 1132
+      "sellPrice": 1060
     },
     {
       "name": "TERAZOSIN OGB DEXA MEDICA 2MG BOX 10 STR @ 10 TAB",
@@ -13887,52 +13923,12 @@
       "stock": 0,
       "unit": "STR",
       "sellPrice": 2226
-    },
-    {
-      "name": "VITAMIN B COMPLEX IMFARMIND 1 BTL @ 100 TAB",
-      "category": "Vitamin/Suplemen",
-      "kelas": "Vitamin & Suplemen",
-      "kekuatan": "Vitamin B Complex",
-      "stock": 0,
-      "unit": "TAB",
-      "sellPrice": 293
-    },
-    {
-      "name": "VITAMIN B COMPLEX NOVAPHARIN BOX 10 STR @10 TAB",
-      "category": "Vitamin/Suplemen",
-      "kelas": "Vitamin & Suplemen",
-      "kekuatan": "Vitamin B Complex",
-      "stock": 0,
-      "unit": "TAB",
-      "sellPrice": 210
-    },
-    {
-      "name": "VITAMIN B1 PIM 5 MG BTL @100 TAB",
-      "category": "Vitamin/Suplemen",
-      "kelas": "Vitamin & Suplemen",
-      "kekuatan": "Vitamin B1 (Thiamine) 5 mg",
-      "stock": 0,
-      "unit": "TAB",
-      "sellPrice": 148
-    },
-    {
-      "name": "VITAMIN B12 PIM 1 BTL @ 100 TAB",
-      "category": "Vitamin/Suplemen",
-      "kelas": "Vitamin & Suplemen",
-      "kekuatan": "Vitamin B12 (Cyanocobalamin)",
-      "stock": 0,
-      "unit": "TAB",
-      "sellPrice": 92
     }
   ],
   "activePromos": [
     {
       "title": "PROMO ALL PRODUK ALL CUSTOMER",
       "subtitle": "Order Melalui Portal  Hemat 2% All Product"
-    },
-    {
-      "title": "vitamin C 500mg promo besar disc 20%, jaga imunitas selalu saat aktivitas",
-      "subtitle": "Hemat 20% · Berlaku 2026-11-23 s.d. 2026-12-07"
     },
     {
       "title": "ODER BY PORTAL MITRA",
@@ -13945,10 +13941,6 @@
     {
       "title": "Order Melalui Portal  Hemat 2% All Product",
       "subtitle": "Diskon 2%"
-    },
-    {
-      "title": "paket hemat  : beli strip GCU gratis alat cek GCU Sinocare",
-      "subtitle": "Diskon 10%"
     },
     {
       "title": "vitamin C 500mg promo besar disc 20%, jaga imunitas selalu saat aktivitas",
@@ -13985,12 +13977,12 @@
       },
       {
         "name": "Biaya Fasilitas",
-        "price": 3000
+        "price": 9000
       }
     ]
   },
   "queueSummary": {
     "waitingCount": 0
   },
-  "updatedAt": 1795700069555
+  "updatedAt": 1795825725087
 }

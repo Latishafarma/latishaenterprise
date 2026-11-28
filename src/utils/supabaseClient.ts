@@ -333,6 +333,15 @@ export function setSupabaseConfig(cfg: Partial<SupabaseConfig>): void {
   if (cfg.marketingTable !== undefined) {
     localStorage.setItem(SUPABASE_STORAGE_KEYS.MARKETING_TABLE, cfg.marketingTable.trim() || DEFAULT_MARKETING_TABLE);
   }
+  if (cfg.pphConfigTable !== undefined) {
+    localStorage.setItem(SUPABASE_STORAGE_KEYS.PPH_CONFIG_TABLE, cfg.pphConfigTable.trim() || DEFAULT_PPH_CONFIG_TABLE);
+  }
+  if (cfg.pphSnapshotTable !== undefined) {
+    localStorage.setItem(SUPABASE_STORAGE_KEYS.PPH_SNAPSHOT_TABLE, cfg.pphSnapshotTable.trim() || DEFAULT_PPH_SNAPSHOT_TABLE);
+  }
+  if (cfg.pphAuditTable !== undefined) {
+    localStorage.setItem(SUPABASE_STORAGE_KEYS.PPH_AUDIT_TABLE, cfg.pphAuditTable.trim() || DEFAULT_PPH_AUDIT_TABLE);
+  }
   // Reset cached instance
   cachedClient = null;
   clearSupabaseTableSchemaCache();
@@ -813,6 +822,7 @@ export async function updatePatientInSupabase(patient: Patient): Promise<{ succe
 
 // Outbound: Delete patient from Supabase
 export async function deletePatientFromSupabase(id: string): Promise<{ success: boolean; error?: string }> {
+  if (isDemoMode()) return { success: false, error: 'Mode Demo aktif (isolasi sandbox)' };
   const client = getSupabaseClient();
   if (!client) {
     return { success: false, error: 'Klien Supabase belum dikonfigurasi' };
@@ -993,6 +1003,7 @@ export async function fetchPatientsPaginatedFromSupabase(params: {
 export async function fetchPatientsFromSupabase(options?: {
   limit?: number;
 }): Promise<{ data: Patient[] | null; error?: string }> {
+  if (isDemoMode()) return { data: null, error: 'Mode Demo aktif (isolasi sandbox)' };
   const client = getSupabaseClient();
   if (!client) {
     return { data: null, error: 'Klien Supabase belum dikonfigurasi' };
@@ -1182,6 +1193,7 @@ export function subscribePatientsRealtime(
   onUpdate: (patient: Patient) => void,
   onDelete: (id: string) => void
 ): RealtimeChannel | null {
+  if (isDemoMode()) return null;
   const client = getSupabaseClient();
   if (!client) return null;
 
@@ -1195,6 +1207,7 @@ export function subscribePatientsRealtime(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: patientTable },
         (payload) => {
+          if (isDemoMode()) return;
           console.info('[Supabase Real-time Pasien INSERT]:', payload.new);
           if (payload.new) {
             const newPat = supabaseRowToPatient(payload.new);
@@ -1206,6 +1219,7 @@ export function subscribePatientsRealtime(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: patientTable },
         (payload) => {
+          if (isDemoMode()) return;
           console.info('[Supabase Real-time Pasien UPDATE]:', payload.new);
           if (payload.new) {
             const updatedPat = supabaseRowToPatient(payload.new);
@@ -1217,6 +1231,7 @@ export function subscribePatientsRealtime(
         'postgres_changes',
         { event: 'DELETE', schema: 'public', table: patientTable },
         (payload) => {
+          if (isDemoMode()) return;
           console.info('[Supabase Real-time Pasien DELETE]:', payload.old);
           if (payload.old && payload.old.id) {
             onDelete(payload.old.id);
@@ -1234,10 +1249,52 @@ export function subscribePatientsRealtime(
   }
 }
 
+const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function isValidUuid(val?: string | null): boolean {
+  return Boolean(val && UUID_V4_REGEX.test(String(val).trim()));
+}
+
+export function generateUuidV4(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+function stringToDeterministicUuid(seed: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  let h3 = 0x517cc1b7;
+  let h4 = 0x27220a95;
+  for (let i = 0; i < seed.length; i++) {
+    const ch = seed.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ ch, 0x85ebca6b) >>> 0;
+    h3 = Math.imul(h3 ^ (ch + i), 0xc2b2ae35) >>> 0;
+    h4 = Math.imul(h4 ^ (ch * 31), 0x27d4eb2f) >>> 0;
+  }
+  const hex =
+    h1.toString(16).padStart(8, '0') +
+    h2.toString(16).padStart(8, '0') +
+    h3.toString(16).padStart(8, '0') +
+    h4.toString(16).padStart(8, '0');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 // Convert from local OnlineRegistration to Supabase row format for table `pendaftaran_online`
 export function onlineRegToSupabaseRow(reg: OnlineRegistration): Record<string, any> {
+  const rawId = String(reg.id || '').trim();
+  const resolvedUuid = isValidUuid(rawId)
+    ? rawId
+    : stringToDeterministicUuid(`${rawId || ''}|${reg.bookingCode || ''}|${reg.nik || ''}`);
+
   const row: Record<string, any> = {
-    id: reg.id || reg.bookingCode,
+    id: resolvedUuid,
     booking_code: reg.bookingCode,
     queue_number: reg.bookingCode ? `A-${reg.bookingCode.slice(-3)}` : 'A-001',
     nik: reg.nik || '',
@@ -1251,8 +1308,7 @@ export function onlineRegToSupabaseRow(reg: OnlineRegistration): Record<string, 
     service_type: reg.serviceType || 'Poli Umum',
     complaint: reg.complaint || '',
     allergy: reg.allergy || 'Tidak Ada',
-    status: reg.status || 'Menunggu Verifikasi',
-    updated_at: new Date().toISOString()
+    status: reg.status || 'Menunggu Verifikasi'
   };
   return row;
 }
@@ -1287,6 +1343,9 @@ export function supabaseRowToOnlineReg(row: Record<string, any>): OnlineRegistra
 
 // Outbound: Sync (Upsert) Online Registration to Supabase
 export async function syncOnlineRegistrationToSupabase(reg: OnlineRegistration): Promise<{ success: boolean; error?: string }> {
+  if (isDemoMode()) {
+    return { success: false, error: 'Mode Demo aktif (isolasi sandbox)' };
+  }
   const client = getSupabaseClient();
   if (!client) {
     return { success: false, error: 'Klien Supabase belum dikonfigurasi' };
@@ -1294,29 +1353,44 @@ export async function syncOnlineRegistrationToSupabase(reg: OnlineRegistration):
 
   const { onlineRegTable } = getSupabaseConfig();
   const row = onlineRegToSupabaseRow(reg);
+  const cleanBooking = String(reg.bookingCode || '').replace(/[,()]/g, '').trim();
+  const matchClauses: string[] = [];
+  if (isValidUuid(reg.id)) matchClauses.push(`id.eq.${String(reg.id).trim()}`);
+  if (isValidUuid(row.id) && row.id !== reg.id) matchClauses.push(`id.eq.${row.id}`);
+  if (cleanBooking) matchClauses.push(`booking_code.eq.${cleanBooking}`);
 
   try {
-    // 1. Coba update terlebih dahulu berdasarkan id atau booking_code
-    const { data: updateData, error: updateError } = await client
-      .from(onlineRegTable)
-      .update({
-        status: reg.status,
-        updated_at: new Date().toISOString()
-      })
-      .or(`id.eq.${reg.id},booking_code.eq.${reg.bookingCode}`)
-      .select();
+    // 1. Coba update status terlebih dahulu berdasarkan uuid id atau booking_code
+    if (matchClauses.length > 0) {
+      const { data: updateData, error: updateError } = await client
+        .from(onlineRegTable)
+        .update({ status: reg.status })
+        .or(matchClauses.join(','))
+        .select('id');
 
-    if (!updateError && updateData && updateData.length > 0) {
-      console.info(`[Supabase Online Reg Update Success] Booking #${reg.bookingCode} status diperbarui ke '${reg.status}'.`);
-      return { success: true };
+      if (!updateError && updateData && updateData.length > 0) {
+        console.info(`[Supabase Online Reg Update Success] Booking #${reg.bookingCode} status diperbarui ke '${reg.status}'.`);
+        return { success: true };
+      }
     }
 
-    // 2. Jika row belum ada, lakukan upsert penuh
+    // 2. Jika row belum ada, lakukan upsert penuh dengan ID UUID valid
     const { error: upsertError } = await client
       .from(onlineRegTable)
       .upsert(row, { onConflict: 'id' });
 
     if (upsertError) {
+      // Fallback jika booking_code unik bentrok (23505)
+      if (upsertError.code === '23505' && cleanBooking) {
+        const { id: _omitId, ...fieldsWithoutId } = row;
+        const { error: retryUpdateErr } = await client
+          .from(onlineRegTable)
+          .update(fieldsWithoutId)
+          .eq('booking_code', cleanBooking);
+        if (!retryUpdateErr) {
+          return { success: true };
+        }
+      }
       console.warn('[Supabase Online Reg Upsert Error]:', upsertError.message);
       return { success: false, error: upsertError.message };
     }
@@ -1331,6 +1405,9 @@ export async function syncOnlineRegistrationToSupabase(reg: OnlineRegistration):
 
 // Inbound: Fetch all Online Registrations from Supabase
 export async function fetchOnlineRegistrationsFromSupabase(): Promise<{ data: OnlineRegistration[] | null; error?: string }> {
+  if (isDemoMode()) {
+    return { data: null, error: 'Mode Demo aktif (isolasi sandbox)' };
+  }
   const client = getSupabaseClient();
   if (!client) {
     return { data: null, error: 'Klien Supabase belum dikonfigurasi' };
@@ -1362,6 +1439,7 @@ export function subscribeOnlineRegistrationsRealtime(
   onUpdate: (reg: OnlineRegistration) => void,
   onDelete: (id: string) => void
 ): RealtimeChannel | null {
+  if (isDemoMode()) return null;
   const client = getSupabaseClient();
   if (!client) return null;
 
@@ -1424,6 +1502,9 @@ export async function checkPatientInSupabase(
   totalCount?: number;
   error?: string;
 }> {
+  if (isDemoMode()) {
+    return { exists: false, patient: null, matches: [], totalCount: 0, error: 'Mode Demo aktif (isolasi sandbox)' };
+  }
   const client = getSupabaseClient();
   if (!client) {
     return { exists: false, patient: null, matches: [], totalCount: 0, error: 'Klien Supabase belum aktif' };
@@ -1556,7 +1637,7 @@ export async function checkPatientInSupabase(
 
 // Generate next No. RM automatically
 export async function generateNextNoRM(): Promise<string> {
-  const client = getSupabaseClient();
+  const client = isDemoMode() ? null : getSupabaseClient();
   if (client) {
     const { patientTable } = getSupabaseConfig();
     try {
@@ -2068,11 +2149,12 @@ export async function fetchICD10FromSupabase(): Promise<{ data: ICD10Item[] | nu
 
 // Dynamic real-time query / autocomplete search for ICD-10 from Supabase table `icd10`
 export async function searchICD10InSupabase(term: string): Promise<ICD10Item[]> {
+  if (isDemoMode()) return [];
   const client = getSupabaseClient();
   if (!client) return [];
 
   const { icd10Table } = getSupabaseConfig();
-  const q = term.trim();
+  const q = sanitizePostgrestSearchTerm(term);
 
   try {
     let queryBuilder = client.from(icd10Table).select('*');
@@ -2095,6 +2177,7 @@ export async function searchICD10InSupabase(term: string): Promise<ICD10Item[]> 
 
 // Upsert single ICD-10 code to Supabase
 export async function syncICD10ToSupabase(item: ICD10Item): Promise<{ success: boolean; error?: string }> {
+  if (isDemoMode()) return { success: false, error: 'Mode Demo aktif (isolasi sandbox)' };
   const client = getSupabaseClient();
   if (!client) {
     return { success: false, error: 'Klien Supabase belum dikonfigurasi' };
@@ -2123,6 +2206,7 @@ export async function syncICD10ToSupabase(item: ICD10Item): Promise<{ success: b
 
 // Delete ICD-10 code from Supabase
 export async function deleteICD10FromSupabase(code: string): Promise<{ success: boolean; error?: string }> {
+  if (isDemoMode()) return { success: false, error: 'Mode Demo aktif (isolasi sandbox)' };
   const client = getSupabaseClient();
   if (!client) {
     return { success: false, error: 'Klien Supabase belum dikonfigurasi' };
@@ -2155,6 +2239,7 @@ export function subscribeICD10Realtime(
   onUpdate: (item: ICD10Item) => void,
   onDelete: (code: string) => void
 ): RealtimeChannel | null {
+  if (isDemoMode()) return null;
   const client = getSupabaseClient();
   if (!client) return null;
 
@@ -2390,6 +2475,7 @@ export function supabaseRowToStaff(row: Record<string, any>): Staff {
 
 // Seed initial Staff list into Supabase if empty (only primary APJ / Owner in production so deleted staff IDs stay clean starting at STF-002)
 export async function seedStaffToSupabase(): Promise<{ success: boolean; count: number; error?: string }> {
+  if (isDemoMode()) return { success: false, count: 0, error: 'Mode Demo aktif (isolasi sandbox)' };
   const client = getSupabaseClient();
   if (!client) {
     return { success: false, count: 0, error: 'Klien Supabase belum dikonfigurasi' };
@@ -2438,6 +2524,7 @@ export async function seedStaffToSupabase(): Promise<{ success: boolean; count: 
 
 // Fetch all staff from Supabase (with auto-seed if empty)
 export async function fetchStaffFromSupabase(): Promise<{ data: Staff[] | null; seeded?: boolean; error?: string }> {
+  if (isDemoMode()) return { data: null, error: 'Mode Demo aktif (isolasi sandbox)' };
   const client = getSupabaseClient();
   if (!client) {
     return { data: null, error: 'Klien Supabase belum dikonfigurasi' };
@@ -2508,6 +2595,7 @@ export async function fetchStaffFromSupabase(): Promise<{ data: Staff[] | null; 
 
 // Upsert single staff to Supabase
 export async function syncStaffToSupabase(st: Staff): Promise<{ success: boolean; error?: string }> {
+  if (isDemoMode()) return { success: false, error: 'Mode Demo aktif (isolasi sandbox)' };
   const client = getSupabaseClient();
   if (!client) {
     return { success: false, error: 'Klien Supabase belum dikonfigurasi' };
@@ -2561,6 +2649,9 @@ export async function registerNewStaffToSupabase(
   duplicateStaff?: Staff;
   error?: string;
 }> {
+  if (isDemoMode()) {
+    return { success: false, error: 'Mode Demo aktif (isolasi sandbox)' };
+  }
   const client = getSupabaseClient();
   if (!client) {
     return { success: false, error: 'Klien Supabase belum dikonfigurasi.' };
@@ -2714,6 +2805,7 @@ export async function registerNewStaffToSupabase(
 
 // Delete staff from Supabase
 export async function deleteStaffFromSupabase(id: string): Promise<{ success: boolean; error?: string }> {
+  if (isDemoMode()) return { success: false, error: 'Mode Demo aktif (isolasi sandbox)' };
   const client = getSupabaseClient();
   if (!client) {
     return { success: false, error: 'Klien Supabase belum dikonfigurasi' };
@@ -2746,6 +2838,7 @@ export function subscribeStaffRealtime(
   onUpdate: (st: Staff) => void,
   onDelete: (id: string) => void
 ): RealtimeChannel | null {
+  if (isDemoMode()) return null;
   const client = getSupabaseClient();
   if (!client) return null;
 
@@ -5617,6 +5710,7 @@ export async function syncMitraOrderToSupabase(
 }
 
 export async function fetchMitraOrdersFromSupabase(): Promise<{ data: MitraOrder[] | null; error?: string }> {
+  if (isDemoMode()) return { data: null, error: 'Mode Demo aktif (isolasi sandbox)' };
   const client = getSupabaseClient();
   if (!client) return { data: null, error: 'Klien Supabase belum dikonfigurasi' };
 
@@ -5640,6 +5734,7 @@ export async function fetchMitraOrdersFromSupabase(): Promise<{ data: MitraOrder
 }
 
 export async function deleteMitraOrderFromSupabase(id: string): Promise<{ success: boolean; error?: string }> {
+  if (isDemoMode()) return { success: false, error: 'Mode Demo aktif (isolasi sandbox)' };
   const client = getSupabaseClient();
   if (!client) return { success: false, error: 'Klien Supabase belum dikonfigurasi' };
 
@@ -5662,6 +5757,7 @@ export function subscribeMitraOrdersRealtime(
   onUpdate: (order: MitraOrder) => void,
   onDelete: (id: string) => void
 ): RealtimeChannel | null {
+  if (isDemoMode()) return null;
   const client = getSupabaseClient();
   if (!client) return null;
 
@@ -7584,7 +7680,8 @@ export async function syncMitraToSupabase(
       if (
         msgLower.includes('license_file') ||
         msgLower.includes('license_uploaded_at') ||
-        error.code === 'PGRST204'
+        error.code === 'PGRST204' ||
+        error.code === '42703'
       ) {
         const retryRes = await client
           .from(tableName)
@@ -7656,7 +7753,8 @@ export async function seedMitraToSupabase(
       if (
         msgLower.includes('license_file') ||
         msgLower.includes('license_uploaded_at') ||
-        error.code === 'PGRST204'
+        error.code === 'PGRST204' ||
+        error.code === '42703'
       ) {
         const retryRes = await client
           .from(tableName)
@@ -8444,7 +8542,12 @@ export async function syncTransactionToSupabase(
     if (timeoutHandle) clearTimeout(timeoutHandle);
 
     let { error } = result as { error: { message: string; code?: string } | null };
-    if (error && /shipping_fee/i.test(error.message || '')) {
+    if (
+      error &&
+      (/shipping_fee/i.test(error.message || '') ||
+        error.code === '42703' ||
+        error.code === 'PGRST204')
+    ) {
       const { shipping_fee: _omit, ...fallbackRow } = row;
       const retryRes = await client
         .from(tableName)
@@ -8509,7 +8612,12 @@ export async function seedTransactionsToSupabase(
     if (timeoutHandle) clearTimeout(timeoutHandle);
 
     let { error } = result as { error: { message: string; code?: string } | null };
-    if (error && /shipping_fee/i.test(error.message || '')) {
+    if (
+      error &&
+      (/shipping_fee/i.test(error.message || '') ||
+        error.code === '42703' ||
+        error.code === 'PGRST204')
+    ) {
       const fallbackRows = rows.map(({ shipping_fee: _omit, ...rest }) => rest);
       const retryRes = await client.from(tableName).upsert(fallbackRows, { onConflict: 'id' });
       error = retryRes.error as { message: string; code?: string } | null;
@@ -12284,6 +12392,11 @@ export function isOpeningDebtInvoice(inv?: Partial<PurchaseInvoice> | null): boo
   return String(inv.id || '').trim().toUpperCase().startsWith('HTG-AWAL-');
 }
 
+export function isDraftPurchaseInvoice(inv?: Partial<PurchaseInvoice> | null): boolean {
+  if (!inv) return false;
+  return inv.processingStatus === 'DRAFT';
+}
+
 // 1. Mappers: PurchaseInvoice <-> faktur_pembelian
 export function purchaseInvoiceToSupabaseRow(inv: PurchaseInvoice): Record<string, any> {
   const total = Number(inv.totalTagihan) || 0;
@@ -12303,14 +12416,20 @@ export function purchaseInvoiceToSupabaseRow(inv: PurchaseInvoice): Record<strin
     : [];
   const openingDebt = isOpeningDebtInvoice(inv);
   const trimmedNotes = (inv.notes || '').trim();
+  const hasProcessingMeta =
+    inv.processingStatus === 'DRAFT' ||
+    inv.processingStatus === 'PROCESSED' ||
+    Boolean(inv.processedAt);
   const serializedItems: any[] =
-    openingDebt || trimmedNotes
+    openingDebt || trimmedNotes || hasProcessingMeta
       ? [
           ...cleanItems,
           {
             [OPENING_DEBT_META_FLAG]: true,
             recordType: openingDebt ? 'OPENING_DEBT' : 'PURCHASE_INVOICE',
-            notes: trimmedNotes
+            notes: trimmedNotes,
+            ...(inv.processingStatus ? { processingStatus: inv.processingStatus } : {}),
+            ...(inv.processedAt ? { processedAt: inv.processedAt } : {})
           }
         ]
       : cleanItems;
@@ -12342,6 +12461,8 @@ export function supabaseRowToPurchaseInvoice(row: Record<string, any>): Purchase
   let items: PurchaseItem[] = [];
   let metaRecordType: PurchaseInvoice['recordType'] | undefined;
   let metaNotes: string | undefined;
+  let metaProcessingStatus: PurchaseInvoice['processingStatus'] | undefined;
+  let metaProcessedAt: string | undefined;
 
   const rawItems = row.items;
   if (rawItems) {
@@ -12355,6 +12476,12 @@ export function supabaseRowToPurchaseInvoice(row: Record<string, any>): Purchase
             }
             if (typeof entry.notes === 'string' && entry.notes.trim()) {
               metaNotes = entry.notes.trim();
+            }
+            if (entry.processingStatus === 'DRAFT' || entry.processingStatus === 'PROCESSED') {
+              metaProcessingStatus = entry.processingStatus;
+            }
+            if (typeof entry.processedAt === 'string' && entry.processedAt.trim()) {
+              metaProcessedAt = entry.processedAt.trim();
             }
           } else if (entry) {
             items.push(entry);
@@ -12397,6 +12524,12 @@ export function supabaseRowToPurchaseInvoice(row: Record<string, any>): Purchase
     metaNotes ||
     (typeof row.notes === 'string' && row.notes.trim() ? row.notes.trim() : undefined);
 
+  const processingStatus: PurchaseInvoice['processingStatus'] | undefined =
+    metaProcessingStatus ||
+    (row.processing_status === 'DRAFT' || row.processing_status === 'PROCESSED'
+      ? row.processing_status
+      : undefined);
+
   return {
     id: idStr,
     pbfName: String(row.pbf_name ?? row.pbfName ?? ''),
@@ -12417,6 +12550,8 @@ export function supabaseRowToPurchaseInvoice(row: Record<string, any>): Purchase
     remainingAmount,
     branchId: String(row.branch_id ?? row.branchId ?? 'BR-01'),
     ...(isOpeningDebt ? { recordType: 'OPENING_DEBT' as const } : {}),
+    ...(processingStatus ? { processingStatus } : {}),
+    ...(metaProcessedAt ? { processedAt: metaProcessedAt } : {}),
     ...(notes ? { notes } : {})
   };
 }
@@ -14898,6 +15033,56 @@ export async function fetchPurchaseOrdersFromSupabase(options?: {
   }
 }
 
+const OPTIONAL_PURCHASE_ORDER_COLS = [
+  'sp_print_logs',
+  'petugas',
+  'branch_id',
+  'supplier_license_no',
+  'supplier_address',
+  'supplier_phone',
+  'supplier_id',
+  'notes',
+  'total_estimated_cost',
+  'updated_at',
+  'created_at'
+];
+
+const CORE_REQUIRED_PO_COLS = new Set(['id', 'po_number', 'date', 'supplier_name', 'sp_numbers', 'status', 'items']);
+
+function findMissingOptionalPurchaseOrderCol(
+  error: any,
+  row: Record<string, any>
+): string | undefined {
+  if (!error) return undefined;
+  const rawMsg = String(error.message || '');
+  const msg = rawMsg.toLowerCase();
+  const isSchemaError =
+    msg.includes('column') ||
+    msg.includes('schema cache') ||
+    error.code === 'PGRST204' ||
+    error.code === '42703';
+  if (!isSchemaError) return undefined;
+
+  const known = OPTIONAL_PURCHASE_ORDER_COLS.find(
+    (col) => col in row && !CORE_REQUIRED_PO_COLS.has(col) && msg.includes(col)
+  );
+  if (known) return known;
+
+  const quotedPatterns = [
+    /'([a-z0-9_]+)'\s+column/i,
+    /column\s+"([a-z0-9_]+)"/i,
+    /column\s+[a-z0-9_]+\.([a-z0-9_]+)\s+does\s+not\s+exist/i
+  ];
+  for (const regex of quotedPatterns) {
+    const m = rawMsg.match(regex);
+    const colName = m?.[1]?.trim();
+    if (colName && colName in row && !CORE_REQUIRED_PO_COLS.has(colName)) {
+      return colName;
+    }
+  }
+  return undefined;
+}
+
 export async function syncPurchaseOrderToSupabase(
   po: PurchaseOrder,
   timeoutMs = 8000
@@ -14926,33 +15111,46 @@ export async function syncPurchaseOrderToSupabase(
     };
   }
 
-  const row = purchaseOrderToSupabaseRow(po);
+  let currentRow = purchaseOrderToSupabaseRow(po);
   try {
-    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-    const timeoutPromise = new Promise<{ error: { message: string } }>((resolve) => {
-      timeoutHandle = setTimeout(() => {
-        resolve({ error: { message: `Timeout menyimpan surat pesanan ke ${tableName}` } });
-      }, timeoutMs);
-    });
+    let lastError: { message: string; code?: string } | null = null;
+    for (let attempt = 0; attempt <= OPTIONAL_PURCHASE_ORDER_COLS.length + 2; attempt++) {
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<{ error: { message: string } }>((resolve) => {
+        timeoutHandle = setTimeout(() => {
+          resolve({ error: { message: `Timeout menyimpan surat pesanan ke ${tableName}` } });
+        }, timeoutMs);
+      });
 
-    const upsertPromise = client
-      .from(tableName)
-      .upsert(row, { onConflict: 'id' })
-      .select('id')
-      .limit(1);
+      const upsertPromise = client
+        .from(tableName)
+        .upsert(currentRow, { onConflict: 'id' })
+        .select('id')
+        .limit(1);
 
-    const result = await Promise.race([upsertPromise, timeoutPromise]);
-    if (timeoutHandle) clearTimeout(timeoutHandle);
+      const result = await Promise.race([upsertPromise, timeoutPromise]);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
 
-    const { error } = result as { error: { message: string; code?: string } | null };
-    if (error) {
-      const needsTableSetup = isMissingTableOrRlsError(error.message, error.code);
-      if (needsTableSetup) missingTablesInSession.add(tableName);
-      console.warn(`[Supabase Surat Pesanan] Upsert error (${tableName}):`, error.message);
-      return { success: false, needsTableSetup, error: error.message };
+      const { error } = result as { error: { message: string; code?: string } | null };
+      if (!error) {
+        return { success: true };
+      }
+
+      lastError = error;
+      const missingCol = findMissingOptionalPurchaseOrderCol(error, currentRow);
+      if (missingCol) {
+        const nextRow = { ...currentRow };
+        delete nextRow[missingCol];
+        currentRow = nextRow;
+        continue;
+      }
+      break;
     }
 
-    return { success: true };
+    const needsTableSetup = isMissingTableOrRlsError(lastError?.message, lastError?.code);
+    if (needsTableSetup) missingTablesInSession.add(tableName);
+    console.warn(`[Supabase Surat Pesanan] Upsert error (${tableName}):`, lastError?.message);
+    return { success: false, needsTableSetup, error: lastError?.message || 'Gagal menyimpan surat pesanan' };
   } catch (err: any) {
     return { success: false, error: err?.message || String(err) };
   }
@@ -14991,26 +15189,51 @@ export async function seedPurchaseOrdersToSupabase(
   let totalSynced = 0;
 
   try {
+    const strippedCols = new Set<string>();
     for (let i = 0; i < valid.length; i += CHUNK_SIZE) {
       const chunk = valid.slice(i, i + CHUNK_SIZE);
-      const rows = chunk.map(purchaseOrderToSupabaseRow);
-
-      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-      const timeoutPromise = new Promise<{ error: { message: string } }>((resolve) => {
-        timeoutHandle = setTimeout(() => {
-          resolve({ error: { message: `Timeout menyemai surat pesanan ke ${tableName}` } });
-        }, timeoutMs);
+      let rows = chunk.map((po) => {
+        const row = purchaseOrderToSupabaseRow(po);
+        strippedCols.forEach((col) => delete row[col]);
+        return row;
       });
 
-      const upsertPromise = client.from(tableName).upsert(rows, { onConflict: 'id' });
-      const result = await Promise.race([upsertPromise, timeoutPromise]);
-      if (timeoutHandle) clearTimeout(timeoutHandle);
+      let chunkError: { message: string; code?: string } | null = null;
+      for (let attempt = 0; attempt <= OPTIONAL_PURCHASE_ORDER_COLS.length + 2; attempt++) {
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<{ error: { message: string } }>((resolve) => {
+          timeoutHandle = setTimeout(() => {
+            resolve({ error: { message: `Timeout menyemai surat pesanan ke ${tableName}` } });
+          }, timeoutMs);
+        });
 
-      const { error } = result as { error: { message: string; code?: string } | null };
-      if (error) {
-        const needsTableSetup = isMissingTableOrRlsError(error.message, error.code);
+        const upsertPromise = client.from(tableName).upsert(rows, { onConflict: 'id' });
+        const result = await Promise.race([upsertPromise, timeoutPromise]);
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+
+        const { error } = result as { error: { message: string; code?: string } | null };
+        if (!error) {
+          chunkError = null;
+          break;
+        }
+        chunkError = error;
+        const missingCol = findMissingOptionalPurchaseOrderCol(error, rows[0] || {});
+        if (missingCol) {
+          strippedCols.add(missingCol);
+          rows = rows.map((r) => {
+            const copy = { ...r };
+            delete copy[missingCol];
+            return copy;
+          });
+          continue;
+        }
+        break;
+      }
+
+      if (chunkError) {
+        const needsTableSetup = isMissingTableOrRlsError(chunkError.message, chunkError.code);
         if (needsTableSetup) missingTablesInSession.add(tableName);
-        return { success: false, count: totalSynced, needsTableSetup, error: error.message };
+        return { success: false, count: totalSynced, needsTableSetup, error: chunkError.message };
       }
       totalSynced += rows.length;
     }

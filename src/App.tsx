@@ -1755,8 +1755,10 @@ export default function App() {
   cashierShiftsRef.current = cashierShifts;
   const purchaseOrdersRef = React.useRef<PurchaseOrder[]>(purchaseOrders);
   purchaseOrdersRef.current = purchaseOrders;
+  const purchaseOrdersMutationEpochRef = React.useRef<number>(0);
   const marketingCampaignsRef = React.useRef<MarketingCampaign[]>(marketingCampaigns);
   marketingCampaignsRef.current = marketingCampaigns;
+  const marketingCampaignsMutationEpochRef = React.useRef<number>(0);
   const feeLedgerRef = React.useRef<StaffFeeLedgerEntry[]>(feeLedger);
   feeLedgerRef.current = feeLedger;
   const labRecordsRef = React.useRef<LabTestRecord[]>(labRecords);
@@ -1775,6 +1777,8 @@ export default function App() {
   transfersRef.current = transfers;
   const purchaseInvoicesRef = React.useRef<PurchaseInvoice[]>(purchaseInvoices);
   purchaseInvoicesRef.current = purchaseInvoices;
+  const purchaseInvoicesMutationEpochRef = React.useRef<number>(0);
+  const transactionsMutationEpochRef = React.useRef<number>(0);
   const salesDiscountsRef = React.useRef<SalesDiscount[]>(salesDiscounts);
   salesDiscountsRef.current = salesDiscounts;
   const promoAdsRef = React.useRef<PromoAd[]>(promoAds);
@@ -1941,6 +1945,28 @@ export default function App() {
       demoSetItem('latisha_mitra_orders', JSON.stringify(nextList));
     } catch (err) {
       console.warn('Immediate persist failed for latisha_mitra_orders:', err);
+    }
+  }, []);
+
+  const persistTransfersNow = useCallback((nextList: StockTransfer[]) => {
+    transfersRef.current = nextList;
+    prevPersistedRefs.current['latisha_transfers'] = nextList;
+    pendingPersistMapRef.current.delete('latisha_transfers');
+    try {
+      demoSetItem('latisha_transfers', JSON.stringify(nextList));
+    } catch (err) {
+      console.warn('Immediate persist failed for latisha_transfers:', err);
+    }
+  }, []);
+
+  const persistBranchesNow = useCallback((nextList: Branch[]) => {
+    branchesRef.current = nextList;
+    prevPersistedRefs.current['latisha_branches'] = nextList;
+    pendingPersistMapRef.current.delete('latisha_branches');
+    try {
+      demoSetItem('latisha_branches', JSON.stringify(nextList));
+    } catch (err) {
+      console.warn('Immediate persist failed for latisha_branches:', err);
     }
   }, []);
 
@@ -2132,6 +2158,7 @@ export default function App() {
     mitraOrders,
     salesDiscounts,
     promoAds,
+    marketingCampaigns,
     activeStaffId,
     activeRole,
     userName
@@ -3009,6 +3036,8 @@ export default function App() {
       if (cancelledTransactionEffect) return;
       setTransactionsNeedsTableSetup(Boolean(res.needsTableSetup));
 
+      const startTrxEpoch = transactionsMutationEpochRef.current;
+
       if (!res.needsTableSetup && !res.error && res.data !== null) {
         const deletedSet = getDeletedIdsSet('transactions');
         const pendingSyncSet = getPendingSyncIdsSet('transactions');
@@ -3037,9 +3066,12 @@ export default function App() {
         const localValid = transactionsRef.current.filter(
           (t) => t.id && !demoTrxIds.includes(t.id) && !deletedSet.has(t.id)
         );
+        const localMap = new Map<string, Transaction>();
+        localValid.forEach((t) => localMap.set(t.id, t));
         const localToUpload = localValid.filter((t) => {
           if (pendingSyncSet.has(t.id)) return true;
           if (!syncedOnceBefore && res.isEmpty && !remoteIds.has(t.id)) return true;
+          if (transactionsMutationEpochRef.current !== startTrxEpoch && !remoteIds.has(t.id)) return true;
           return false;
         });
 
@@ -3053,9 +3085,15 @@ export default function App() {
             .catch(() => {});
         }
 
-        // Authoritative merge: Supabase remote rows + genuinely unsynced local rows (never deleted rows)
+        // Authoritative merge: Supabase remote rows (preserving extended local shippingFee) + genuinely unsynced local rows
         const map = new Map<string, Transaction>();
-        remoteClean.forEach((t) => map.set(t.id, t));
+        remoteClean.forEach((t) => {
+          const localMatch = localMap.get(t.id);
+          map.set(t.id, {
+            ...t,
+            shippingFee: t.shippingFee !== undefined ? t.shippingFee : localMatch?.shippingFee
+          });
+        });
         localToUpload.forEach((t) => {
           if (!map.has(t.id) || pendingSyncSet.has(t.id)) {
             map.set(t.id, t);
@@ -3075,9 +3113,14 @@ export default function App() {
             if (demoTrxIds.includes(newTrx.id)) return;
             if (getDeletedIdsSet('transactions').has(newTrx.id)) return;
             setTransactions((prev) => {
-              const next = prev.some((t) => t.id === newTrx.id)
-                ? prev.map((t) => (t.id === newTrx.id ? newTrx : t))
-                : [newTrx, ...prev];
+              const existing = prev.find((t) => t.id === newTrx.id);
+              const mergedTrx: Transaction = {
+                ...newTrx,
+                shippingFee: newTrx.shippingFee !== undefined ? newTrx.shippingFee : existing?.shippingFee
+              };
+              const next = existing
+                ? prev.map((t) => (t.id === newTrx.id ? mergedTrx : t))
+                : [mergedTrx, ...prev];
               persistTransactionsNow(next);
               return next;
             });
@@ -3087,7 +3130,13 @@ export default function App() {
             if (demoTrxIds.includes(updatedTrx.id)) return;
             if (getDeletedIdsSet('transactions').has(updatedTrx.id)) return;
             setTransactions((prev) => {
-              const next = prev.map((t) => (t.id === updatedTrx.id ? updatedTrx : t));
+              const existing = prev.find((t) => t.id === updatedTrx.id);
+              const mergedTrx: Transaction = {
+                ...updatedTrx,
+                shippingFee:
+                  updatedTrx.shippingFee !== undefined ? updatedTrx.shippingFee : existing?.shippingFee
+              };
+              const next = prev.map((t) => (t.id === updatedTrx.id ? mergedTrx : t));
               persistTransactionsNow(next);
               return next;
             });
@@ -4335,6 +4384,9 @@ export default function App() {
         const localValid = mitraListRef.current.filter(
           (m) => m.id && !demoMitraIds.includes(m.id) && !deletedSet.has(String(m.id).trim())
         );
+        const localMitraMap = new Map<string, Mitra>();
+        localValid.forEach((m) => localMitraMap.set(String(m.id).trim(), m));
+
         const localToUpload = localValid.filter((m) => {
           const cleanId = String(m.id).trim();
           if (pendingSyncSet.has(cleanId)) return true;
@@ -4354,7 +4406,17 @@ export default function App() {
             .catch(() => {});
         }
         const map = new Map<string, Mitra>();
-        remoteClean.forEach((m) => map.set(String(m.id).trim(), m));
+        remoteClean.forEach((m) => {
+          const cleanId = String(m.id).trim();
+          const localMatch = localMitraMap.get(cleanId);
+          map.set(cleanId, {
+            ...m,
+            licenseFileUrl: m.licenseFileUrl || localMatch?.licenseFileUrl,
+            licenseFileName: m.licenseFileName || localMatch?.licenseFileName,
+            licenseFileType: m.licenseFileType || localMatch?.licenseFileType,
+            licenseUploadedAt: m.licenseUploadedAt || localMatch?.licenseUploadedAt
+          });
+        });
         localToUpload.forEach((m) => {
           const cleanId = String(m.id).trim();
           if (!map.has(cleanId) || pendingSyncSet.has(cleanId)) map.set(cleanId, m);
@@ -4371,9 +4433,17 @@ export default function App() {
           if (!newMitra?.id || ['MTR-001', 'MTR-002', 'MTR-003'].includes(newMitra.id)) return;
           if (getDeletedIdsSet('mitra').has(newMitra.id)) return;
           setMitraList((prev) => {
-            const next = prev.some((m) => m.id === newMitra.id)
-              ? prev.map((m) => (m.id === newMitra.id ? newMitra : m))
-              : [newMitra, ...prev];
+            const existing = prev.find((m) => m.id === newMitra.id);
+            const mergedMitra: Mitra = {
+              ...newMitra,
+              licenseFileUrl: newMitra.licenseFileUrl || existing?.licenseFileUrl,
+              licenseFileName: newMitra.licenseFileName || existing?.licenseFileName,
+              licenseFileType: newMitra.licenseFileType || existing?.licenseFileType,
+              licenseUploadedAt: newMitra.licenseUploadedAt || existing?.licenseUploadedAt
+            };
+            const next = existing
+              ? prev.map((m) => (m.id === newMitra.id ? mergedMitra : m))
+              : [mergedMitra, ...prev];
             persistMitraListNow(next);
             return next;
           });
@@ -4382,9 +4452,17 @@ export default function App() {
           if (!updatedMitra?.id || ['MTR-001', 'MTR-002', 'MTR-003'].includes(updatedMitra.id)) return;
           if (getDeletedIdsSet('mitra').has(updatedMitra.id)) return;
           setMitraList((prev) => {
-            const next = prev.some((m) => m.id === updatedMitra.id)
-              ? prev.map((m) => (m.id === updatedMitra.id ? updatedMitra : m))
-              : [updatedMitra, ...prev];
+            const existing = prev.find((m) => m.id === updatedMitra.id);
+            const mergedMitra: Mitra = {
+              ...updatedMitra,
+              licenseFileUrl: updatedMitra.licenseFileUrl || existing?.licenseFileUrl,
+              licenseFileName: updatedMitra.licenseFileName || existing?.licenseFileName,
+              licenseFileType: updatedMitra.licenseFileType || existing?.licenseFileType,
+              licenseUploadedAt: updatedMitra.licenseUploadedAt || existing?.licenseUploadedAt
+            };
+            const next = existing
+              ? prev.map((m) => (m.id === updatedMitra.id ? mergedMitra : m))
+              : [mergedMitra, ...prev];
             persistMitraListNow(next);
             return next;
           });
@@ -4867,6 +4945,7 @@ export default function App() {
         }
       }
 
+      const startInvEpoch = purchaseInvoicesMutationEpochRef.current;
       const res = await fetchPurchaseInvoicesFromSupabase();
       if (cancelledPurchaseInvoiceEffect || isDemoMode()) return;
 
@@ -4874,6 +4953,7 @@ export default function App() {
         const deletedSet = getDeletedIdsSet('purchase_invoices');
         const pendingSyncSet = getPendingSyncIdsSet('purchase_invoices');
         const syncedOnceBefore = hasCompletedInitialCloudSync('purchase_invoices');
+        const epochChanged = purchaseInvoicesMutationEpochRef.current !== startInvEpoch;
         const remoteAll = res.data || [];
 
         const stubbornIds = remoteAll
@@ -4899,7 +4979,10 @@ export default function App() {
           (inv) => inv.id && !isDemoPurchaseInvoiceId(inv.id) && !deletedSet.has(inv.id)
         );
         const localToUpload = localValid.filter(
-          (inv) => pendingSyncSet.has(inv.id) || (!syncedOnceBefore && !remoteIds.has(inv.id))
+          (inv) =>
+            pendingSyncSet.has(inv.id) ||
+            (!syncedOnceBefore && !remoteIds.has(inv.id)) ||
+            (epochChanged && !remoteIds.has(inv.id))
         );
         if (localToUpload.length > 0) {
           seedPurchaseInvoicesToSupabase(localToUpload)
@@ -4917,7 +5000,7 @@ export default function App() {
         const map = new Map<string, PurchaseInvoice>();
         remoteClean.forEach((inv) => map.set(inv.id, inv));
         localToUpload.forEach((inv) => {
-          if (!map.has(inv.id) || pendingSyncSet.has(inv.id)) map.set(inv.id, inv);
+          if (!map.has(inv.id) || pendingSyncSet.has(inv.id) || epochChanged) map.set(inv.id, inv);
         });
         const authoritative = Array.from(map.values()).sort((a, b) =>
           (b.date || '').localeCompare(a.date || '')
@@ -4982,6 +5065,7 @@ export default function App() {
         }
       }
 
+      const startPoEpoch = purchaseOrdersMutationEpochRef.current;
       const res = await fetchPurchaseOrdersFromSupabase();
       if (cancelledPurchaseOrderEffect || isDemoMode()) return;
       setPurchaseOrdersNeedsTableSetup(Boolean(res.needsTableSetup));
@@ -4989,6 +5073,7 @@ export default function App() {
       if (!res.needsTableSetup && !res.error && res.data !== null) {
         const deletedSet = getDeletedIdsSet('purchase_orders');
         const pendingSyncSet = getPendingSyncIdsSet('purchase_orders');
+        const epochChanged = purchaseOrdersMutationEpochRef.current !== startPoEpoch;
         const remoteAll = res.data || [];
 
         const stubbornDeletedRemoteIds = remoteAll
@@ -5007,15 +5092,20 @@ export default function App() {
         const remoteClean = remoteAll.filter(
           (po) => po.id && !isDemoPurchaseOrderId(po.id) && !deletedSet.has(po.id)
         );
-        const remoteIds = new Set(remoteClean.map((po) => po.id));
+        const remoteMap = new Map<string, PurchaseOrder>();
+        remoteClean.forEach((po) => remoteMap.set(po.id, po));
         const syncedOnceBefore = hasCompletedInitialCloudSync('purchase_orders');
 
         const currentLocalOrders = purchaseOrdersRef.current.filter(
           (po) => po.id && !isDemoPurchaseOrderId(po.id) && !deletedSet.has(po.id)
         );
         const localToUpload = currentLocalOrders.filter((po) => {
+          const remoteVersion = remoteMap.get(po.id);
           if (pendingSyncSet.has(po.id)) return true;
-          if (!syncedOnceBefore && res.isEmpty && !remoteIds.has(po.id)) return true;
+          if (!remoteVersion && (res.isEmpty || !syncedOnceBefore || epochChanged)) return true;
+          if (remoteVersion && po.updatedAt && remoteVersion.updatedAt && po.updatedAt > remoteVersion.updatedAt) {
+            return true;
+          }
           return false;
         });
 
@@ -5032,7 +5122,13 @@ export default function App() {
         const map = new Map<string, PurchaseOrder>();
         remoteClean.forEach((po) => map.set(po.id, po));
         localToUpload.forEach((po) => {
-          if (!map.has(po.id) || pendingSyncSet.has(po.id)) {
+          const remoteVersion = map.get(po.id);
+          if (
+            !remoteVersion ||
+            pendingSyncSet.has(po.id) ||
+            epochChanged ||
+            (po.updatedAt && remoteVersion.updatedAt && po.updatedAt > remoteVersion.updatedAt)
+          ) {
             map.set(po.id, po);
           }
         });
@@ -5050,9 +5146,17 @@ export default function App() {
             if (isDemoMode() || isDemoPurchaseOrderId(newPo.id)) return;
             if (getDeletedIdsSet('purchase_orders').has(newPo.id)) return;
             setPurchaseOrders((prev) => {
-              const next = prev.some((p) => p.id === newPo.id)
-                ? prev.map((p) => (p.id === newPo.id ? newPo : p))
-                : [newPo, ...prev];
+              const existing = prev.find((p) => p.id === newPo.id);
+              const mergedPo: PurchaseOrder =
+                existing &&
+                existing.updatedAt &&
+                newPo.updatedAt &&
+                existing.updatedAt > newPo.updatedAt
+                  ? existing
+                  : newPo;
+              const next = existing
+                ? prev.map((p) => (p.id === newPo.id ? mergedPo : p))
+                : [mergedPo, ...prev];
               persistPurchaseOrdersNow(next);
               return next;
             });
@@ -5061,9 +5165,17 @@ export default function App() {
             if (isDemoMode() || isDemoPurchaseOrderId(updatedPo.id)) return;
             if (getDeletedIdsSet('purchase_orders').has(updatedPo.id)) return;
             setPurchaseOrders((prev) => {
-              const next = prev.some((p) => p.id === updatedPo.id)
-                ? prev.map((p) => (p.id === updatedPo.id ? updatedPo : p))
-                : [updatedPo, ...prev];
+              const existing = prev.find((p) => p.id === updatedPo.id);
+              const mergedPo: PurchaseOrder =
+                existing &&
+                existing.updatedAt &&
+                updatedPo.updatedAt &&
+                existing.updatedAt > updatedPo.updatedAt
+                  ? existing
+                  : updatedPo;
+              const next = existing
+                ? prev.map((p) => (p.id === updatedPo.id ? mergedPo : p))
+                : [mergedPo, ...prev];
               persistPurchaseOrdersNow(next);
               return next;
             });
@@ -5102,6 +5214,7 @@ export default function App() {
         }
       }
 
+      const startMktEpoch = marketingCampaignsMutationEpochRef.current;
       const res = await fetchMarketingCampaignsFromSupabase();
       if (cancelledMarketingEffect || isDemoMode()) return;
       setMarketingNeedsTableSetup(Boolean(res.needsTableSetup));
@@ -5109,18 +5222,24 @@ export default function App() {
       if (!res.needsTableSetup && !res.error && res.data !== null) {
         const deletedSet = getDeletedIdsSet('marketing_campaigns');
         const pendingSyncSet = getPendingSyncIdsSet('marketing_campaigns');
+        const epochChanged = marketingCampaignsMutationEpochRef.current !== startMktEpoch;
         const remoteClean = (res.data || []).filter(
           (c) => c.id && !isDemoMarketingCampaignId(c.id) && !deletedSet.has(c.id)
         );
-        const remoteIds = new Set(remoteClean.map((c) => c.id));
+        const remoteMap = new Map<string, MarketingCampaign>();
+        remoteClean.forEach((c) => remoteMap.set(c.id, c));
         const syncedOnceBefore = hasCompletedInitialCloudSync('marketing_campaigns');
 
         const localClean = marketingCampaignsRef.current.filter(
           (c) => c.id && !isDemoMarketingCampaignId(c.id) && !deletedSet.has(c.id)
         );
         const localToUpload = localClean.filter((c) => {
+          const remoteVersion = remoteMap.get(c.id);
           if (pendingSyncSet.has(c.id)) return true;
-          if (!syncedOnceBefore && res.isEmpty && !remoteIds.has(c.id)) return true;
+          if (!remoteVersion && (res.isEmpty || !syncedOnceBefore || epochChanged)) return true;
+          if (remoteVersion && c.updatedAt && remoteVersion.updatedAt && c.updatedAt > remoteVersion.updatedAt) {
+            return true;
+          }
           return false;
         });
 
@@ -5137,7 +5256,15 @@ export default function App() {
         const map = new Map<string, MarketingCampaign>();
         remoteClean.forEach((c) => map.set(c.id, c));
         localToUpload.forEach((c) => {
-          if (!map.has(c.id) || pendingSyncSet.has(c.id)) map.set(c.id, c);
+          const remoteVersion = map.get(c.id);
+          if (
+            !remoteVersion ||
+            pendingSyncSet.has(c.id) ||
+            epochChanged ||
+            (c.updatedAt && remoteVersion.updatedAt && c.updatedAt > remoteVersion.updatedAt)
+          ) {
+            map.set(c.id, c);
+          }
         });
         const authoritative = Array.from(map.values()).sort((a, b) =>
           (b.createdAt || '').localeCompare(a.createdAt || '')
@@ -7495,12 +7622,29 @@ export default function App() {
     };
   };
 
-  // Handler: Add Purchase Invoice (increments stock)
+  // Handler: Add Purchase Invoice (only increments stock when PROCESSED; DRAFT saves temporarily without stock impact)
   const handleAddPurchaseInvoice = (
     invoice: PurchaseInvoice,
     stockIncrements: { medId: string; qty: number }[]
   ) => {
-    setPurchaseInvoices((prev) => [invoice, ...prev]);
+    const isDraft = invoice.processingStatus === 'DRAFT';
+    purchaseInvoicesMutationEpochRef.current += 1;
+    const nextInvoices = [invoice, ...purchaseInvoicesRef.current.filter((i) => i.id !== invoice.id)];
+    setPurchaseInvoices(nextInvoices);
+    persistPurchaseInvoicesNow(nextInvoices);
+
+    if (isDraft) {
+      if (!isDemoActive && !isDemoMode()) {
+        markIdsPendingSync('purchase_invoices', [invoice.id]);
+        syncPurchaseInvoiceToSupabase(invoice)
+          .then((res) => {
+            if (res.success) confirmCloudSync('purchase_invoices', [invoice.id]);
+          })
+          .catch((err) => console.warn('Supabase purchase invoice draft sync error:', err));
+      }
+      addAuditLog('Faktur PBF', `Simpan sementara (Draft) faktur pembelian #${invoice.invoiceNo} dari ${invoice.pbfName}`);
+      return;
+    }
 
     const applyAddToMedicine = (m: Medicine): { med: Medicine; changed: boolean } => {
       const found = stockIncrements.find((inc) => inc.medId === m.id);
@@ -7603,17 +7747,41 @@ export default function App() {
           .catch((err) => console.warn('Supabase purchase stock mutation sync error:', err));
       }
     }
-    addAuditLog('Faktur PBF', `Input faktur pembelian #${invoice.invoiceNo} dari ${invoice.pbfName}`);
+    addAuditLog('Faktur PBF', `Proses faktur pembelian #${invoice.invoiceNo} dari ${invoice.pbfName} (Stok ditambahkan)`);
   };
 
-  // Handler: Update Purchase Invoice
+  // Handler: Update Purchase Invoice (only DRAFT invoices can be edited; can stay DRAFT or be PROCESSED)
   const handleUpdatePurchaseInvoice = (
     updated: PurchaseInvoice,
     stockIncrements: { medId: string; qty: number }[] = []
   ) => {
-    const existing = purchaseInvoices.find((i) => i.id === updated.id);
+    const existing = purchaseInvoicesRef.current.find((i) => i.id === updated.id);
     if (existing && existing.status === 'Lunas') {
       alert('Faktur dengan status Lunas tidak dapat diedit lagi!');
+      return;
+    }
+    if (existing && existing.processingStatus !== 'DRAFT') {
+      alert('Faktur yang sudah diproses (stok sudah masuk) tidak dapat diedit lagi!');
+      return;
+    }
+
+    const isSavingAsDraft = updated.processingStatus === 'DRAFT';
+
+    if (isSavingAsDraft) {
+      purchaseInvoicesMutationEpochRef.current += 1;
+      const nextInvoices = purchaseInvoicesRef.current.map((i) => (i.id === updated.id ? updated : i));
+      setPurchaseInvoices(nextInvoices);
+      persistPurchaseInvoicesNow(nextInvoices);
+
+      if (!isDemoActive && !isDemoMode()) {
+        markIdsPendingSync('purchase_invoices', [updated.id]);
+        syncPurchaseInvoiceToSupabase(updated)
+          .then((res) => {
+            if (res.success) confirmCloudSync('purchase_invoices', [updated.id]);
+          })
+          .catch((err) => console.warn('Supabase purchase invoice draft update sync error:', err));
+      }
+      addAuditLog('Faktur PBF', `Update draft faktur pembelian #${updated.invoiceNo} (${updated.pbfName})`);
       return;
     }
 
@@ -7621,7 +7789,8 @@ export default function App() {
       let baseMed = m;
       let changed = false;
 
-      if (existing) {
+      const wasPreviouslyProcessed = existing && existing.processingStatus !== 'DRAFT';
+      if (wasPreviouslyProcessed) {
         const oldItem = existing.items.find(
           (it) =>
             it.medicineId === m.id || it.name.toLowerCase().trim() === m.name.toLowerCase().trim()
@@ -7691,14 +7860,20 @@ export default function App() {
 
     setMedicines((prev) => prev.map((m) => applyUpdateToMedicine(m).med));
 
-    setPurchaseInvoices((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
+    purchaseInvoicesMutationEpochRef.current += 1;
+    const nextInvoices = purchaseInvoicesRef.current.map((i) => (i.id === updated.id ? updated : i));
+    setPurchaseInvoices(nextInvoices);
+    persistPurchaseInvoicesNow(nextInvoices);
 
-    // Record stock delta mutations when purchase invoice items are updated
+    // Record stock delta mutations when purchase invoice is processed
     const editMutations: StockMutation[] = [];
     const affectedMedIds = new Set<string>();
-    (existing?.items || []).forEach((it) => {
-      if (it.medicineId) affectedMedIds.add(it.medicineId);
-    });
+    const wasDraftBeforeUpdate = existing?.processingStatus === 'DRAFT';
+    if (!wasDraftBeforeUpdate) {
+      (existing?.items || []).forEach((it) => {
+        if (it.medicineId) affectedMedIds.add(it.medicineId);
+      });
+    }
     updated.items.forEach((it) => {
       if (it.medicineId) affectedMedIds.add(it.medicineId);
     });
@@ -7707,14 +7882,16 @@ export default function App() {
       const med = medicines.find((m) => m.id === medId);
       if (!med) return;
       const ratio = Math.max(1, Number(med.rasioKonversi) || 1);
-      const oldQty = (existing?.items || [])
-        .filter((it) => it.medicineId === medId)
-        .reduce((s, it) => {
-          const isBesar =
-            !med.satuanBesar ||
-            (it.unit || '').trim().toLowerCase() === med.satuanBesar.trim().toLowerCase();
-          return s + (Number(it.qty) || 0) * (isBesar ? ratio : 1);
-        }, 0);
+      const oldQty = wasDraftBeforeUpdate
+        ? 0
+        : (existing?.items || [])
+            .filter((it) => it.medicineId === medId)
+            .reduce((s, it) => {
+              const isBesar =
+                !med.satuanBesar ||
+                (it.unit || '').trim().toLowerCase() === med.satuanBesar.trim().toLowerCase();
+              return s + (Number(it.qty) || 0) * (isBesar ? ratio : 1);
+            }, 0);
       const newItemsForMed = updated.items.filter((it) => it.medicineId === medId);
       const newQty = newItemsForMed.reduce((s, it) => {
         const isBesar =
@@ -7742,7 +7919,9 @@ export default function App() {
         inQty: delta > 0 ? delta : 0,
         outQty: delta < 0 ? Math.abs(delta) : 0,
         balance: nextBal,
-        ket: `Perubahan Faktur PBF #${updated.invoiceNo} (${updated.pbfName})`,
+        ket: wasDraftBeforeUpdate
+          ? `Proses Faktur PBF #${updated.invoiceNo} (${updated.pbfName})`
+          : `Perubahan Faktur PBF #${updated.invoiceNo} (${updated.pbfName})`,
         petugas: userName,
         branchId: currentBranch.id,
         batchNo: bNo,
@@ -7756,21 +7935,27 @@ export default function App() {
     }
 
     if (!isDemoActive && !isDemoMode()) {
-      syncPurchaseInvoiceToSupabase(updated).catch((err) =>
-        console.warn('Supabase purchase invoice update sync error:', err)
-      );
+      markIdsPendingSync('purchase_invoices', [updated.id]);
+      syncPurchaseInvoiceToSupabase(updated)
+        .then((res) => {
+          if (res.success) confirmCloudSync('purchase_invoices', [updated.id]);
+        })
+        .catch((err) => console.warn('Supabase purchase invoice update sync error:', err));
       updatedMedicinesToSync.forEach((med) => {
         syncMedicineWithTracking(med).catch((err) =>
           console.warn('Supabase medicine update after invoice edit error:', err)
         );
       });
       if (editMutations.length > 0) {
+        const mutIds = editMutations.map((m) => m.id).filter(Boolean);
+        markIdsPendingSync('stock_mutations', mutIds);
         seedStockMutationsToSupabase(editMutations)
           .then((res) => {
             if (res.needsTableSetup) setStockMutationsNeedsTableSetup(true);
             if (res.needsBatchColumnMigration !== undefined) {
               setStockMutationsNeedsBatchMigration(Boolean(res.needsBatchColumnMigration));
             }
+            if (res.success) confirmCloudSync('stock_mutations', mutIds);
           })
           .catch((err) => console.warn('Supabase purchase invoice edit stock mutation sync error:', err));
       }
@@ -7786,8 +7971,28 @@ export default function App() {
       alert('Faktur dengan status Lunas tidak dapat dihapus!');
       return;
     }
-    if (confirm(`Apakah Anda yakin menghapus data ini (No. Faktur: ${inv.invoiceNo})?`)) {
-      setPurchaseInvoices((prev) => prev.filter((i) => i.id !== id));
+    const isDraft = inv.processingStatus === 'DRAFT';
+    if (confirm(`Apakah Anda yakin menghapus ${isDraft ? 'draft faktur' : 'data ini'} (No. Faktur: ${inv.invoiceNo})?`)) {
+      purchaseInvoicesMutationEpochRef.current += 1;
+      const nextInvoices = purchaseInvoicesRef.current.filter((i) => i.id !== id);
+      setPurchaseInvoices(nextInvoices);
+      persistPurchaseInvoicesNow(nextInvoices);
+
+      if (isDraft) {
+        markIdsDeleted('purchase_invoices', [id]);
+        if (!isDemoActive && !isDemoMode()) {
+          deletePurchaseInvoiceFromSupabase(id)
+            .then((res) => {
+              if (res.success) confirmCloudDeletes('purchase_invoices', [id]);
+            })
+            .catch((err) => console.warn('Supabase purchase invoice draft delete sync error:', err));
+        } else {
+          confirmCloudDeletes('purchase_invoices', [id]);
+        }
+        addAuditLog('Faktur PBF', `Hapus draft faktur pembelian #${inv.invoiceNo}`);
+        alert(`Draft faktur pembelian #${inv.invoiceNo} berhasil dihapus.`);
+        return;
+      }
 
       const applyDeleteToMedicine = (m: Medicine): { med: Medicine; changed: boolean } => {
         const invItem = inv.items.find(
@@ -7884,6 +8089,10 @@ export default function App() {
   ) => {
     const inv = purchaseInvoices.find((i) => i.id === invoiceId);
     if (!inv) return;
+    if (inv.processingStatus === 'DRAFT') {
+      alert('Faktur draft yang belum diproses stoknya tidak dapat diretur.');
+      return;
+    }
 
     // Reduce stock in medicines
     setMedicines((prev) =>
@@ -7933,9 +8142,12 @@ export default function App() {
 
     setStockMutations((prev) => [...newMutations, ...prev]);
     if (!isDemoActive && !isDemoMode() && newMutations.length > 0) {
+      const mutIds = newMutations.map((m) => m.id).filter(Boolean);
+      markIdsPendingSync('stock_mutations', mutIds);
       seedStockMutationsToSupabase(newMutations)
         .then((res) => {
           if (res.needsTableSetup) setStockMutationsNeedsTableSetup(true);
+          if (res.success) confirmCloudSync('stock_mutations', mutIds);
         })
         .catch((err) => console.warn('Supabase purchase return stock mutation sync error:', err));
     }
@@ -8082,7 +8294,9 @@ export default function App() {
 
   // Handler: Add Stock Transfer (with 2-way Supabase sync & Kartu Stok mutation)
   const handleAddTransfer = (transfer: StockTransfer) => {
-    setTransfers((prev) => [transfer, ...prev]);
+    const nextTransfers = [transfer, ...transfersRef.current];
+    setTransfers(nextTransfers);
+    persistTransfersNow(nextTransfers);
 
     let updatedMedicineForSync: Medicine | null = null;
     // Update stock in medicine list (FEFO multi-batch aware)
@@ -8135,16 +8349,26 @@ export default function App() {
       batchDetails: transferAlloc?.allocations
     };
 
-    setStockMutations((prev) => [transferMutation, ...prev]);
+    const nextMutations = [transferMutation, ...stockMutationsRef.current];
+    setStockMutations(nextMutations);
+    persistStockMutationsNow(nextMutations);
 
     if (!isDemoActive && !isDemoMode()) {
+      markIdsPendingSync('branch_transfers', [transfer.id]);
       syncBranchTransferToSupabase(transfer).then((res) => {
         if (res.needsTableSetup) setMultiCabangNeedsTableSetup(true);
+        if (res.success) confirmCloudSync('branch_transfers', [transfer.id]);
       });
       if (updatedMedicineForSync) {
         syncMedicineWithTracking(updatedMedicineForSync).catch(() => {});
       }
-      syncStockMutationToSupabase(transferMutation).catch(() => {});
+      markIdsPendingSync('stock_mutations', [transferMutation.id]);
+      syncStockMutationToSupabase(transferMutation)
+        .then((res) => {
+          if (res.needsTableSetup) setStockMutationsNeedsTableSetup(true);
+          if (res.success) confirmCloudSync('stock_mutations', [transferMutation.id]);
+        })
+        .catch(() => {});
     }
 
     addAuditLog('Transfer Stok', `Transfer #${transfer.id} sebanyak ${transfer.qty} ${transfer.unit} ${transfer.medicineName}`);
@@ -8227,32 +8451,35 @@ export default function App() {
 
   // Handler: Update Branch (including Pusat Induk status)
   const handleUpdateBranch = (updatedBranch: Branch) => {
-    let updatedListForSync: Branch[] = [];
-    setBranches((prev) => {
-      if (updatedBranch.isCentral) {
-        updatedListForSync = prev.map((b) =>
+    const updatedListForSync: Branch[] = updatedBranch.isCentral
+      ? branchesRef.current.map((b) =>
           b.id === updatedBranch.id
             ? { ...updatedBranch, isCentral: true }
             : { ...b, isCentral: false }
-        );
-      } else {
-        updatedListForSync = prev.map((b) => (b.id === updatedBranch.id ? updatedBranch : b));
-      }
-      return updatedListForSync;
-    });
+        )
+      : branchesRef.current.map((b) => (b.id === updatedBranch.id ? updatedBranch : b));
+
+    setBranches(updatedListForSync);
+    persistBranchesNow(updatedListForSync);
 
     if (currentBranch.id === updatedBranch.id) {
       setCurrentBranch(updatedBranch);
     }
 
     if (!isDemoActive && !isDemoMode()) {
+      const targetIds = updatedBranch.isCentral
+        ? updatedListForSync.map((b) => b.id).filter(Boolean)
+        : [updatedBranch.id];
+      markIdsPendingSync('branches', targetIds);
       if (updatedBranch.isCentral && updatedListForSync.length > 0) {
         seedBranchesToSupabase(updatedListForSync).then((res) => {
           if (res.needsTableSetup) setMultiCabangNeedsTableSetup(true);
+          if (res.success) confirmCloudSync('branches', targetIds);
         });
       } else {
         syncBranchToSupabase(updatedBranch).then((res) => {
           if (res.needsTableSetup) setMultiCabangNeedsTableSetup(true);
+          if (res.success) confirmCloudSync('branches', targetIds);
         });
       }
     }
@@ -8409,8 +8636,20 @@ export default function App() {
       }
     }
 
+    const localMitraMap = new Map<string, Mitra>();
+    localValid.forEach((m) => localMitraMap.set(m.id, m));
+
     const mergedMap = new Map<string, Mitra>();
-    remoteClean.forEach((m) => mergedMap.set(m.id, m));
+    remoteClean.forEach((m) => {
+      const localMatch = localMitraMap.get(m.id);
+      mergedMap.set(m.id, {
+        ...m,
+        licenseFileUrl: m.licenseFileUrl || localMatch?.licenseFileUrl,
+        licenseFileName: m.licenseFileName || localMatch?.licenseFileName,
+        licenseFileType: m.licenseFileType || localMatch?.licenseFileType,
+        licenseUploadedAt: m.licenseUploadedAt || localMatch?.licenseUploadedAt
+      });
+    });
     localToUpload.forEach((m) => {
       if (!mergedMap.has(m.id) || pendingSyncSet.has(m.id)) mergedMap.set(m.id, m);
     });
@@ -11060,6 +11299,11 @@ export default function App() {
       updatedAt: po.updatedAt || new Date().toISOString()
     };
 
+    purchaseOrdersMutationEpochRef.current += 1;
+    if (!isDemoActive && !isDemoMode() && !isDemoPurchaseOrderId(enrichedPo.id)) {
+      markIdsPendingSync('purchase_orders', [enrichedPo.id]);
+    }
+
     const isUpdate = purchaseOrdersRef.current.some((item) => item.id === enrichedPo.id);
     const nextList = isUpdate
       ? purchaseOrdersRef.current.map((item) => (item.id === enrichedPo.id ? enrichedPo : item))
@@ -11079,7 +11323,6 @@ export default function App() {
       return { success: true, isDemo: true };
     }
 
-    markIdsPendingSync('purchase_orders', [enrichedPo.id]);
     const res = await syncPurchaseOrderToSupabase(enrichedPo);
     setPurchaseOrdersNeedsTableSetup(Boolean(res.needsTableSetup));
     if (res.success) {
@@ -11096,6 +11339,7 @@ export default function App() {
     isDemo?: boolean;
     error?: string;
   }> => {
+    purchaseOrdersMutationEpochRef.current += 1;
     const existing = purchaseOrdersRef.current.find((p) => p.id === poId);
     const nextList = purchaseOrdersRef.current.filter((p) => p.id !== poId);
     setPurchaseOrders(nextList);
@@ -11146,6 +11390,7 @@ export default function App() {
       }
     }
 
+    const startSyncEpoch = purchaseOrdersMutationEpochRef.current;
     const res = await fetchPurchaseOrdersFromSupabase({ forceRefresh: true });
     setPurchaseOrdersNeedsTableSetup(Boolean(res.needsTableSetup));
 
@@ -11166,6 +11411,7 @@ export default function App() {
 
     const deletedSet = getDeletedIdsSet('purchase_orders');
     const pendingSyncSet = getPendingSyncIdsSet('purchase_orders');
+    const epochChanged = purchaseOrdersMutationEpochRef.current !== startSyncEpoch;
     const rawRemoteList = res.data || [];
 
     const stubbornDeletedRemoteIds = rawRemoteList
@@ -11182,14 +11428,20 @@ export default function App() {
     const remoteList = rawRemoteList.filter(
       (po) => po.id && !isDemoPurchaseOrderId(po.id) && !deletedSet.has(po.id)
     );
-    const remoteIds = new Set(remoteList.map((po) => po.id));
+    const remoteMap = new Map<string, PurchaseOrder>();
+    remoteList.forEach((po) => remoteMap.set(po.id, po));
 
     const validLocal = purchaseOrdersRef.current.filter(
       (po) => po.id && !isDemoPurchaseOrderId(po.id) && !deletedSet.has(po.id)
     );
-    const toUpload = validLocal.filter(
-      (po) => pendingSyncSet.has(po.id) || !remoteIds.has(po.id)
-    );
+    const toUpload = validLocal.filter((po) => {
+      const remoteVersion = remoteMap.get(po.id);
+      if (pendingSyncSet.has(po.id) || !remoteVersion) return true;
+      if (po.updatedAt && remoteVersion.updatedAt && po.updatedAt > remoteVersion.updatedAt) {
+        return true;
+      }
+      return false;
+    });
 
     let seedError: string | undefined;
     if (toUpload.length > 0) {
@@ -11204,7 +11456,13 @@ export default function App() {
     const mergedMap = new Map<string, PurchaseOrder>();
     remoteList.forEach((po) => mergedMap.set(po.id, po));
     validLocal.forEach((po) => {
-      if (!mergedMap.has(po.id) || pendingSyncSet.has(po.id)) {
+      const remoteVersion = mergedMap.get(po.id);
+      if (
+        !remoteVersion ||
+        pendingSyncSet.has(po.id) ||
+        epochChanged ||
+        (po.updatedAt && remoteVersion.updatedAt && po.updatedAt > remoteVersion.updatedAt)
+      ) {
         mergedMap.set(po.id, po);
       }
     });
@@ -11221,9 +11479,17 @@ export default function App() {
           if (isDemoMode() || isDemoPurchaseOrderId(newPo.id)) return;
           if (getDeletedIdsSet('purchase_orders').has(newPo.id)) return;
           setPurchaseOrders((prev) => {
-            const next = prev.some((p) => p.id === newPo.id)
-              ? prev.map((p) => (p.id === newPo.id ? newPo : p))
-              : [newPo, ...prev];
+            const existing = prev.find((p) => p.id === newPo.id);
+            const mergedPo: PurchaseOrder =
+              existing &&
+              existing.updatedAt &&
+              newPo.updatedAt &&
+              existing.updatedAt > newPo.updatedAt
+                ? existing
+                : newPo;
+            const next = existing
+              ? prev.map((p) => (p.id === newPo.id ? mergedPo : p))
+              : [mergedPo, ...prev];
             persistPurchaseOrdersNow(next);
             return next;
           });
@@ -11232,9 +11498,17 @@ export default function App() {
           if (isDemoMode() || isDemoPurchaseOrderId(updatedPo.id)) return;
           if (getDeletedIdsSet('purchase_orders').has(updatedPo.id)) return;
           setPurchaseOrders((prev) => {
-            const next = prev.some((p) => p.id === updatedPo.id)
-              ? prev.map((p) => (p.id === updatedPo.id ? updatedPo : p))
-              : [updatedPo, ...prev];
+            const existing = prev.find((p) => p.id === updatedPo.id);
+            const mergedPo: PurchaseOrder =
+              existing &&
+              existing.updatedAt &&
+              updatedPo.updatedAt &&
+              existing.updatedAt > updatedPo.updatedAt
+                ? existing
+                : updatedPo;
+            const next = existing
+              ? prev.map((p) => (p.id === updatedPo.id ? mergedPo : p))
+              : [mergedPo, ...prev];
             persistPurchaseOrdersNow(next);
             return next;
           });
@@ -11264,12 +11538,16 @@ export default function App() {
     campaign: MarketingCampaign,
     isEdit: boolean
   ): Promise<{ success: boolean; needsTableSetup?: boolean; isDemo?: boolean; error?: string }> => {
+    marketingCampaignsMutationEpochRef.current += 1;
     const enriched: MarketingCampaign = {
       ...campaign,
       branchId: campaign.branchId || currentBranch?.id || 'BR-01',
       createdBy: campaign.createdBy || userName,
       updatedAt: new Date().toISOString()
     };
+    if (!isDemoActive && !isDemoMode() && !isDemoMarketingCampaignId(enriched.id)) {
+      markIdsPendingSync('marketing_campaigns', [enriched.id]);
+    }
     const nextList = isEdit
       ? marketingCampaignsRef.current.map((c) => (c.id === enriched.id ? enriched : c))
       : [enriched, ...marketingCampaignsRef.current];
@@ -11285,7 +11563,6 @@ export default function App() {
       return { success: true, isDemo: true };
     }
 
-    markIdsPendingSync('marketing_campaigns', [enriched.id]);
     const res = await syncMarketingCampaignToSupabase(enriched);
     setMarketingNeedsTableSetup(Boolean(res.needsTableSetup));
     if (res.success) {
@@ -11297,6 +11574,7 @@ export default function App() {
   const handleDeleteMarketingCampaign = async (
     id: string
   ): Promise<{ success: boolean; needsTableSetup?: boolean; isDemo?: boolean; error?: string }> => {
+    marketingCampaignsMutationEpochRef.current += 1;
     const found = marketingCampaignsRef.current.find((c) => c.id === id);
     const nextList = marketingCampaignsRef.current.filter((c) => c.id !== id);
     setMarketingCampaigns(nextList);
@@ -13793,10 +14071,24 @@ export default function App() {
                   onDeleteInvoice={handleDeletePurchaseInvoice}
                   onProcessReturn={handleProcessReturn}
                   onUpdateInvoiceStatus={(id, status) => {
-                    setPurchaseInvoices((prev) =>
-                      prev.map((i) => (i.id === id ? { ...i, status } : i))
+                    purchaseInvoicesMutationEpochRef.current += 1;
+                    const existing = purchaseInvoicesRef.current.find((i) => i.id === id);
+                    if (!existing) return;
+                    const updatedInvoice: PurchaseInvoice = { ...existing, status };
+                    const nextInvoices = purchaseInvoicesRef.current.map((i) =>
+                      i.id === id ? updatedInvoice : i
                     );
-                    addAuditLog('Faktur PBF', `Status faktur #${id} diubah menjadi ${status}`);
+                    setPurchaseInvoices(nextInvoices);
+                    persistPurchaseInvoicesNow(nextInvoices);
+                    if (!isDemoActive && !isDemoMode() && !isDemoPurchaseInvoiceId(id)) {
+                      markIdsPendingSync('purchase_invoices', [id]);
+                      syncPurchaseInvoiceToSupabase(updatedInvoice)
+                        .then((res) => {
+                          if (res.success) confirmCloudSync('purchase_invoices', [id]);
+                        })
+                        .catch((err) => console.warn('Supabase invoice status sync error:', err));
+                    }
+                    addAuditLog('Faktur PBF', `Status faktur #${existing.invoiceNo || id} diubah menjadi ${status}`);
                   }}
                 />
               )}
@@ -13901,12 +14193,16 @@ export default function App() {
                       );
                     }
                   }}
-                  onUpdateTransactions={(updated) => {
+                  onUpdateTransactions={(updated, options) => {
+                    transactionsMutationEpochRef.current += 1;
                     const prevMap = new Map(transactionsRef.current.map((t) => [t.id, t]));
                     setTransactions(updated);
                     persistTransactionsNow(updated);
-                    if (!isDemoActive && !isDemoMode()) {
-                      const changed = updated.filter((t) => prevMap.get(t.id) !== t);
+                    if (!options?.skipRemoteUpload && !isDemoActive && !isDemoMode()) {
+                      const changed = updated.filter((t) => {
+                        const prev = prevMap.get(t.id);
+                        return !prev || JSON.stringify(prev) !== JSON.stringify(t);
+                      });
                       if (changed.length > 0) {
                         const changedIds = changed.map((t) => t.id);
                         markIdsPendingSync('transactions', changedIds);
@@ -13956,8 +14252,19 @@ export default function App() {
                   userName={userName}
                   isDemoSandbox={isDemoActive}
                   onUpdateStaff={(updated) => {
-                    setStaffList((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
-                    syncStaffToSupabase(updated);
+                    setStaffList((prev) => {
+                      const next = prev.map((s) => (s.id === updated.id ? updated : s));
+                      saveStaffListLocally(next, { broadcast: true });
+                      return next;
+                    });
+                    if (!isDemoActive && !isDemoMode()) {
+                      markIdsPendingSync('staff', [updated.id]);
+                      syncStaffToSupabase(updated)
+                        .then((res) => {
+                          if (res.success) confirmCloudSync('staff', [updated.id]);
+                        })
+                        .catch((err) => console.warn('Supabase tax staff update error:', err));
+                    }
                     addAuditLog(
                       'Estimasi PPh (WP OP)',
                       `Update profil pajak petugas ${updated.name} (PTKP ${updated.ptkpStatus || 'TK/0'})`

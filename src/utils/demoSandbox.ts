@@ -60,11 +60,89 @@ export function demoGetItem(baseKey: string): string | null {
   }
 }
 
+const QUOTA_EVICTABLE_CACHE_KEYS: string[] = [
+  'latisha_icd10_list',
+  'latisha_interaksi_obat_v2',
+  'latisha_patients',
+  'latisha_audit_logs',
+  'latisha_medicines'
+];
+
+function isQuotaExceededError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { name?: string; code?: number; message?: string };
+  return (
+    e.name === 'QuotaExceededError' ||
+    e.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+    e.code === 22 ||
+    e.code === 1014 ||
+    String(e.message || '').toLowerCase().includes('quota')
+  );
+}
+
 export function demoSetItem(baseKey: string, value: string): void {
   if (typeof window === 'undefined') return;
+  const scopedKey = getScopedStorageKey(baseKey);
   try {
-    localStorage.setItem(getScopedStorageKey(baseKey), value);
-  } catch {}
+    localStorage.setItem(scopedKey, value);
+    return;
+  } catch (err) {
+    if (!isQuotaExceededError(err)) return;
+
+    // Never silently drop operational data (PO, Faktur, Penjualan, Tombstone / Pending Sync):
+    // progressively trim/evict reconstructible reference caches in the current storage scope and retry.
+    const isSelfHeavyCache = QUOTA_EVICTABLE_CACHE_KEYS.includes(baseKey);
+    for (const cacheBaseKey of QUOTA_EVICTABLE_CACHE_KEYS) {
+      if (cacheBaseKey === baseKey) continue;
+      const cacheScopedKey = getScopedStorageKey(cacheBaseKey);
+      const existingRaw = localStorage.getItem(cacheScopedKey);
+      if (!existingRaw) continue;
+
+      if (cacheBaseKey === 'latisha_audit_logs') {
+        try {
+          const parsed = JSON.parse(existingRaw);
+          if (Array.isArray(parsed) && parsed.length > 30) {
+            localStorage.setItem(cacheScopedKey, JSON.stringify(parsed.slice(0, 30)));
+          } else {
+            localStorage.removeItem(cacheScopedKey);
+          }
+        } catch {
+          localStorage.removeItem(cacheScopedKey);
+        }
+      } else if (cacheBaseKey === 'latisha_patients') {
+        try {
+          const parsed = JSON.parse(existingRaw);
+          if (Array.isArray(parsed) && parsed.length > 40) {
+            localStorage.setItem(cacheScopedKey, JSON.stringify(parsed.slice(0, 40)));
+          } else {
+            localStorage.removeItem(cacheScopedKey);
+          }
+        } catch {
+          localStorage.removeItem(cacheScopedKey);
+        }
+      } else {
+        localStorage.removeItem(cacheScopedKey);
+      }
+
+      try {
+        localStorage.setItem(scopedKey, value);
+        return;
+      } catch (retryErr) {
+        if (!isQuotaExceededError(retryErr)) return;
+      }
+    }
+
+    // Second pass: remove remaining trimmed heavy caches if still out of quota
+    if (!isSelfHeavyCache) {
+      for (const cacheBaseKey of QUOTA_EVICTABLE_CACHE_KEYS) {
+        try {
+          localStorage.removeItem(getScopedStorageKey(cacheBaseKey));
+          localStorage.setItem(scopedKey, value);
+          return;
+        } catch {}
+      }
+    }
+  }
 }
 
 export function demoRemoveItem(baseKey: string): void {

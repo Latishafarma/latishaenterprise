@@ -27,6 +27,7 @@ import { OnlineRegistration, DutySchedule, ScheduleDay, Medicine, Patient, isOwn
 import { INITIAL_DUTY_SCHEDULES, INITIAL_MEDICINES } from '../data/initialData';
 import {
   checkOrRegisterPatientSupabase,
+  generateUuidV4,
   getSupabaseConfig,
   getSupabaseClient,
   lookupPatientByNikFromMaster,
@@ -387,7 +388,7 @@ export const PublicPatientRegistration: React.FC<PublicPatientRegistrationProps>
     const createdAtTime = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
 
     const newRegData: OnlineRegistration = {
-      id: `REG-${Date.now().toString().slice(-6)}`,
+      id: generateUuidV4(),
       bookingCode,
       nik: form.nik,
       name: form.name.trim(),
@@ -418,6 +419,7 @@ export const PublicPatientRegistration: React.FC<PublicPatientRegistrationProps>
         const { error: insErr } = await supabaseClient.from(onlineRegTable).insert([rowData]);
         if (insErr) {
           console.warn('[Supabase Public Reg Insert Error]:', insErr.message);
+          syncNotice = `${syncNotice} (Antrean cloud pending: ${insErr.message})`;
         } else {
           console.info('[Supabase Public Reg Insert Success]:', bookingCode);
         }

@@ -99,7 +99,9 @@ export const ManualCustomerPOModal: React.FC<ManualCustomerPOModalProps> = ({
   const [status, setStatus] = useState<MitraOrderStatus>('Dikonfirmasi');
   const [paymentMethod, setPaymentMethod] = useState('Transfer Bank');
   const [paymentStatus, setPaymentStatus] = useState<MitraPaymentStatus>('Menunggu Pembayaran');
+  const [discountType, setDiscountType] = useState<'RP' | 'PERCENT'>('RP');
   const [discountAmount, setDiscountAmount] = useState<number>(0);
+  const [discountPercent, setDiscountPercent] = useState<number>(0);
   const [notes, setNotes] = useState('');
   const [adminNotes, setAdminNotes] = useState('');
 
@@ -166,10 +168,36 @@ export const ManualCustomerPOModal: React.FC<ManualCustomerPOModalProps> = ({
       setStatus(editingOrder.status || 'Dikonfirmasi');
       setPaymentMethod(editingOrder.paymentMethod || 'Transfer Bank');
       setPaymentStatus(editingOrder.paymentStatus || 'Menunggu Pembayaran');
-      setDiscountAmount(Number(editingOrder.discountAmount) || 0);
+      const existingDiscAmount = Number(editingOrder.discountAmount) || 0;
+      const existingItems = Array.isArray(editingOrder.items)
+        ? editingOrder.items.map((it) => ({ ...it }))
+        : [];
+      const existingSubtotal = existingItems.reduce(
+        (sum, it) => sum + (Number(it.subtotal) || 0),
+        0
+      );
+      const pctMatch = (editingOrder.appliedDiscountLabel || '').match(/(\d+(?:[.,]\d+)?)\s*%/);
+      if (pctMatch) {
+        const parsedPct = Math.min(100, Math.max(0, parseFloat(pctMatch[1].replace(',', '.')) || 0));
+        setDiscountType('PERCENT');
+        setDiscountPercent(parsedPct);
+        setDiscountAmount(
+          existingDiscAmount > 0
+            ? existingDiscAmount
+            : Math.round((existingSubtotal * parsedPct) / 100)
+        );
+      } else {
+        setDiscountType('RP');
+        setDiscountAmount(existingDiscAmount);
+        setDiscountPercent(
+          existingSubtotal > 0 && existingDiscAmount > 0
+            ? Number(((existingDiscAmount / existingSubtotal) * 100).toFixed(2))
+            : 0
+        );
+      }
       setNotes(editingOrder.notes || '');
       setAdminNotes(editingOrder.adminNotes || '');
-      setItems(Array.isArray(editingOrder.items) ? editingOrder.items.map((it) => ({ ...it })) : []);
+      setItems(existingItems);
       setPickedUnitMode(resolvedRoom === 'REGULER' ? 'KECIL' : 'BESAR');
     } else {
       const initialRoom: PortalOrderRoom = 'MITRA';
@@ -185,7 +213,9 @@ export const ManualCustomerPOModal: React.FC<ManualCustomerPOModalProps> = ({
       setStatus('Dikonfirmasi');
       setPaymentMethod('Transfer Bank');
       setPaymentStatus('Menunggu Pembayaran');
+      setDiscountType('RP');
       setDiscountAmount(0);
+      setDiscountPercent(0);
       setNotes('');
       setAdminNotes('');
       setItems([]);
@@ -436,12 +466,35 @@ export const ManualCustomerPOModal: React.FC<ManualCustomerPOModalProps> = ({
     () => items.reduce((sum, it) => sum + (Number(it.subtotal) || 0), 0),
     [items]
   );
-  const clampedDiscount = Math.min(subtotalAmount, Math.max(0, Math.round(Number(discountAmount) || 0)));
+  const clampedPercent = Math.min(100, Math.max(0, Number(discountPercent) || 0));
+  const rawCalculatedDiscount =
+    discountType === 'PERCENT'
+      ? Math.round((subtotalAmount * clampedPercent) / 100)
+      : Math.max(0, Math.round(Number(discountAmount) || 0));
+  const clampedDiscount = Math.min(subtotalAmount, rawCalculatedDiscount);
+  const effectiveDiscountPercent =
+    subtotalAmount > 0 && clampedDiscount > 0
+      ? Number(((clampedDiscount / subtotalAmount) * 100).toFixed(2))
+      : 0;
   const grandTotalAmount = Math.max(0, subtotalAmount - clampedDiscount);
   const totalQtySummary = useMemo(
     () => items.reduce((sum, it) => sum + (Number(it.qtyBox) || 0), 0),
     [items]
   );
+
+  const handleSwitchDiscountType = (nextType: 'RP' | 'PERCENT') => {
+    if (nextType === discountType) return;
+    if (nextType === 'PERCENT') {
+      const nextPct =
+        subtotalAmount > 0 && clampedDiscount > 0
+          ? Number(((clampedDiscount / subtotalAmount) * 100).toFixed(2))
+          : discountPercent || 0;
+      setDiscountPercent(Math.min(100, Math.max(0, nextPct)));
+    } else {
+      setDiscountAmount(clampedDiscount);
+    }
+    setDiscountType(nextType);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -501,7 +554,12 @@ export const ManualCustomerPOModal: React.FC<ManualCustomerPOModalProps> = ({
       totalItems: items.length,
       totalQtyBox: totalQtySummary,
       discountAmount: clampedDiscount > 0 ? clampedDiscount : undefined,
-      appliedDiscountLabel: clampedDiscount > 0 ? 'Diskon PO Manual' : undefined,
+      appliedDiscountLabel:
+        clampedDiscount > 0
+          ? discountType === 'PERCENT'
+            ? `Diskon PO Manual (${clampedPercent}%)`
+            : 'Diskon PO Manual (Rp)'
+          : undefined,
       totalAmount: grandTotalAmount,
       status,
       paymentMethod: paymentMethod.trim() || 'Transfer Bank',
@@ -1086,15 +1144,71 @@ export const ManualCustomerPOModal: React.FC<ManualCustomerPOModalProps> = ({
             </div>
 
             <div>
-              <label className="block font-bold text-slate-700 mb-1">Diskon PO (Rp)</label>
+              <label className="flex items-center justify-between gap-1 font-bold text-slate-700 mb-1">
+                <span>Diskon PO ({discountType === 'PERCENT' ? '%' : 'Rp'})</span>
+                <span className="inline-flex rounded-lg border border-slate-300 bg-slate-100 p-0.5 text-[10px]">
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchDiscountType('RP')}
+                    className={`px-2 py-0.5 rounded-md font-extrabold transition cursor-pointer ${
+                      discountType === 'RP'
+                        ? 'bg-indigo-700 text-white shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Rp
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchDiscountType('PERCENT')}
+                    className={`px-2 py-0.5 rounded-md font-extrabold transition cursor-pointer ${
+                      discountType === 'PERCENT'
+                        ? 'bg-indigo-700 text-white shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    %
+                  </button>
+                </span>
+              </label>
               <input
                 type="number"
                 min={0}
-                value={discountAmount || ''}
-                onChange={(e) => setDiscountAmount(Math.max(0, Number(e.target.value) || 0))}
-                placeholder="0"
+                max={discountType === 'PERCENT' ? 100 : undefined}
+                step={discountType === 'PERCENT' ? '0.1' : '1'}
+                value={
+                  discountType === 'PERCENT'
+                    ? discountPercent || ''
+                    : discountAmount || ''
+                }
+                onChange={(e) => {
+                  const rawVal = Number(e.target.value);
+                  if (discountType === 'PERCENT') {
+                    const nextPct = Math.min(100, Math.max(0, Number.isFinite(rawVal) ? rawVal : 0));
+                    setDiscountPercent(nextPct);
+                    setDiscountAmount(Math.round((subtotalAmount * nextPct) / 100));
+                  } else {
+                    const nextRp = Math.max(0, Math.round(Number.isFinite(rawVal) ? rawVal : 0));
+                    setDiscountAmount(nextRp);
+                    if (subtotalAmount > 0) {
+                      setDiscountPercent(
+                        Math.min(100, Number(((nextRp / subtotalAmount) * 100).toFixed(2)))
+                      );
+                    }
+                  }
+                }}
+                placeholder={discountType === 'PERCENT' ? '0 %' : '0'}
                 className="w-full p-2.5 border border-slate-300 rounded-xl font-mono font-bold text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
               />
+              {clampedDiscount > 0 && (
+                <div className="mt-1 text-[10px] font-mono font-semibold text-indigo-700 flex items-center justify-between">
+                  <span>
+                    {discountType === 'PERCENT'
+                      ? `Potongan: ${formatRupiah(clampedDiscount)}`
+                      : `Setara: ${effectiveDiscountPercent}%`}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -1133,7 +1247,8 @@ export const ManualCustomerPOModal: React.FC<ManualCustomerPOModalProps> = ({
               </div>
               {clampedDiscount > 0 && (
                 <div className="font-mono">
-                  Subtotal {formatRupiah(subtotalAmount)} − Diskon {formatRupiah(clampedDiscount)}
+                  Subtotal {formatRupiah(subtotalAmount)} − Diskon{' '}
+                  {discountType === 'PERCENT' ? `${clampedPercent}% (${formatRupiah(clampedDiscount)})` : formatRupiah(clampedDiscount)}
                 </div>
               )}
             </div>

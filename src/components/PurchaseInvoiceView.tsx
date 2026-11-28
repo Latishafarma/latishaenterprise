@@ -18,11 +18,13 @@ import {
   ChevronDown,
   AlertCircle,
   Edit2,
-  Printer
+  Printer,
+  Save,
+  Lock
 } from 'lucide-react';
 import { PurchaseInvoice, PurchaseItem, Medicine, Supplier } from '../types';
 import { openPrintWindow } from '../utils/printHelper';
-import { isOpeningDebtInvoice } from '../utils/supabaseClient';
+import { isOpeningDebtInvoice, isDraftPurchaseInvoice } from '../utils/supabaseClient';
 import { PaginationControls } from './PaginationControls';
 
 interface PurchaseInvoiceViewProps {
@@ -338,14 +340,26 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
     setItems(items.filter((_, i) => i !== idx));
   };
 
+  const isInvoiceEditable = (inv: PurchaseInvoice): boolean => {
+    return inv.status !== 'Lunas' && isDraftPurchaseInvoice(inv);
+  };
+
   const handleOpenEdit = (inv: PurchaseInvoice) => {
     if (inv.status === 'Lunas') {
       alert('Faktur dengan status Lunas tidak dapat diedit lagi!');
       return;
     }
+    if (!isDraftPurchaseInvoice(inv)) {
+      alert('Faktur yang sudah diproses (stok sudah ditambahkan) tidak dapat diedit lagi!');
+      return;
+    }
     setEditingInvoiceId(inv.id);
     setIsAddingCustomTerm(false);
     setCustomTermError(null);
+    const matchedSupplier =
+      suppliers.find((s) => s.name.toLowerCase() === (inv.pbfName || '').toLowerCase()) || null;
+    setSelectedSupplierObj(matchedSupplier);
+    setSupplierSearch(inv.pbfName || '');
     setForm({
       pbfName: inv.pbfName,
       invoiceNo: inv.invoiceNo,
@@ -371,10 +385,17 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
     }
   };
 
-  const handleSaveInvoice = (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitInvoiceWithMode = (mode: 'DRAFT' | 'PROCESSED') => {
     if (!form.pbfName.trim()) {
       alert('Nama Supplier / PBF wajib diisi!');
+      return;
+    }
+    if (!form.invoiceNo.trim()) {
+      alert('Nomor Faktur PBF wajib diisi!');
+      return;
+    }
+    if (!form.date) {
+      alert('Tanggal Faktur wajib diisi!');
       return;
     }
     if (items.length === 0) {
@@ -382,6 +403,7 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
       return;
     }
 
+    const isProcessed = mode === 'PROCESSED';
     const invoiceData: PurchaseInvoice = {
       id: editingInvoiceId || `INV-PBF-${Date.now().toString().slice(-6)}`,
       pbfName: form.pbfName,
@@ -398,21 +420,25 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
       ppn,
       totalTagihan,
       status: 'Belum Lunas',
-      branchId: 'BR-01'
+      branchId: 'BR-01',
+      processingStatus: mode,
+      ...(isProcessed ? { processedAt: new Date().toISOString() } : {})
     };
 
-    const increments = items.map((it) => {
-      const med = medicines.find((m) => m.id === it.medicineId);
-      const ratio = Math.max(1, Number(med?.rasioKonversi) || 1);
-      const isBesar =
-        !med?.satuanBesar ||
-        (it.unit || '').trim().toLowerCase() === med.satuanBesar.trim().toLowerCase();
-      const multiplier = isBesar ? ratio : 1;
-      return {
-        medId: it.medicineId || '',
-        qty: it.qty * multiplier
-      };
-    });
+    const increments = isProcessed
+      ? items.map((it) => {
+          const med = medicines.find((m) => m.id === it.medicineId);
+          const ratio = Math.max(1, Number(med?.rasioKonversi) || 1);
+          const isBesar =
+            !med?.satuanBesar ||
+            (it.unit || '').trim().toLowerCase() === med.satuanBesar.trim().toLowerCase();
+          const multiplier = isBesar ? ratio : 1;
+          return {
+            medId: it.medicineId || '',
+            qty: it.qty * multiplier
+          };
+        })
+      : [];
 
     if (editingInvoiceId && onUpdateInvoice) {
       onUpdateInvoice(invoiceData, increments);
@@ -422,7 +448,20 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
 
     setIsModalOpen(false);
     setEditingInvoiceId(null);
-    alert(`Faktur pembelian ${invoiceData.invoiceNo} dari ${invoiceData.pbfName} berhasil ${editingInvoiceId ? 'diperbarui' : 'dicatat'}!`);
+    if (isProcessed) {
+      alert(
+        `Faktur pembelian ${invoiceData.invoiceNo} dari ${invoiceData.pbfName} berhasil diproses! Stok bertambah otomatis dan faktur tidak dapat diedit lagi.`
+      );
+    } else {
+      alert(
+        `Faktur pembelian ${invoiceData.invoiceNo} dari ${invoiceData.pbfName} disimpan sementara (Draft). Stok belum bertambah dan faktur masih dapat diedit.`
+      );
+    }
+  };
+
+  const handleSaveInvoice = (e: React.FormEvent) => {
+    e.preventDefault();
+    submitInvoiceWithMode('PROCESSED');
   };
 
   const filteredInvoices = useMemo(() => {
@@ -589,26 +628,39 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
                   </td>
 
                   <td className="p-3 text-center">
-                    <span
-                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full font-bold text-[10px] ${
-                        inv.status === 'Lunas'
-                          ? 'bg-emerald-100 text-emerald-800'
-                          : inv.status === 'Sebagian'
-                          ? 'bg-amber-100 text-amber-800 border border-amber-300'
-                          : 'bg-rose-100 text-rose-800'
-                      }`}
-                    >
-                      {inv.status === 'Lunas' ? (
-                        <CheckCircle className="w-3 h-3" />
-                      ) : (
-                        <Clock className="w-3 h-3" />
-                      )}
-                      <span>{inv.status}</span>
-                    </span>
-                    {inv.status === 'Sebagian' && inv.remainingAmount !== undefined && (
-                      <div className="text-[9px] text-slate-500 font-mono mt-0.5">
-                        Sisa: Rp {inv.remainingAmount.toLocaleString('id-ID')}
-                      </div>
+                    {isDraftPurchaseInvoice(inv) ? (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full font-bold text-[10px] bg-sky-100 text-sky-800 border border-sky-200">
+                        <Save className="w-3 h-3" />
+                        <span>Draft (Sementara)</span>
+                      </span>
+                    ) : (
+                      <>
+                        <span
+                          className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full font-bold text-[10px] ${
+                            inv.status === 'Lunas'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : inv.status === 'Sebagian'
+                              ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                              : 'bg-rose-100 text-rose-800'
+                          }`}
+                        >
+                          {inv.status === 'Lunas' ? (
+                            <CheckCircle className="w-3 h-3" />
+                          ) : (
+                            <Clock className="w-3 h-3" />
+                          )}
+                          <span>{inv.status}</span>
+                        </span>
+                        <div className="text-[9px] text-teal-700 font-bold flex items-center justify-center gap-0.5 mt-0.5">
+                          <Lock className="w-2.5 h-2.5" />
+                          <span>Diproses</span>
+                        </div>
+                        {inv.status === 'Sebagian' && inv.remainingAmount !== undefined && (
+                          <div className="text-[9px] text-slate-500 font-mono mt-0.5">
+                            Sisa: Rp {inv.remainingAmount.toLocaleString('id-ID')}
+                          </div>
+                        )}
+                      </>
                     )}
                   </td>
 
@@ -617,15 +669,21 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
                       {/* Edit */}
                       <button
                         onClick={() => handleOpenEdit(inv)}
-                        disabled={inv.status === 'Lunas'}
-                        title={inv.status === 'Lunas' ? 'Faktur Lunas tidak dapat diedit lagi' : 'Edit Faktur'}
-                        className={`px-2 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 transition ${
+                        disabled={!isInvoiceEditable(inv)}
+                        title={
                           inv.status === 'Lunas'
-                            ? 'bg-slate-100 text-slate-400 cursor-not-allowed opacity-50'
-                            : 'bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200'
+                            ? 'Faktur Lunas tidak dapat diedit lagi'
+                            : !isDraftPurchaseInvoice(inv)
+                            ? 'Faktur sudah diproses (stok bertambah) dan tidak dapat diedit lagi'
+                            : 'Edit Draft Faktur'
+                        }
+                        className={`px-2 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 transition ${
+                          !isInvoiceEditable(inv)
+                            ? 'bg-slate-100 text-slate-400 cursor-not-allowed opacity-60'
+                            : 'bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200 cursor-pointer'
                         }`}
                       >
-                        <Edit2 className="w-3 h-3" />
+                        {!isInvoiceEditable(inv) ? <Lock className="w-3 h-3" /> : <Edit2 className="w-3 h-3" />}
                         <span>Edit</span>
                       </button>
 
@@ -672,7 +730,9 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
             <div className="px-6 py-4 bg-slate-900 text-white flex justify-between items-center sticky top-0 z-10">
               <div className="flex items-center gap-2">
                 <Truck className="w-5 h-5 text-teal-400" />
-                <h3 className="font-extrabold text-sm uppercase">Input Faktur Pembelian PBF Baru</h3>
+                <h3 className="font-extrabold text-sm uppercase">
+                  {editingInvoiceId ? 'Edit Draft Faktur Pembelian PBF' : 'Input Faktur Pembelian PBF Baru'}
+                </h3>
               </div>
               <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-white">
                 <X className="w-5 h-5" />
@@ -1257,20 +1317,30 @@ export const PurchaseInvoiceView: React.FC<PurchaseInvoiceViewProps> = ({
               </div>
 
               {/* Action Buttons */}
-              <div className="pt-3 flex justify-end gap-2 border-t border-slate-200">
+              <div className="pt-3 flex flex-wrap items-center justify-end gap-2 border-t border-slate-200">
                 <button
                   type="button"
                   onClick={() => setIsModalOpen(false)}
-                  className="px-5 py-2.5 bg-slate-200 hover:bg-slate-300 rounded-xl font-bold text-slate-700 transition"
+                  className="px-5 py-2.5 bg-slate-200 hover:bg-slate-300 rounded-xl font-bold text-slate-700 transition cursor-pointer"
                 >
                   Batal
                 </button>
                 <button
+                  type="button"
+                  onClick={() => submitInvoiceWithMode('DRAFT')}
+                  title="Simpan sementara sebagai draft (stok belum bertambah dan faktur masih bisa diedit)"
+                  className="px-5 py-2.5 bg-sky-600 hover:bg-sky-700 text-white rounded-xl font-black shadow-md uppercase tracking-wider transition active:scale-95 flex items-center gap-2 cursor-pointer"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>Simpan</span>
+                </button>
+                <button
                   type="submit"
-                  className="px-6 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-xl font-black shadow-md uppercase tracking-wider transition active:scale-95 flex items-center gap-2"
+                  title="Proses faktur (stok otomatis bertambah dan faktur tidak dapat lagi diedit)"
+                  className="px-6 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-xl font-black shadow-md uppercase tracking-wider transition active:scale-95 flex items-center gap-2 cursor-pointer"
                 >
                   <CheckCircle className="w-4 h-4" />
-                  <span>Simpan Faktur & Tambah Stok</span>
+                  <span>Proses</span>
                 </button>
               </div>
             </form>
