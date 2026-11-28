@@ -11,14 +11,18 @@ import {
   AlertTriangle,
   CalendarClock,
   FileText,
-  Edit3
+  Edit3,
+  Database,
+  Copy,
+  Check
 } from 'lucide-react';
 import {
   Medicine,
   Supplier,
   PurchaseInvoice,
   Branch,
-  EdAlertThreshold
+  EdAlertThreshold,
+  ProductDisposalRecord
 } from '../types';
 import {
   useFacilityProfiles,
@@ -29,7 +33,14 @@ import {
   formatPharmacyAddress,
   formatPharmacyLegalInfo
 } from '../utils/facilityProfileHelper';
-import { syncFacilityProfilesToSupabase } from '../utils/supabaseClient';
+import {
+  syncFacilityProfilesToSupabase,
+  getSupabaseConfig,
+  setSupabaseConfig,
+  DEFAULT_DISPOSAL_HISTORY_TABLE,
+  DEFAULT_PURCHASE_RETURN_TABLE,
+  SUPABASE_KELOLA_PRODUK_SQL_SCHEMA
+} from '../utils/supabaseClient';
 import { demoGetItem, demoSetItem, isDemoMode } from '../utils/demoSandbox';
 import { PaginationControls } from './PaginationControls';
 
@@ -96,42 +107,57 @@ export interface ReturnActionPayload {
   }[];
 }
 
-export interface DisposalHistoryRecord {
-  id: string;
-  baNumber: string;
-  date: string;
-  time: string;
-  method: string;
-  witness: string;
-  reason: string;
-  petugas: string;
-  disposalLocation?: string;
-  witness1Name?: string;
-  witness1Nip?: string;
-  witness1Role?: string;
-  witness2Name?: string;
-  witness2Nip?: string;
-  witness2Role?: string;
-  apjName?: string;
-  apjSipa?: string;
-  pharmacyName?: string;
-  pharmacyAddress?: string;
-  pharmacyCity?: string;
-  totalItems: number;
-  totalQty: number;
-  totalValue: number;
-  items: DisposalActionPayload['items'];
-}
+export type DisposalHistoryRecord = ProductDisposalRecord;
 
 interface ProductManagementViewProps {
   medicines: Medicine[];
   suppliers?: Supplier[];
   purchaseInvoices?: PurchaseInvoice[];
+  disposalHistory?: ProductDisposalRecord[];
   currentBranch: Branch;
   userName: string;
-  onProcessDisposal: (payload: DisposalActionPayload) => void;
-  onProcessReturn: (payload: ReturnActionPayload) => void;
+  onProcessDisposal: (payload: DisposalActionPayload) =>
+    | Promise<{
+        success: boolean;
+        record?: ProductDisposalRecord;
+        medicineSyncOk?: boolean;
+        stockCardSyncOk?: boolean;
+        disposalSyncOk?: boolean;
+        needsDisposalTableSetup?: boolean;
+        error?: string;
+      }>
+    | void;
+  onProcessReturn: (payload: ReturnActionPayload) =>
+    | Promise<{
+        success: boolean;
+        medicineSyncOk?: boolean;
+        stockCardSyncOk?: boolean;
+        returnSyncOk?: boolean;
+        needsReturnTableSetup?: boolean;
+        error?: string;
+      }>
+    | void;
+  onUpdateDisposalRecord?: (
+    record: ProductDisposalRecord
+  ) => Promise<{ success: boolean; needsTableSetup?: boolean; error?: string }> | void;
+  onDeleteDisposalRecord?: (
+    id: string
+  ) => Promise<{ success: boolean; needsTableSetup?: boolean; error?: string }> | void;
   onSyncMedicinesSupabase?: () => Promise<{ success: boolean; count?: number; error?: string }>;
+  onSyncKelolaProdukSupabase?: () => Promise<{
+    success: boolean;
+    medicinesCount?: number;
+    disposalCount?: number;
+    returnsCount?: number;
+    needsDisposalTableSetup?: boolean;
+    needsReturnTableSetup?: boolean;
+    isDemo?: boolean;
+    syncedSummary?: string;
+    error?: string;
+  }>;
+  needsDisposalTableSetup?: boolean;
+  needsReturnTableSetup?: boolean;
+  isDemoSandbox?: boolean;
   onNavigateTab?: (tab: string) => void;
 }
 
@@ -293,11 +319,18 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
   medicines,
   suppliers = [],
   purchaseInvoices = [],
+  disposalHistory: disposalHistoryProp,
   currentBranch,
   userName,
   onProcessDisposal,
   onProcessReturn,
+  onUpdateDisposalRecord,
+  onDeleteDisposalRecord,
   onSyncMedicinesSupabase,
+  onSyncKelolaProdukSupabase,
+  needsDisposalTableSetup = false,
+  needsReturnTableSetup = false,
+  isDemoSandbox = false,
   onNavigateTab
 }) => {
   const { pharmacyProfile, apjProfile } = useFacilityProfiles();
@@ -342,7 +375,19 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
 
   // Sync & notification banner
   const [isSyncingMaster, setIsSyncingMaster] = useState<boolean>(false);
+  const [isSubmittingAction, setIsSubmittingAction] = useState<boolean>(false);
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [confirmDeleteDisposalId, setConfirmDeleteDisposalId] = useState<string | null>(null);
+
+  // Supabase SQL Setup & Table Config modal
+  const [showSchemaModal, setShowSchemaModal] = useState<boolean>(false);
+  const [disposalTableInput, setDisposalTableInput] = useState<string>(
+    () => getSupabaseConfig().disposalHistoryTable || DEFAULT_DISPOSAL_HISTORY_TABLE
+  );
+  const [purchaseReturnTableInput, setPurchaseReturnTableInput] = useState<string>(
+    () => getSupabaseConfig().purchaseReturnTable || DEFAULT_PURCHASE_RETURN_TABLE
+  );
+  const [copiedSchema, setCopiedSchema] = useState<boolean>(false);
 
   // Row selection via checkboxes
   const [selectedRowKeys, setSelectedRowKeys] = useState<Set<string>>(new Set());
@@ -359,6 +404,7 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
       batchNo: string;
       expDate: string;
       availableStock: number;
+      masterStock: number;
       qty: number;
       unit: string;
       hpp: number;
@@ -389,8 +435,8 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
   >(null);
   const [isEditingBaMeta, setIsEditingBaMeta] = useState<boolean>(false);
 
-  // Local history of completed disposals for printing Berita Acara
-  const [disposalHistory, setDisposalHistory] = useState<DisposalHistoryRecord[]>(() => {
+  // Fallback local history if rendered standalone without App.tsx Supabase-synced prop
+  const [localDisposalHistory, setLocalDisposalHistory] = useState<DisposalHistoryRecord[]>(() => {
     try {
       const raw = demoGetItem(DISPOSAL_HISTORY_STORAGE_KEY);
       if (raw) {
@@ -401,8 +447,10 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
     return [];
   });
 
-  const persistDisposalHistory = (list: DisposalHistoryRecord[]) => {
-    setDisposalHistory(list);
+  const disposalHistory = disposalHistoryProp ?? localDisposalHistory;
+
+  const persistLocalDisposalHistory = (list: DisposalHistoryRecord[]) => {
+    setLocalDisposalHistory(list);
     try {
       demoSetItem(DISPOSAL_HISTORY_STORAGE_KEY, JSON.stringify(list));
     } catch {}
@@ -424,7 +472,9 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
   }, [purchaseInvoices]);
 
   // Persist updated custom ED thresholds to PharmacyProfile + localStorage + Backend + Supabase
-  const saveCustomThresholdsToSystem = (nextCustomList: EdAlertThreshold[]) => {
+  const saveCustomThresholdsToSystem = async (
+    nextCustomList: EdAlertThreshold[]
+  ): Promise<{ syncedCloud: boolean; error?: string }> => {
     const currentPharm = getSavedPharmacyProfile();
     const updatedPharm = {
       ...currentPharm,
@@ -436,13 +486,17 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
       demoSetItem('latisha_pharmacy_profile', JSON.stringify(updatedPharm));
       syncFacilityProfileToServer({ pharmacy: updatedPharm, apj, dpj });
       window.dispatchEvent(new Event('latisha_profile_updated'));
-      if (!isDemoMode()) {
-        void syncFacilityProfilesToSupabase({ pharmacy: updatedPharm, apj, dpj });
+      if (!isDemoSandbox && !isDemoMode()) {
+        const res = await syncFacilityProfilesToSupabase({ pharmacy: updatedPharm, apj, dpj });
+        return { syncedCloud: Boolean(res.success), error: res.error };
       }
-    } catch {}
+      return { syncedCloud: false };
+    } catch (err: any) {
+      return { syncedCloud: false, error: err?.message || String(err) };
+    }
   };
 
-  const handleAddCustomThreshold = (e: React.FormEvent) => {
+  const handleAddCustomThreshold = async (e: React.FormEvent) => {
     e.preventDefault();
     setThresholdError(null);
     const numericVal = Math.round(Number(newThresholdValue));
@@ -478,32 +532,36 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
     const existingCustom = Array.isArray(pharmacyProfile.edAlertThresholds)
       ? pharmacyProfile.edAlertThresholds
       : [];
-    saveCustomThresholdsToSystem([...existingCustom, newThreshold]);
     setActiveWindowDays(computedDays);
     setCurrentPage(1);
     setShowAddThresholdModal(false);
     setNewThresholdValue('12');
     setNewThresholdUnit('bulan');
     setNewThresholdLabel('');
+    const syncRes = await saveCustomThresholdsToSystem([...existingCustom, newThreshold]);
     setNotice({
       type: 'success',
-      text: `Masa ED "${autoLabel}" berhasil ditambahkan dan langsung digunakan oleh sistem.`
+      text: syncRes.syncedCloud
+        ? `Masa ED "${autoLabel}" berhasil ditambahkan dan tersinkronisasi ke Supabase.`
+        : `Masa ED "${autoLabel}" berhasil ditambahkan dan langsung digunakan oleh sistem.`
     });
   };
 
-  const handleRemoveCustomThreshold = (threshold: EdAlertThreshold) => {
+  const handleRemoveCustomThreshold = async (threshold: EdAlertThreshold) => {
     if (threshold.isDefault) return;
     const existingCustom = Array.isArray(pharmacyProfile.edAlertThresholds)
       ? pharmacyProfile.edAlertThresholds
       : [];
     const nextCustom = existingCustom.filter((t) => t.id !== threshold.id && t.days !== threshold.days);
-    saveCustomThresholdsToSystem(nextCustom);
     if (activeWindowDays === threshold.days) {
       setActiveWindowDays(90);
     }
+    const syncRes = await saveCustomThresholdsToSystem(nextCustom);
     setNotice({
       type: 'success',
-      text: `Masa ED kustom "${threshold.label}" dihapus dari filter sistem.`
+      text: syncRes.syncedCloud
+        ? `Masa ED kustom "${threshold.label}" dihapus dan tersinkronisasi ke Supabase.`
+        : `Masa ED kustom "${threshold.label}" dihapus dari filter sistem.`
     });
   };
 
@@ -522,15 +580,19 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
 
       if (validBatches.length > 0) {
         withEdCount += 1;
+        const medStockNum = Math.max(0, Number(med.stock) || 0);
+        const sumValidBatchStock = validBatches.reduce((sum, b) => sum + Math.max(0, Number(b.stock) || 0), 0);
         validBatches.forEach((b, idx) => {
           const parsed = parseExpiryDate(b.expDate);
           if (!parsed) return;
           const daysLeft = Math.round((parsed.date.getTime() - todayStart) / 86400000);
           if (daysLeft > activeWindowDays) return;
-          const batchStock =
-            validBatches.length === 1 && (Number(b.stock) || 0) !== (Number(med.stock) || 0)
-              ? Number(med.stock) || 0
-              : Number(b.stock) || 0;
+          let batchStock = Math.max(0, Number(b.stock) || 0);
+          if (validBatches.length === 1 && batchStock !== medStockNum) {
+            batchStock = medStockNum;
+          } else if (sumValidBatchStock === 0 && medStockNum > 0 && idx === 0) {
+            batchStock = medStockNum;
+          }
           const hpp = Number(med.hpp) || 0;
           rows.push({
             rowKey: `${med.id}::${b.id || idx}::${parsed.iso}`,
@@ -705,20 +767,26 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
   const openActionModal = (mode: 'disposal' | 'return', targetRows: ProductExpiryRow[]) => {
     if (targetRows.length === 0) return;
     setActionFormError(null);
-    const mapped = targetRows.map((r) => ({
-      rowKey: r.rowKey,
-      medicineId: r.medicineId,
-      name: r.name,
-      batchId: r.batchId,
-      batchNo: r.batchNo,
-      expDate: r.expDateIso,
-      availableStock: Math.max(0, r.stock),
-      qty: r.stock > 0 ? r.stock : 1,
-      unit: r.unit,
-      hpp: r.hpp,
-      supplier: r.supplier,
-      status: r.status
-    }));
+    const mapped = targetRows.map((r) => {
+      const mStock = Math.max(0, Math.round(Number(r.medicine.stock) || 0));
+      const bStock = Math.max(0, Math.round(Number(r.stock) || 0));
+      const effectiveAvailable = bStock > 0 ? Math.min(bStock, mStock > 0 ? mStock : bStock) : mStock;
+      return {
+        rowKey: r.rowKey,
+        medicineId: r.medicineId,
+        name: r.name,
+        batchId: r.batchId,
+        batchNo: r.batchNo,
+        expDate: r.expDateIso,
+        availableStock: effectiveAvailable,
+        masterStock: mStock,
+        qty: effectiveAvailable > 0 ? effectiveAvailable : 0,
+        unit: r.unit,
+        hpp: r.hpp,
+        supplier: r.supplier,
+        status: r.status
+      };
+    });
     setActionItems(mapped);
 
     const todayCompact = new Date().toISOString().slice(0, 10).replace(/-/g, '');
@@ -755,14 +823,48 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
     setActionModalMode(mode);
   };
 
-  const handleSubmitActionModal = (e: React.FormEvent) => {
+  const handleSubmitActionModal = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingAction) return;
     setActionFormError(null);
 
-    const validItems = actionItems.filter((it) => Number(it.qty) > 0);
+    const validItems = actionItems.filter((it) => Math.round(Number(it.qty) || 0) > 0);
     if (validItems.length === 0) {
       setActionFormError('Minimal 1 produk harus memiliki jumlah (Qty) lebih dari 0.');
       return;
+    }
+
+    // Validate cumulative deduction per medicine against actual Master Obat stock
+    const requestedByMed = new Map<string, { name: string; unit: string; totalReq: number; masterStock: number }>();
+    for (const it of validItems) {
+      const latestMed = medicines.find((m) => m.id === it.medicineId);
+      const currentMasterStock = Math.max(
+        0,
+        Math.round(Number(latestMed ? latestMed.stock : it.masterStock) || 0)
+      );
+      const reqQty = Math.round(Number(it.qty) || 0);
+      const prevEntry = requestedByMed.get(it.medicineId);
+      const nextTotal = (prevEntry?.totalReq || 0) + reqQty;
+      requestedByMed.set(it.medicineId, {
+        name: it.name,
+        unit: it.unit,
+        totalReq: nextTotal,
+        masterStock: currentMasterStock
+      });
+    }
+    for (const entry of requestedByMed.values()) {
+      if (entry.masterStock <= 0) {
+        setActionFormError(
+          `Stok "${entry.name}" di Master Obat saat ini 0 ${entry.unit}, sehingga tidak dapat dikurangi lagi.`
+        );
+        return;
+      }
+      if (entry.totalReq > entry.masterStock) {
+        setActionFormError(
+          `Jumlah proses "${entry.name}" (${entry.totalReq.toLocaleString('id-ID')} ${entry.unit}) melebihi stok Master Obat (${entry.masterStock.toLocaleString('id-ID')} ${entry.unit}).`
+        );
+        return;
+      }
     }
 
     if (actionModalMode === 'disposal') {
@@ -804,43 +906,68 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
         items: payloadItems
       };
 
-      onProcessDisposal(payload);
+      setIsSubmittingAction(true);
+      try {
+        const res = await onProcessDisposal(payload);
 
-      const now = new Date();
-      const historyEntry: DisposalHistoryRecord = {
-        id: `DIS-${Date.now().toString().slice(-6)}`,
-        baNumber: payload.baNumber,
-        date: now.toISOString().split('T')[0],
-        time: now.toLocaleTimeString('id-ID'),
-        method: payload.method,
-        witness: payload.witness,
-        reason: payload.reason,
-        petugas: userName,
-        disposalLocation: cleanLocation,
-        witness1Name: payload.witness1Name,
-        witness1Nip: payload.witness1Nip,
-        witness1Role: payload.witness1Role,
-        witness2Name: payload.witness2Name,
-        witness2Nip: payload.witness2Nip,
-        witness2Role: payload.witness2Role,
-        apjName: apjProfile.name,
-        apjSipa: apjProfile.sipa,
-        pharmacyName: pharmacyProfile.name,
-        pharmacyAddress: fullAddress,
-        pharmacyCity: pharmacyProfile.city || currentBranch.name,
-        totalItems: payloadItems.length,
-        totalQty: payloadItems.reduce((s, it) => s + it.qty, 0),
-        totalValue: payloadItems.reduce((s, it) => s + it.subtotal, 0),
-        items: payloadItems
-      };
-      persistDisposalHistory([historyEntry, ...disposalHistory]);
+        // Standalone fallback persistence only if parent didn't pass disposalHistory prop
+        if (disposalHistoryProp === undefined) {
+          const now = new Date();
+          const fallbackEntry: DisposalHistoryRecord = res?.record || {
+            id: `DIS-${Date.now().toString().slice(-6)}`,
+            baNumber: payload.baNumber,
+            date: now.toISOString().split('T')[0],
+            time: now.toLocaleTimeString('id-ID'),
+            method: payload.method,
+            witness: payload.witness,
+            reason: payload.reason,
+            petugas: userName,
+            branchId: currentBranch.id,
+            disposalLocation: cleanLocation,
+            witness1Name: payload.witness1Name,
+            witness1Nip: payload.witness1Nip,
+            witness1Role: payload.witness1Role,
+            witness2Name: payload.witness2Name,
+            witness2Nip: payload.witness2Nip,
+            witness2Role: payload.witness2Role,
+            apjName: apjProfile.name,
+            apjSipa: apjProfile.sipa,
+            pharmacyName: pharmacyProfile.name,
+            pharmacyAddress: fullAddress,
+            pharmacyCity: pharmacyProfile.city || currentBranch.name,
+            totalItems: payloadItems.length,
+            totalQty: payloadItems.reduce((s, it) => s + it.qty, 0),
+            totalValue: payloadItems.reduce((s, it) => s + it.subtotal, 0),
+            items: payloadItems
+          };
+          persistLocalDisposalHistory([fallbackEntry, ...localDisposalHistory]);
+        }
 
-      setSelectedRowKeys(new Set());
-      setActionModalMode(null);
-      setNotice({
-        type: 'success',
-        text: `Pemusnahan ${payload.baNumber} berhasil diproses (${payloadItems.length} item). Stok Master Obat & Kartu Stok telah diperbarui.`
-      });
+        const totalDeductedDisposal = payloadItems.reduce((s, it) => s + it.qty, 0);
+        setSelectedRowKeys(new Set());
+        setActionModalMode(null);
+
+        if (res?.needsDisposalTableSetup) {
+          setNotice({
+            type: 'success',
+            text: `Pemusnahan ${payload.baNumber} berhasil (${payloadItems.length} item, ${totalDeductedDisposal.toLocaleString('id-ID')} unit). Stok Master Obat & Kartu Stok tersinkron ke Supabase; jalankan Skema SQL untuk mengaktifkan arsip cloud tabel ${disposalTableInput}.`
+          });
+        } else if (res && res.disposalSyncOk === false && res.error) {
+          setNotice({
+            type: 'error',
+            text: `Pemusnahan ${payload.baNumber} tersimpan lokal & stok dikurangi, namun sinkronisasi Supabase tertunda: ${res.error}`
+          });
+        } else {
+          setNotice({
+            type: 'success',
+            text: isDemoSandbox
+              ? `Pemusnahan ${payload.baNumber} berhasil diproses di Mode Demo (${payloadItems.length} item, ${totalDeductedDisposal.toLocaleString('id-ID')} unit dikurangi).`
+              : `Pemusnahan ${payload.baNumber} berhasil (${payloadItems.length} item, ${totalDeductedDisposal.toLocaleString('id-ID')} unit dikurangi). Stok Master Obat, Kartu Stok & Riwayat Pemusnahan tersinkronisasi ke Supabase.`
+          });
+        }
+      } finally {
+        setIsSubmittingAction(false);
+      }
       return;
     }
 
@@ -860,19 +987,40 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
         price: it.hpp,
         subtotal: Math.round(Number(it.qty)) * it.hpp
       }));
-      onProcessReturn({
-        pbfName: returnPbfName.trim(),
-        invoiceNo: returnInvoiceNo.trim(),
-        reason: returnReason.trim() || 'Retur produk ED / mendekati ED',
-        items: payloadItems
-      });
+      setIsSubmittingAction(true);
+      try {
+        const res = await onProcessReturn({
+          pbfName: returnPbfName.trim(),
+          invoiceNo: returnInvoiceNo.trim(),
+          reason: returnReason.trim() || 'Retur produk ED / mendekati ED',
+          items: payloadItems
+        });
 
-      setSelectedRowKeys(new Set());
-      setActionModalMode(null);
-      setNotice({
-        type: 'success',
-        text: `Retur ke ${returnPbfName.trim()} berhasil dicatat (${payloadItems.length} item). Stok diperbarui dan arsip tersimpan di menu Retur Pembelian.`
-      });
+        const totalDeductedReturn = payloadItems.reduce((s, it) => s + it.qty, 0);
+        setSelectedRowKeys(new Set());
+        setActionModalMode(null);
+
+        if (res?.needsReturnTableSetup) {
+          setNotice({
+            type: 'success',
+            text: `Retur ke ${returnPbfName.trim()} berhasil (${payloadItems.length} item, ${totalDeductedReturn.toLocaleString('id-ID')} unit). Stok Master Obat & Kartu Stok tersinkron ke Supabase; jalankan Skema SQL untuk mengaktifkan arsip cloud tabel ${purchaseReturnTableInput}.`
+          });
+        } else if (res && res.returnSyncOk === false && res.error) {
+          setNotice({
+            type: 'error',
+            text: `Retur ke ${returnPbfName.trim()} tersimpan lokal & stok dikurangi, namun sinkronisasi Supabase tertunda: ${res.error}`
+          });
+        } else {
+          setNotice({
+            type: 'success',
+            text: isDemoSandbox
+              ? `Retur ke ${returnPbfName.trim()} berhasil dicatat di Mode Demo (${payloadItems.length} item, ${totalDeductedReturn.toLocaleString('id-ID')} unit dikurangi).`
+              : `Retur ke ${returnPbfName.trim()} berhasil (${payloadItems.length} item, ${totalDeductedReturn.toLocaleString('id-ID')} unit dikurangi). Stok Master Obat, Kartu Stok & Riwayat Retur tersinkronisasi ke Supabase.`
+          });
+        }
+      } finally {
+        setIsSubmittingAction(false);
+      }
     }
   };
 
@@ -906,12 +1054,39 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
       if (wCombined) {
         updatedRecord.witness = wCombined;
       }
-      const nextHistory = disposalHistory.map((item) =>
-        item.id === updatedRecord.id ? updatedRecord : item
-      );
-      persistDisposalHistory(nextHistory);
+      if (onUpdateDisposalRecord) {
+        void onUpdateDisposalRecord(updatedRecord);
+      } else {
+        const nextHistory = localDisposalHistory.map((item) =>
+          item.id === updatedRecord.id ? updatedRecord : item
+        );
+        persistLocalDisposalHistory(nextHistory);
+      }
       return { kind: 'disposal', record: updatedRecord };
     });
+  };
+
+  const handleConfirmDeleteDisposal = async (id: string) => {
+    setConfirmDeleteDisposalId(null);
+    if (onDeleteDisposalRecord) {
+      const res = await onDeleteDisposalRecord(id);
+      if (res && !res.success && !res.needsTableSetup && res.error) {
+        setNotice({
+          type: 'error',
+          text: `Riwayat pemusnahan dihapus lokal, namun gagal hapus di Supabase: ${res.error}`
+        });
+        return;
+      }
+      setNotice({
+        type: 'success',
+        text: isDemoSandbox
+          ? 'Riwayat pemusnahan berhasil dihapus dari Mode Demo.'
+          : 'Riwayat pemusnahan berhasil dihapus dan disinkronkan dengan Supabase.'
+      });
+    } else {
+      persistLocalDisposalHistory(localDisposalHistory.filter((r) => r.id !== id));
+      setNotice({ type: 'success', text: 'Riwayat pemusnahan berhasil dihapus.' });
+    }
   };
 
   const handleDownloadCsv = (rowsToExport: ProductExpiryRow[]) => {
@@ -964,31 +1139,77 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
     URL.revokeObjectURL(url);
   };
 
-  const handleSyncMaster = async () => {
-    if (!onSyncMedicinesSupabase) return;
+  const handleSyncSupabase = async () => {
+    if (!onSyncKelolaProdukSupabase && !onSyncMedicinesSupabase) return;
     setIsSyncingMaster(true);
     setNotice(null);
     try {
-      const res = await onSyncMedicinesSupabase();
-      if (res.success) {
-        setNotice({
-          type: 'success',
-          text: `Master Obat tersinkronisasi (${(res.count ?? medicines.length).toLocaleString('id-ID')} produk) sebagai acuan monitoring ED.`
-        });
-      } else {
-        setNotice({
-          type: 'error',
-          text: res.error || 'Gagal menyinkronkan Master Obat dari Supabase.'
-        });
+      if (onSyncKelolaProdukSupabase) {
+        const res = await onSyncKelolaProdukSupabase();
+        if (res.success) {
+          setNotice({
+            type: 'success',
+            text:
+              res.syncedSummary ||
+              `Sinkronisasi Supabase Kelola Produk berhasil (${(res.medicinesCount ?? medicines.length).toLocaleString('id-ID')} produk Master Obat).`
+          });
+        } else {
+          setNotice({
+            type: 'error',
+            text: res.error || 'Gagal menyinkronkan data Kelola Produk dari Supabase.'
+          });
+        }
+      } else if (onSyncMedicinesSupabase) {
+        const res = await onSyncMedicinesSupabase();
+        if (res.success) {
+          setNotice({
+            type: 'success',
+            text: `Master Obat tersinkronisasi (${(res.count ?? medicines.length).toLocaleString('id-ID')} produk) sebagai acuan monitoring ED.`
+          });
+        } else {
+          setNotice({
+            type: 'error',
+            text: res.error || 'Gagal menyinkronkan Master Obat dari Supabase.'
+          });
+        }
       }
     } catch (err: any) {
-      setNotice({ type: 'error', text: err?.message || 'Gagal menyinkronkan Master Obat.' });
+      setNotice({ type: 'error', text: err?.message || 'Gagal menyinkronkan data Supabase.' });
     } finally {
       setIsSyncingMaster(false);
     }
   };
 
+  const handleSaveSupabaseTableNames = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isDemoSandbox) return;
+    const cleanDis = disposalTableInput.trim() || DEFAULT_DISPOSAL_HISTORY_TABLE;
+    const cleanRet = purchaseReturnTableInput.trim() || DEFAULT_PURCHASE_RETURN_TABLE;
+    setDisposalTableInput(cleanDis);
+    setPurchaseReturnTableInput(cleanRet);
+    setSupabaseConfig({
+      disposalHistoryTable: cleanDis,
+      purchaseReturnTable: cleanRet
+    });
+    await handleSyncSupabase();
+  };
+
+  const handleCopySqlSchema = async () => {
+    try {
+      await navigator.clipboard.writeText(SUPABASE_KELOLA_PRODUK_SQL_SCHEMA);
+      setCopiedSchema(true);
+      setTimeout(() => setCopiedSchema(false), 2500);
+    } catch {
+      setNotice({
+        type: 'error',
+        text: 'Gagal menyalin otomatis. Silakan blok dan salin skrip SQL secara manual.'
+      });
+    }
+  };
+
   const activeThresholdObj = edThresholds.find((t) => t.days === activeWindowDays);
+  const needsAnyKelolaTableSetup =
+    !isDemoSandbox && (needsDisposalTableSetup || needsReturnTableSetup);
 
   return (
     <div className="space-y-5">
@@ -1014,17 +1235,29 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
-          {onSyncMedicinesSupabase && (
+          {(onSyncKelolaProdukSupabase || onSyncMedicinesSupabase) && (
             <button
               type="button"
-              onClick={handleSyncMaster}
+              onClick={handleSyncSupabase}
               disabled={isSyncingMaster}
               className="px-3.5 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-60 whitespace-nowrap shrink-0"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isSyncingMaster ? 'animate-spin' : ''}`} />
-              <span>{isSyncingMaster ? 'Menyinkronkan...' : 'Sinkronkan Master Obat'}</span>
+              <span>{isSyncingMaster ? 'Menyinkronkan...' : 'Sinkronkan Supabase'}</span>
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => setShowSchemaModal(true)}
+            className={`px-3.5 py-2 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
+              needsAnyKelolaTableSetup
+                ? 'border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800'
+                : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+            }`}
+          >
+            <Database className="w-3.5 h-3.5" />
+            <span>Skema SQL</span>
+          </button>
           <button
             type="button"
             onClick={() =>
@@ -1045,6 +1278,37 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Inline Setup Guide Banner (only when pemusnahan_obat / retur_pembelian table is missing on Supabase) */}
+      {needsAnyKelolaTableSetup && (
+        <div className="px-4 py-3 rounded-xl border border-amber-200 bg-amber-50/90 text-amber-950 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <Database className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+            <div>
+              <strong className="font-semibold">
+                Sinkronisasi Master Obat, Kartu Stok &amp; Filter Masa ED sudah aktif.
+              </strong>{' '}
+              Tabel arsip{' '}
+              <span className="font-mono font-semibold">
+                {[
+                  needsDisposalTableSetup ? disposalTableInput : null,
+                  needsReturnTableSetup ? purchaseReturnTableInput : null
+                ]
+                  .filter(Boolean)
+                  .join(' & ')}
+              </span>{' '}
+              belum ditemukan di Supabase. Jalankan Skema SQL sekali agar riwayat pemusnahan &amp; retur tersimpan 2-arah di cloud.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowSchemaModal(true)}
+            className="px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-800 text-white text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer transition"
+          >
+            Buka Skema SQL
+          </button>
+        </div>
+      )}
 
       {/* Inline Feedback Notice */}
       {notice && (
@@ -1607,14 +1871,44 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
                         Rp {rec.totalValue.toLocaleString('id-ID')}
                       </td>
                       <td className="py-3 px-4 text-right whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() => handlePrintDisposalBA(rec)}
-                          className="px-3 py-1.5 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-[11px] font-semibold inline-flex items-center gap-1.5 cursor-pointer transition"
-                        >
-                          <FileText className="w-3.5 h-3.5" />
-                          <span>Dokumen BA</span>
-                        </button>
+                        <div className="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handlePrintDisposalBA(rec)}
+                            className="px-3 py-1.5 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-[11px] font-semibold inline-flex items-center gap-1.5 cursor-pointer transition"
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                            <span>Dokumen BA</span>
+                          </button>
+                          {confirmDeleteDisposalId === rec.id ? (
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleConfirmDeleteDisposal(rec.id)}
+                                className="px-2 py-1.5 rounded-md bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-semibold cursor-pointer transition"
+                              >
+                                Hapus
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteDisposalId(null)}
+                                className="px-2 py-1.5 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-[11px] font-semibold cursor-pointer transition"
+                              >
+                                Batal
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteDisposalId(rec.id)}
+                              title="Hapus arsip pemusnahan"
+                              aria-label={`Hapus arsip ${rec.baNumber}`}
+                              className="p-1.5 rounded-md border border-slate-200 bg-white hover:bg-rose-50 hover:border-rose-200 text-slate-400 hover:text-rose-600 cursor-pointer transition"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -1956,7 +2250,7 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
                       <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold">
                         <th className="py-2 px-3">Produk</th>
                         <th className="py-2 px-3 whitespace-nowrap">Batch · ED</th>
-                        <th className="py-2 px-3 text-right whitespace-nowrap">Stok</th>
+                        <th className="py-2 px-3 text-right whitespace-nowrap">Stok → Sisa</th>
                         <th className="py-2 px-3 text-right whitespace-nowrap w-28">
                           {actionModalMode === 'disposal' ? 'Qty Musnah' : 'Qty Retur'}
                         </th>
@@ -1964,34 +2258,60 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {actionItems.map((it, idx) => (
-                        <tr key={it.rowKey}>
-                          <td className="py-2 px-3 font-semibold text-slate-900">{it.name}</td>
-                          <td className="py-2 px-3 font-mono text-[11px] text-slate-600 whitespace-nowrap">
-                            {it.batchNo} · {formatDateID(it.expDate)}
-                          </td>
-                          <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-600 whitespace-nowrap">
-                            {it.availableStock.toLocaleString('id-ID')} {it.unit}
-                          </td>
-                          <td className="py-2 px-3 text-right">
-                            <input
-                              type="number"
-                              min={1}
-                              value={it.qty}
-                              onChange={(e) => {
-                                const val = Math.max(0, parseInt(e.target.value, 10) || 0);
-                                setActionItems((prev) =>
-                                  prev.map((row, i) => (i === idx ? { ...row, qty: val } : row))
-                                );
-                              }}
-                              className="w-20 px-2 py-1 border border-slate-300 rounded text-right font-mono font-bold text-slate-900"
-                            />
-                          </td>
-                          <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-800 whitespace-nowrap">
-                            Rp {(Math.max(0, it.qty) * it.hpp).toLocaleString('id-ID')}
-                          </td>
-                        </tr>
-                      ))}
+                      {actionItems.map((it, idx) => {
+                        const qtyNum = Math.max(0, Math.round(Number(it.qty) || 0));
+                        const remainingAfter = Math.max(0, it.masterStock - qtyNum);
+                        const exceedsStock = qtyNum > it.masterStock;
+                        return (
+                          <tr key={it.rowKey}>
+                            <td className="py-2 px-3 font-semibold text-slate-900">{it.name}</td>
+                            <td className="py-2 px-3 font-mono text-[11px] text-slate-600 whitespace-nowrap">
+                              {it.batchNo} · {formatDateID(it.expDate)}
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono tabular-nums whitespace-nowrap">
+                              <span className="text-slate-600">
+                                {it.masterStock.toLocaleString('id-ID')}
+                              </span>
+                              <span className="mx-1 text-slate-400">→</span>
+                              <span
+                                className={`font-bold ${
+                                  exceedsStock
+                                    ? 'text-rose-600'
+                                    : remainingAfter === 0
+                                    ? 'text-amber-700'
+                                    : 'text-emerald-700'
+                                }`}
+                              >
+                                {remainingAfter.toLocaleString('id-ID')}
+                              </span>{' '}
+                              <span className="text-[11px] text-slate-500">{it.unit}</span>
+                            </td>
+                            <td className="py-2 px-3 text-right">
+                              <input
+                                type="number"
+                                min={0}
+                                max={Math.max(0, it.masterStock)}
+                                value={it.qty}
+                                onChange={(e) => {
+                                  const rawVal = Math.max(0, parseInt(e.target.value, 10) || 0);
+                                  const clamped = Math.min(rawVal, Math.max(0, it.masterStock));
+                                  setActionItems((prev) =>
+                                    prev.map((row, i) => (i === idx ? { ...row, qty: clamped } : row))
+                                  );
+                                }}
+                                className={`w-20 px-2 py-1 border rounded text-right font-mono font-bold ${
+                                  exceedsStock
+                                    ? 'border-rose-400 bg-rose-50 text-rose-800'
+                                    : 'border-slate-300 text-slate-900'
+                                }`}
+                              />
+                            </td>
+                            <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-800 whitespace-nowrap">
+                              Rp {(qtyNum * it.hpp).toLocaleString('id-ID')}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -2015,20 +2335,24 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
+                    disabled={isSubmittingAction}
                     onClick={() => setActionModalMode(null)}
-                    className="px-4 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-semibold cursor-pointer"
+                    className="px-4 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-semibold cursor-pointer disabled:opacity-50"
                   >
                     Batal
                   </button>
                   <button
                     type="submit"
-                    className={`px-4 py-2 rounded-lg text-white font-semibold cursor-pointer transition ${
+                    disabled={isSubmittingAction}
+                    className={`px-4 py-2 rounded-lg text-white font-semibold cursor-pointer transition disabled:opacity-60 ${
                       actionModalMode === 'disposal'
                         ? 'bg-rose-600 hover:bg-rose-700'
                         : 'bg-amber-600 hover:bg-amber-700'
                     }`}
                   >
-                    {actionModalMode === 'disposal'
+                    {isSubmittingAction
+                      ? 'Menyimpan ke Supabase...'
+                      : actionModalMode === 'disposal'
                       ? 'Konfirmasi Pemusnahan'
                       : 'Konfirmasi Retur ke PBF'}
                   </button>
@@ -2723,6 +3047,93 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
                   );
                 })()
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Skema SQL & Pengaturan Tabel Supabase Kelola Produk */}
+      {showSchemaModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4 print:hidden">
+          <div className="bg-white border border-slate-200 rounded-xl w-full max-w-3xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <Database className="w-4 h-4 text-sky-600" />
+                  <span>Skema SQL Supabase — Submenu Kelola Produk</span>
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Sinkronisasi 2-arah &amp; real-time untuk Riwayat Pemusnahan Obat (<span className="font-mono">{disposalTableInput}</span>) dan Riwayat Retur Pembelian (<span className="font-mono">{purchaseReturnTableInput}</span>). Master Obat, Kartu Stok &amp; Filter Masa ED tersambung otomatis.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowSchemaModal(false)}
+                aria-label="Tutup modal skema SQL"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 overflow-y-auto space-y-4 text-xs">
+              <form
+                onSubmit={handleSaveSupabaseTableNames}
+                className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end bg-slate-50 p-3.5 rounded-xl border border-slate-200"
+              >
+                <div className="sm:col-span-4">
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Tabel Pemusnahan Obat
+                  </label>
+                  <input
+                    type="text"
+                    value={disposalTableInput}
+                    onChange={(e) => setDisposalTableInput(e.target.value)}
+                    disabled={isDemoSandbox}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-semibold bg-white text-slate-900 disabled:opacity-60"
+                  />
+                </div>
+                <div className="sm:col-span-4">
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Tabel Retur Pembelian
+                  </label>
+                  <input
+                    type="text"
+                    value={purchaseReturnTableInput}
+                    onChange={(e) => setPurchaseReturnTableInput(e.target.value)}
+                    disabled={isDemoSandbox}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-semibold bg-white text-slate-900 disabled:opacity-60"
+                  />
+                </div>
+                <div className="sm:col-span-4">
+                  <button
+                    type="submit"
+                    disabled={isDemoSandbox || isSyncingMaster}
+                    className="w-full px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-semibold cursor-pointer transition"
+                  >
+                    {isSyncingMaster ? 'Menguji Koneksi...' : 'Simpan & Tes Koneksi'}
+                  </button>
+                </div>
+              </form>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-slate-700">
+                    Salin &amp; jalankan di Supabase Dashboard &rarr; SQL Editor:
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCopySqlSchema}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold inline-flex items-center gap-1.5 cursor-pointer transition"
+                  >
+                    {copiedSchema ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedSchema ? 'SQL Tersalin!' : 'Salin SQL'}</span>
+                  </button>
+                </div>
+                <pre className="p-4 rounded-xl bg-slate-950 text-emerald-300 font-mono text-[11px] overflow-x-auto max-h-80 leading-relaxed">
+                  {SUPABASE_KELOLA_PRODUK_SQL_SCHEMA}
+                </pre>
+              </div>
             </div>
           </div>
         </div>

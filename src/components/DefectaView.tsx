@@ -55,6 +55,7 @@ import {
   sendPurchaseOrderViaWhatsapp
 } from '../utils/purchaseOrderWhatsapp';
 import { PaginationControls } from './PaginationControls';
+import { RupiahInput } from './RupiahInput';
 import { playBarcodeBeep } from '../utils/barcodeBeep';
 const CameraBarcodeScannerModal = lazy(() =>
   import('./CameraBarcodeScannerModal').then((m) => ({ default: m.CameraBarcodeScannerModal }))
@@ -1392,6 +1393,19 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
       const qtyKecil = qty * (item.rasioKonversi || 1);
       const subtotal = qty * item.estimatedHna;
       updated[index] = { ...item, qtyBesar: qty, qtyKecil, subtotal };
+      return { ...prev, items: updated };
+    });
+  };
+
+  // Change Estimated HNA manually in Order Form
+  const handleUpdateItemHna = (index: number, newHna: number) => {
+    const cleanHna = Math.max(0, Math.round(Number(newHna) || 0));
+    setOrderForm((prev) => {
+      const updated = [...prev.items];
+      const item = updated[index];
+      if (!item) return prev;
+      const subtotal = (Number(item.qtyBesar) || 0) * cleanHna;
+      updated[index] = { ...item, estimatedHna: cleanHna, subtotal };
       return { ...prev, items: updated };
     });
   };
@@ -2923,8 +2937,15 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
                                 />
                               </td>
 
-                              <td className="p-2.5 text-right font-mono text-slate-600 whitespace-nowrap">
-                                Rp {it.estimatedHna.toLocaleString('id-ID')}
+                              <td className="p-2.5 text-right whitespace-nowrap">
+                                <RupiahInput
+                                  value={it.estimatedHna}
+                                  onChangeValue={(val) => handleUpdateItemHna(idx, val)}
+                                  prefix="Rp"
+                                  containerClassName="relative inline-flex items-center w-36"
+                                  className="w-full pr-2 py-1 text-right font-mono font-bold text-[11px] text-slate-900 bg-white border border-slate-300 rounded-lg outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+                                  title="Estimasi HNA per satuan besar (otomatis dari Master Obat, dapat diubah manual)"
+                                />
                               </td>
 
                               <td className="p-2.5 text-right font-mono font-black text-slate-900 whitespace-nowrap">

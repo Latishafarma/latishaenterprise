@@ -284,6 +284,170 @@ export function deductBatchesFEFO(
   );
 }
 
+function normalizeExpiryCompareKey(raw?: string | null): string {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  let m = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  m = s.match(/^(\d{4})[-/](\d{1,2})$/);
+  if (m) {
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const lastDay = new Date(y, mo, 0).getDate();
+    return `${m[1]}-${m[2].padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+  }
+  m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  m = s.match(/^(\d{1,2})[-/](\d{4})$/);
+  if (m) {
+    const mo = Number(m[1]);
+    const y = Number(m[2]);
+    const lastDay = new Date(y, mo, 0).getDate();
+    return `${m[2]}-${m[1].padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+  }
+  return s.toLowerCase();
+}
+
+/**
+ * Deduct stock for disposal (pemusnahan) or supplier return (retur PBF) targeting a specific batch
+ * (by batchId, batchNo, and/or normalized expDate) while reconciling with med.stock and returning
+ * the remaining active primary batchNo/expDate for Master Obat.
+ */
+export function deductMedicineStockByBatch(
+  med: Medicine,
+  qtyOut: number,
+  target?: {
+    batchId?: string;
+    batchNo?: string;
+    expDate?: string;
+  }
+): {
+  batches: MedicineBatch[];
+  stock: number;
+  batchNo: string;
+  expDate: string;
+  deductedQty: number;
+  allocations: BatchAllocation[];
+} {
+  const prevStock = Math.max(0, Math.round(Number(med.stock) || 0));
+  const requestedOut = Math.max(0, Math.round(Number(qtyOut) || 0));
+  const targetFinalStock = Math.max(0, prevStock - requestedOut);
+  const actualDeduct = prevStock - targetFinalStock;
+
+  const working = getNormalizedBatches(med, false).map((b) => ({ ...b }));
+  const cleanBatchId = (target?.batchId || '').trim();
+  const cleanBatchNo = (target?.batchNo || '').trim().toLowerCase();
+  const cleanExpKey = normalizeExpiryCompareKey(target?.expDate);
+
+  const findTargetBatchIndex = (requirePositiveStock: boolean): number => {
+    const eligible = (b: MedicineBatch) => !requirePositiveStock || b.stock > 0;
+    if (cleanBatchId) {
+      const idx = working.findIndex((b) => eligible(b) && (b.id || '').trim() === cleanBatchId);
+      if (idx >= 0) return idx;
+    }
+    if (cleanBatchNo && cleanBatchNo !== '-' && cleanExpKey) {
+      const idx = working.findIndex(
+        (b) =>
+          eligible(b) &&
+          b.batchNo.trim().toLowerCase() === cleanBatchNo &&
+          normalizeExpiryCompareKey(b.expDate) === cleanExpKey
+      );
+      if (idx >= 0) return idx;
+    }
+    if (cleanBatchNo && cleanBatchNo !== '-') {
+      const idx = working.findIndex(
+        (b) => eligible(b) && b.batchNo.trim().toLowerCase() === cleanBatchNo
+      );
+      if (idx >= 0) return idx;
+    }
+    if (cleanExpKey) {
+      const idx = working.findIndex(
+        (b) => eligible(b) && normalizeExpiryCompareKey(b.expDate) === cleanExpKey
+      );
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  };
+
+  // Reconcile batch stocks with med.stock if legacy multi-batch sums drifted from med.stock
+  const sumBatches = working.reduce((acc, b) => acc + b.stock, 0);
+  if (sumBatches !== prevStock && working.length > 0) {
+    if (sumBatches < prevStock) {
+      const diff = prevStock - sumBatches;
+      const targetIdx = findTargetBatchIndex(false);
+      working[targetIdx >= 0 ? targetIdx : 0].stock += diff;
+    } else {
+      let excess = sumBatches - prevStock;
+      for (let i = working.length - 1; i >= 0 && excess > 0; i--) {
+        const trim = Math.min(working[i].stock, excess);
+        working[i].stock -= trim;
+        excess -= trim;
+      }
+    }
+  }
+
+  let remaining = actualDeduct;
+  const allocations: BatchAllocation[] = [];
+
+  // 1. Deduct from the specifically selected batch first
+  if (remaining > 0) {
+    const targetIdx = findTargetBatchIndex(true);
+    if (targetIdx >= 0) {
+      const take = Math.min(working[targetIdx].stock, remaining);
+      if (take > 0) {
+        working[targetIdx].stock -= take;
+        remaining -= take;
+        allocations.push({
+          batchNo: working[targetIdx].batchNo || '-',
+          expDate: working[targetIdx].expDate || target?.expDate || '',
+          qty: take
+        });
+      }
+    }
+  }
+
+  // 2. If requested quantity exceeds the single batch stock, spill over FEFO across remaining positive batches
+  for (let i = 0; i < working.length && remaining > 0; i++) {
+    if (working[i].stock <= 0) continue;
+    const take = Math.min(working[i].stock, remaining);
+    if (take > 0) {
+      working[i].stock -= take;
+      remaining -= take;
+      const existing = allocations.find(
+        (a) =>
+          a.batchNo.toLowerCase() === (working[i].batchNo || '-').toLowerCase() &&
+          (a.expDate || '') === (working[i].expDate || '')
+      );
+      if (existing) {
+        existing.qty += take;
+      } else {
+        allocations.push({
+          batchNo: working[i].batchNo || '-',
+          expDate: working[i].expDate || '',
+          qty: take
+        });
+      }
+    }
+  }
+
+  const resolved = resolvePrimaryBatchAndStock(
+    working,
+    med.batchNo,
+    med.expDate,
+    true,
+    false
+  );
+
+  return {
+    batches: resolved.batches,
+    stock: targetFinalStock,
+    batchNo: resolved.batchNo,
+    expDate: resolved.expDate,
+    deductedQty: actualDeduct,
+    allocations
+  };
+}
+
 export function addBatchStock(
   med: Medicine,
   batchNo: string,

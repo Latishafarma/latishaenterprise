@@ -20,7 +20,9 @@ export type SyncRegistryDomain =
   | 'discounts_promos'
   | 'mitra_orders'
   | 'patients'
-  | 'staff';
+  | 'staff'
+  | 'disposal_records'
+  | 'purchase_returns';
 
 const MAX_TOMBSTONES = 3000;
 
@@ -173,6 +175,20 @@ const STORAGE_KEYS: Record<
     pendingSync: 'latisha_pending_sync_staff_ids_v1',
     clearAllPending: 'latisha_pending_clear_staff_v1',
     syncedOnce: 'latisha_staff_cloud_synced_once_v1'
+  },
+  disposal_records: {
+    deleted: 'latisha_deleted_disposal_record_ids_v1',
+    pendingDelete: 'latisha_pending_delete_disposal_record_ids_v1',
+    pendingSync: 'latisha_pending_sync_disposal_record_ids_v1',
+    clearAllPending: 'latisha_pending_clear_disposal_records_v1',
+    syncedOnce: 'latisha_disposal_records_cloud_synced_once_v1'
+  },
+  purchase_returns: {
+    deleted: 'latisha_deleted_purchase_return_ids_v1',
+    pendingDelete: 'latisha_pending_delete_purchase_return_ids_v1',
+    pendingSync: 'latisha_pending_sync_purchase_return_ids_v1',
+    clearAllPending: 'latisha_pending_clear_purchase_returns_v1',
+    syncedOnce: 'latisha_purchase_returns_cloud_synced_once_v1'
   }
 };
 

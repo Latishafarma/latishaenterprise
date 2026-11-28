@@ -262,3 +262,84 @@ export function formatDiscountShortBadge(d: SalesDiscount): string {
     ? `Diskon ${d.value}%`
     : `Hemat Rp ${Math.round(d.value).toLocaleString('id-ID')}`;
 }
+
+export interface ProductUnitDiscountPreview {
+  discount: SalesDiscount;
+  originalPrice: number;
+  discountAmount: number;
+  discountedPrice: number;
+  conditionHint?: string;
+}
+
+/**
+ * Evaluate the best active discount for a product in Portal Reguler / Portal Mitra.
+ * Supports PERCENT discounts (even when conditional on minQty or minPurchaseAmount, so buyers
+ * clearly see the struck-through original price alongside the discounted price + condition note)
+ * and NOMINAL discounts (guarding against cart-level nominal vouchers exceeding a single unit price).
+ */
+export function getBestProductUnitDiscount(
+  med: Medicine,
+  unitPrice: number,
+  discounts: SalesDiscount[],
+  activeChannel: 'REGULER' | 'KLINIK' | 'MITRA' | 'PORTAL_MITRA',
+  voucherCodeInput?: string
+): ProductUnitDiscountPreview | null {
+  const cleanPrice = Math.max(0, Math.round(Number(unitPrice) || 0));
+  if (cleanPrice <= 0 || !Array.isArray(discounts) || discounts.length === 0) return null;
+
+  const trimmedVoucher = (voucherCodeInput || '').trim().toUpperCase();
+  let best: ProductUnitDiscountPreview | null = null;
+
+  for (const d of discounts) {
+    if (!d.isActive) continue;
+    if (!isWithinDateWindow(d.startDate, d.endDate)) continue;
+    if (!matchesChannelScope(d.channelScope, activeChannel)) continue;
+    if (!isMedicineEligibleForDiscount(med, d)) continue;
+
+    const discountCode = (d.code || '').trim().toUpperCase();
+    const voucherMatches = Boolean(trimmedVoucher && discountCode && trimmedVoucher === discountCode);
+    if (!d.autoApply && discountCode && !voucherMatches) continue;
+
+    const minPurchase = Math.max(0, Math.round(Number(d.minPurchaseAmount) || 0));
+    const minQty = Math.max(0, Math.round(Number(d.minQty) || 0));
+
+    let rawAmount = 0;
+    if (d.valueType === 'PERCENT') {
+      const pct = Math.max(0, Math.min(100, Number(d.value) || 0));
+      rawAmount = Math.round((cleanPrice * pct) / 100);
+      const maxCap = Math.max(0, Math.round(Number(d.maxDiscountAmount) || 0));
+      if (maxCap > 0) {
+        rawAmount = Math.min(rawAmount, maxCap);
+      }
+    } else {
+      const nomVal = Math.max(0, Math.round(Number(d.value) || 0));
+      // Prevent cart-wide nominal vouchers (e.g. Rp 50.000 off min purchase Rp 500.000) from zeroing a cheap unit
+      if (nomVal >= cleanPrice && (minPurchase > cleanPrice || minQty > 1 || d.basis === 'MIN_PURCHASE' || d.basis === 'MIN_QTY')) {
+        continue;
+      }
+      rawAmount = nomVal;
+    }
+
+    const finalAmount = Math.min(cleanPrice, Math.max(0, rawAmount));
+    if (finalAmount <= 0) continue;
+
+    const hints: string[] = [];
+    if (minQty > 1) hints.push(`Min. ${minQty.toLocaleString('id-ID')} item`);
+    if (minPurchase > 0 && minPurchase > cleanPrice) {
+      hints.push(`Min. belanja Rp ${minPurchase.toLocaleString('id-ID')}`);
+    }
+
+    if (!best || finalAmount > best.discountAmount) {
+      best = {
+        discount: d,
+        originalPrice: cleanPrice,
+        discountAmount: finalAmount,
+        discountedPrice: Math.max(0, cleanPrice - finalAmount),
+        conditionHint: hints.length > 0 ? hints.join(' · ') : undefined
+      };
+    }
+  }
+
+  return best;
+}
+

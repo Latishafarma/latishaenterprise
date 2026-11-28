@@ -85,6 +85,7 @@ import {
   Supplier,
   CartItem,
   PurchaseReturnRecord,
+  ProductDisposalRecord,
   LabTestRecord,
   StockOpnameRecord,
   StockOpnameItemRecord,
@@ -126,6 +127,7 @@ import {
   resolvePrimaryBatchAndStock,
   allocateBatchesFEFO,
   deductBatchesFEFO,
+  deductMedicineStockByBatch,
   addBatchStock,
   getMedicineHppBox,
   hasMedicinePricingChanged,
@@ -333,6 +335,18 @@ import {
   deletePurchaseOrdersFromSupabase,
   subscribePurchaseOrdersRealtime,
   isDemoPurchaseOrderId,
+  fetchDisposalHistoryFromSupabase,
+  syncDisposalRecordToSupabase,
+  seedDisposalHistoryToSupabase,
+  deleteDisposalHistoryFromSupabase,
+  subscribeDisposalHistoryRealtime,
+  isDemoDisposalRecordId,
+  fetchPurchaseReturnsFromSupabase,
+  syncPurchaseReturnToSupabase,
+  seedPurchaseReturnsToSupabase,
+  deletePurchaseReturnsFromSupabase,
+  subscribePurchaseReturnsRealtime,
+  isDemoPurchaseReturnId,
   fetchMarketingCampaignsFromSupabase,
   syncMarketingCampaignToSupabase,
   seedMarketingCampaignsToSupabase,
@@ -1431,8 +1445,35 @@ export default function App() {
 
   const [purchaseReturns, setPurchaseReturns] = useState<PurchaseReturnRecord[]>(() => {
     const saved = demoGetItem('latisha_purchase_returns');
-    return saved ? JSON.parse(saved) : [];
+    if (!saved) return [];
+    try {
+      const parsed = JSON.parse(saved);
+      const list: PurchaseReturnRecord[] = Array.isArray(parsed) ? parsed : [];
+      const deletedSet = getDeletedIdsSet('purchase_returns');
+      if (isDemoMode()) return list.filter((r) => r?.id && !deletedSet.has(r.id));
+      return list.filter((r) => r?.id && !isDemoPurchaseReturnId(r.id) && !deletedSet.has(r.id));
+    } catch {
+      return [];
+    }
   });
+  const [purchaseReturnsNeedsTableSetup, setPurchaseReturnsNeedsTableSetup] = useState(false);
+  const purchaseReturnChannelRef = React.useRef<ReturnType<typeof subscribePurchaseReturnsRealtime>>(null);
+
+  const [disposalRecords, setDisposalRecords] = useState<ProductDisposalRecord[]>(() => {
+    const saved = demoGetItem('latisha_product_disposal_history');
+    if (!saved) return [];
+    try {
+      const parsed = JSON.parse(saved);
+      const list: ProductDisposalRecord[] = Array.isArray(parsed) ? parsed : [];
+      const deletedSet = getDeletedIdsSet('disposal_records');
+      if (isDemoMode()) return list.filter((r) => r?.id && !deletedSet.has(r.id));
+      return list.filter((r) => r?.id && !isDemoDisposalRecordId(r.id) && !deletedSet.has(r.id));
+    } catch {
+      return [];
+    }
+  });
+  const [disposalRecordsNeedsTableSetup, setDisposalRecordsNeedsTableSetup] = useState(false);
+  const disposalChannelRef = React.useRef<ReturnType<typeof subscribeDisposalHistoryRealtime>>(null);
 
   const [opnameRecords, setOpnameRecords] = useState<StockOpnameRecord[]>(() => {
     const deletedSet = getDeletedIdsSet('opname_records');
@@ -1773,6 +1814,12 @@ export default function App() {
   const purchaseOrdersRef = React.useRef<PurchaseOrder[]>(purchaseOrders);
   purchaseOrdersRef.current = purchaseOrders;
   const purchaseOrdersMutationEpochRef = React.useRef<number>(0);
+  const disposalRecordsRef = React.useRef<ProductDisposalRecord[]>(disposalRecords);
+  disposalRecordsRef.current = disposalRecords;
+  const disposalRecordsMutationEpochRef = React.useRef<number>(0);
+  const purchaseReturnsRef = React.useRef<PurchaseReturnRecord[]>(purchaseReturns);
+  purchaseReturnsRef.current = purchaseReturns;
+  const purchaseReturnsMutationEpochRef = React.useRef<number>(0);
   const marketingCampaignsRef = React.useRef<MarketingCampaign[]>(marketingCampaigns);
   marketingCampaignsRef.current = marketingCampaigns;
   const marketingCampaignsMutationEpochRef = React.useRef<number>(0);
@@ -1870,6 +1917,28 @@ export default function App() {
       demoSetItem('latisha_purchase_orders', JSON.stringify(nextList));
     } catch (err) {
       console.warn('Immediate persist failed for latisha_purchase_orders:', err);
+    }
+  }, []);
+
+  const persistDisposalRecordsNow = useCallback((nextList: ProductDisposalRecord[]) => {
+    disposalRecordsRef.current = nextList;
+    prevPersistedRefs.current['latisha_product_disposal_history'] = nextList;
+    pendingPersistMapRef.current.delete('latisha_product_disposal_history');
+    try {
+      demoSetItem('latisha_product_disposal_history', JSON.stringify(nextList));
+    } catch (err) {
+      console.warn('Immediate persist failed for latisha_product_disposal_history:', err);
+    }
+  }, []);
+
+  const persistPurchaseReturnsNow = useCallback((nextList: PurchaseReturnRecord[]) => {
+    purchaseReturnsRef.current = nextList;
+    prevPersistedRefs.current['latisha_purchase_returns'] = nextList;
+    pendingPersistMapRef.current.delete('latisha_purchase_returns');
+    try {
+      demoSetItem('latisha_purchase_returns', JSON.stringify(nextList));
+    } catch (err) {
+      console.warn('Immediate persist failed for latisha_purchase_returns:', err);
     }
   }, []);
 
@@ -2093,6 +2162,7 @@ export default function App() {
       ['latisha_mitra', mitraList, () => JSON.stringify(mitraList)],
       ['latisha_suppliers', suppliers, () => JSON.stringify(suppliers)],
       ['latisha_purchase_returns', purchaseReturns, () => JSON.stringify(purchaseReturns)],
+      ['latisha_product_disposal_history', disposalRecords, () => JSON.stringify(disposalRecords)],
       ['latisha_lab_records', labRecords, () => JSON.stringify(labRecords)],
       ['latisha_stock_opname_records', opnameRecords, () => JSON.stringify(opnameRecords)],
       ['latisha_staff', staffList, () => JSON.stringify(staffList)],
@@ -2168,6 +2238,7 @@ export default function App() {
     mitraList,
     suppliers,
     purchaseReturns,
+    disposalRecords,
     opnameRecords,
     staffList,
     schedules,
@@ -2489,6 +2560,8 @@ export default function App() {
     let cancelledShiftEffect = false;
     let cancelledPurchaseInvoiceEffect = false;
     let cancelledPurchaseOrderEffect = false;
+    let cancelledDisposalEffect = false;
+    let cancelledPurchaseReturnEffect = false;
     let cancelledMarketingEffect = false;
     let cancelledPrescriptionEffect = false;
 
@@ -2513,6 +2586,8 @@ export default function App() {
     let cashierShiftChannel: ReturnType<typeof subscribeCashierShiftsRealtime> = null;
     let purchaseInvoiceChannel: ReturnType<typeof subscribePurchaseInvoicesRealtime> = null;
     let purchaseOrderChannel: ReturnType<typeof subscribePurchaseOrdersRealtime> = null;
+    let disposalChannel: ReturnType<typeof subscribeDisposalHistoryRealtime> = null;
+    let purchaseReturnChannel: ReturnType<typeof subscribePurchaseReturnsRealtime> = null;
     let marketingChannel: ReturnType<typeof subscribeMarketingCampaignsRealtime> = null;
     let facilityProfileChannel: ReturnType<typeof subscribeFacilityProfileRealtime> = null;
     let prescriptionChannel: ReturnType<typeof subscribePrescriptionsRealtime> = null;
@@ -5267,6 +5342,336 @@ export default function App() {
     })();
     };
 
+    // 10f2. Initial Inbound Sync & Safe Realtime: Riwayat Pemusnahan Obat Kelola Produk (pemusnahan_obat)
+    const startDisposalHistorySync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
+        if (isDemoMode()) return;
+
+        const pendingDeleteIds = getPendingDeleteIds('disposal_records');
+        if (pendingDeleteIds.length > 0) {
+          const delRes = await deleteDisposalHistoryFromSupabase(pendingDeleteIds).catch((err) => ({
+            success: false,
+            needsTableSetup: false,
+            error: err?.message || String(err)
+          }));
+          if (cancelledDisposalEffect || isDemoMode()) return;
+          if (delRes.success) {
+            confirmCloudDeletes('disposal_records', pendingDeleteIds);
+          }
+        }
+
+        const startEpoch = disposalRecordsMutationEpochRef.current;
+        const res = await fetchDisposalHistoryFromSupabase();
+        if (cancelledDisposalEffect || isDemoMode()) return;
+        setDisposalRecordsNeedsTableSetup(Boolean(res.needsTableSetup));
+
+        if (!res.needsTableSetup && !res.error && res.data !== null) {
+          const deletedSet = getDeletedIdsSet('disposal_records');
+          const pendingSyncSet = getPendingSyncIdsSet('disposal_records');
+          const epochChanged = disposalRecordsMutationEpochRef.current !== startEpoch;
+          const remoteAll = res.data || [];
+
+          const stubbornDeleted = remoteAll.filter((r) => deletedSet.has(r.id)).map((r) => r.id);
+          if (stubbornDeleted.length > 0) {
+            deleteDisposalHistoryFromSupabase(stubbornDeleted)
+              .then((cRes) => {
+                if (cRes.success) confirmCloudDeletes('disposal_records', stubbornDeleted);
+              })
+              .catch(() => {});
+          }
+
+          const remoteClean = remoteAll.filter(
+            (r) => r.id && !isDemoDisposalRecordId(r.id) && !deletedSet.has(r.id)
+          );
+          const remoteMap = new Map<string, ProductDisposalRecord>();
+          remoteClean.forEach((r) => remoteMap.set(r.id, r));
+          const syncedOnceBefore = hasCompletedInitialCloudSync('disposal_records');
+
+          const currentLocal = disposalRecordsRef.current.filter(
+            (r) => r.id && !isDemoDisposalRecordId(r.id) && !deletedSet.has(r.id)
+          );
+          const localToUpload = currentLocal.filter((r) => {
+            const remoteVersion = remoteMap.get(r.id);
+            if (pendingSyncSet.has(r.id)) return true;
+            if (!remoteVersion && (res.isEmpty || !syncedOnceBefore || epochChanged)) return true;
+            if (remoteVersion && isNewerIsoTimestamp(r.updatedAt, remoteVersion.updatedAt)) return true;
+            return false;
+          });
+
+          let seedSucceeded = localToUpload.length === 0;
+          if (localToUpload.length > 0) {
+            const seedRes = await seedDisposalHistoryToSupabase(localToUpload).catch((err) => ({
+              success: false,
+              count: 0,
+              needsTableSetup: false,
+              error: err?.message || String(err)
+            }));
+            if (cancelledDisposalEffect || isDemoMode()) return;
+            if (seedRes.needsTableSetup) setDisposalRecordsNeedsTableSetup(true);
+            if (seedRes.success) {
+              seedSucceeded = true;
+              confirmCloudSync('disposal_records', localToUpload.map((r) => r.id));
+            }
+          }
+
+          const latestDeletedSet = getDeletedIdsSet('disposal_records');
+          const latestPendingSyncSet = getPendingSyncIdsSet('disposal_records');
+          const latestEpochChanged = disposalRecordsMutationEpochRef.current !== startEpoch;
+          const latestLocal = disposalRecordsRef.current.filter(
+            (r) => r.id && !isDemoDisposalRecordId(r.id) && !latestDeletedSet.has(r.id)
+          );
+          const uploadedIdsSet = new Set(localToUpload.map((r) => r.id));
+
+          const map = new Map<string, ProductDisposalRecord>();
+          remoteClean.forEach((r) => {
+            if (!latestDeletedSet.has(r.id)) map.set(r.id, r);
+          });
+          latestLocal.forEach((r) => {
+            const remoteVersion = map.get(r.id);
+            if (
+              (!remoteVersion &&
+                (latestPendingSyncSet.has(r.id) ||
+                  uploadedIdsSet.has(r.id) ||
+                  latestEpochChanged ||
+                  res.isEmpty ||
+                  !syncedOnceBefore)) ||
+              (remoteVersion &&
+                (latestPendingSyncSet.has(r.id) ||
+                  latestEpochChanged ||
+                  isNewerIsoTimestamp(r.updatedAt, remoteVersion.updatedAt)))
+            ) {
+              map.set(r.id, r);
+            }
+          });
+          const authoritative = Array.from(map.values()).sort((a, b) =>
+            `${b.date || ''} ${b.createdAt || ''}`.localeCompare(`${a.date || ''} ${a.createdAt || ''}`)
+          );
+          setDisposalRecords(authoritative);
+          persistDisposalRecordsNow(authoritative);
+          if (seedSucceeded) {
+            markInitialCloudSyncCompleted('disposal_records');
+          }
+        }
+
+        if (!res.needsTableSetup && !cancelledDisposalEffect) {
+          disposalChannel = subscribeDisposalHistoryRealtime(
+            (newRec) => {
+              if (isDemoMode() || isDemoDisposalRecordId(newRec.id)) return;
+              if (getDeletedIdsSet('disposal_records').has(newRec.id)) return;
+              setDisposalRecords((prev) => {
+                const existing = prev.find((r) => r.id === newRec.id);
+                const pendingSync = getPendingSyncIdsSet('disposal_records').has(newRec.id);
+                const mergedRec =
+                  existing &&
+                  (pendingSync || isNewerIsoTimestamp(existing.updatedAt, newRec.updatedAt))
+                    ? existing
+                    : newRec;
+                const next = existing
+                  ? prev.map((r) => (r.id === newRec.id ? mergedRec : r))
+                  : [mergedRec, ...prev];
+                persistDisposalRecordsNow(next);
+                return next;
+              });
+            },
+            (updatedRec) => {
+              if (isDemoMode() || isDemoDisposalRecordId(updatedRec.id)) return;
+              if (getDeletedIdsSet('disposal_records').has(updatedRec.id)) return;
+              setDisposalRecords((prev) => {
+                const existing = prev.find((r) => r.id === updatedRec.id);
+                const pendingSync = getPendingSyncIdsSet('disposal_records').has(updatedRec.id);
+                const mergedRec =
+                  existing &&
+                  (pendingSync || isNewerIsoTimestamp(existing.updatedAt, updatedRec.updatedAt))
+                    ? existing
+                    : updatedRec;
+                const next = existing
+                  ? prev.map((r) => (r.id === updatedRec.id ? mergedRec : r))
+                  : [mergedRec, ...prev];
+                persistDisposalRecordsNow(next);
+                return next;
+              });
+            },
+            (deletedId) => {
+              if (isDemoMode()) return;
+              recordRemoteDeletedId('disposal_records', deletedId);
+              setDisposalRecords((prev) => {
+                const next = prev.filter((r) => r.id !== deletedId);
+                persistDisposalRecordsNow(next);
+                return next;
+              });
+            }
+          );
+          disposalChannelRef.current = disposalChannel;
+        }
+      })();
+    };
+
+    // 10f3. Initial Inbound Sync & Safe Realtime: Riwayat Retur Pembelian / Retur ED PBF (retur_pembelian)
+    const startPurchaseReturnsSync = () => {
+      if (effectDisposed || isDemoMode()) return;
+      (async () => {
+        if (isDemoMode()) return;
+
+        const pendingDeleteIds = getPendingDeleteIds('purchase_returns');
+        if (pendingDeleteIds.length > 0) {
+          const delRes = await deletePurchaseReturnsFromSupabase(pendingDeleteIds).catch((err) => ({
+            success: false,
+            needsTableSetup: false,
+            error: err?.message || String(err)
+          }));
+          if (cancelledPurchaseReturnEffect || isDemoMode()) return;
+          if (delRes.success) {
+            confirmCloudDeletes('purchase_returns', pendingDeleteIds);
+          }
+        }
+
+        const startEpoch = purchaseReturnsMutationEpochRef.current;
+        const res = await fetchPurchaseReturnsFromSupabase();
+        if (cancelledPurchaseReturnEffect || isDemoMode()) return;
+        setPurchaseReturnsNeedsTableSetup(Boolean(res.needsTableSetup));
+
+        if (!res.needsTableSetup && !res.error && res.data !== null) {
+          const deletedSet = getDeletedIdsSet('purchase_returns');
+          const pendingSyncSet = getPendingSyncIdsSet('purchase_returns');
+          const epochChanged = purchaseReturnsMutationEpochRef.current !== startEpoch;
+          const remoteAll = res.data || [];
+
+          const stubbornDeleted = remoteAll.filter((r) => deletedSet.has(r.id)).map((r) => r.id);
+          if (stubbornDeleted.length > 0) {
+            deletePurchaseReturnsFromSupabase(stubbornDeleted)
+              .then((cRes) => {
+                if (cRes.success) confirmCloudDeletes('purchase_returns', stubbornDeleted);
+              })
+              .catch(() => {});
+          }
+
+          const remoteClean = remoteAll.filter(
+            (r) => r.id && !isDemoPurchaseReturnId(r.id) && !deletedSet.has(r.id)
+          );
+          const remoteMap = new Map<string, PurchaseReturnRecord>();
+          remoteClean.forEach((r) => remoteMap.set(r.id, r));
+          const syncedOnceBefore = hasCompletedInitialCloudSync('purchase_returns');
+
+          const currentLocal = purchaseReturnsRef.current.filter(
+            (r) => r.id && !isDemoPurchaseReturnId(r.id) && !deletedSet.has(r.id)
+          );
+          const localToUpload = currentLocal.filter((r) => {
+            const remoteVersion = remoteMap.get(r.id);
+            if (pendingSyncSet.has(r.id)) return true;
+            if (!remoteVersion && (res.isEmpty || !syncedOnceBefore || epochChanged)) return true;
+            if (remoteVersion && isNewerIsoTimestamp(r.updatedAt, remoteVersion.updatedAt)) return true;
+            return false;
+          });
+
+          let seedSucceeded = localToUpload.length === 0;
+          if (localToUpload.length > 0) {
+            const seedRes = await seedPurchaseReturnsToSupabase(localToUpload).catch((err) => ({
+              success: false,
+              count: 0,
+              needsTableSetup: false,
+              error: err?.message || String(err)
+            }));
+            if (cancelledPurchaseReturnEffect || isDemoMode()) return;
+            if (seedRes.needsTableSetup) setPurchaseReturnsNeedsTableSetup(true);
+            if (seedRes.success) {
+              seedSucceeded = true;
+              confirmCloudSync('purchase_returns', localToUpload.map((r) => r.id));
+            }
+          }
+
+          const latestDeletedSet = getDeletedIdsSet('purchase_returns');
+          const latestPendingSyncSet = getPendingSyncIdsSet('purchase_returns');
+          const latestEpochChanged = purchaseReturnsMutationEpochRef.current !== startEpoch;
+          const latestLocal = purchaseReturnsRef.current.filter(
+            (r) => r.id && !isDemoPurchaseReturnId(r.id) && !latestDeletedSet.has(r.id)
+          );
+          const uploadedIdsSet = new Set(localToUpload.map((r) => r.id));
+
+          const map = new Map<string, PurchaseReturnRecord>();
+          remoteClean.forEach((r) => {
+            if (!latestDeletedSet.has(r.id)) map.set(r.id, r);
+          });
+          latestLocal.forEach((r) => {
+            const remoteVersion = map.get(r.id);
+            if (
+              (!remoteVersion &&
+                (latestPendingSyncSet.has(r.id) ||
+                  uploadedIdsSet.has(r.id) ||
+                  latestEpochChanged ||
+                  res.isEmpty ||
+                  !syncedOnceBefore)) ||
+              (remoteVersion &&
+                (latestPendingSyncSet.has(r.id) ||
+                  latestEpochChanged ||
+                  isNewerIsoTimestamp(r.updatedAt, remoteVersion.updatedAt)))
+            ) {
+              map.set(r.id, r);
+            }
+          });
+          const authoritative = Array.from(map.values()).sort((a, b) =>
+            `${b.date || ''} ${b.createdAt || ''}`.localeCompare(`${a.date || ''} ${a.createdAt || ''}`)
+          );
+          setPurchaseReturns(authoritative);
+          persistPurchaseReturnsNow(authoritative);
+          if (seedSucceeded) {
+            markInitialCloudSyncCompleted('purchase_returns');
+          }
+        }
+
+        if (!res.needsTableSetup && !cancelledPurchaseReturnEffect) {
+          purchaseReturnChannel = subscribePurchaseReturnsRealtime(
+            (newRec) => {
+              if (isDemoMode() || isDemoPurchaseReturnId(newRec.id)) return;
+              if (getDeletedIdsSet('purchase_returns').has(newRec.id)) return;
+              setPurchaseReturns((prev) => {
+                const existing = prev.find((r) => r.id === newRec.id);
+                const pendingSync = getPendingSyncIdsSet('purchase_returns').has(newRec.id);
+                const mergedRec =
+                  existing &&
+                  (pendingSync || isNewerIsoTimestamp(existing.updatedAt, newRec.updatedAt))
+                    ? existing
+                    : newRec;
+                const next = existing
+                  ? prev.map((r) => (r.id === newRec.id ? mergedRec : r))
+                  : [mergedRec, ...prev];
+                persistPurchaseReturnsNow(next);
+                return next;
+              });
+            },
+            (updatedRec) => {
+              if (isDemoMode() || isDemoPurchaseReturnId(updatedRec.id)) return;
+              if (getDeletedIdsSet('purchase_returns').has(updatedRec.id)) return;
+              setPurchaseReturns((prev) => {
+                const existing = prev.find((r) => r.id === updatedRec.id);
+                const pendingSync = getPendingSyncIdsSet('purchase_returns').has(updatedRec.id);
+                const mergedRec =
+                  existing &&
+                  (pendingSync || isNewerIsoTimestamp(existing.updatedAt, updatedRec.updatedAt))
+                    ? existing
+                    : updatedRec;
+                const next = existing
+                  ? prev.map((r) => (r.id === updatedRec.id ? mergedRec : r))
+                  : [mergedRec, ...prev];
+                persistPurchaseReturnsNow(next);
+                return next;
+              });
+            },
+            (deletedId) => {
+              if (isDemoMode()) return;
+              recordRemoteDeletedId('purchase_returns', deletedId);
+              setPurchaseReturns((prev) => {
+                const next = prev.filter((r) => r.id !== deletedId);
+                persistPurchaseReturnsNow(next);
+                return next;
+              });
+            }
+          );
+          purchaseReturnChannelRef.current = purchaseReturnChannel;
+        }
+      })();
+    };
+
     // 10g. Initial Inbound Sync & Safe Realtime: Strategi Marketing (strategi_marketing)
     const startMarketingSync = () => {
       if (effectDisposed || isDemoMode()) return;
@@ -5443,6 +5848,8 @@ export default function App() {
         startMorbiditySync();
         startPurchaseInvoicesSync();
         startPurchaseOrdersSync();
+        startDisposalHistorySync();
+        startPurchaseReturnsSync();
         startMarketingSync();
         startBranchTransfersSync();
         startIcdSync();
@@ -5476,6 +5883,8 @@ export default function App() {
       cancelledShiftEffect = true;
       cancelledPurchaseInvoiceEffect = true;
       cancelledPurchaseOrderEffect = true;
+      cancelledDisposalEffect = true;
+      cancelledPurchaseReturnEffect = true;
       cancelledMarketingEffect = true;
       cancelledPrescriptionEffect = true;
 
@@ -5516,6 +5925,19 @@ export default function App() {
           activeClient.removeChannel(purchaseOrderChannelRef.current);
         }
         purchaseOrderChannelRef.current = null;
+        if (disposalChannel) activeClient.removeChannel(disposalChannel);
+        if (disposalChannelRef.current && disposalChannelRef.current !== disposalChannel) {
+          activeClient.removeChannel(disposalChannelRef.current);
+        }
+        disposalChannelRef.current = null;
+        if (purchaseReturnChannel) activeClient.removeChannel(purchaseReturnChannel);
+        if (
+          purchaseReturnChannelRef.current &&
+          purchaseReturnChannelRef.current !== purchaseReturnChannel
+        ) {
+          activeClient.removeChannel(purchaseReturnChannelRef.current);
+        }
+        purchaseReturnChannelRef.current = null;
         if (marketingChannel) activeClient.removeChannel(marketingChannel);
         if (
           marketingChannelRef.current &&
@@ -8396,36 +8818,77 @@ export default function App() {
       };
     });
 
+    const nowIso = new Date().toISOString();
     const totalVal = detailedItems.reduce((acc, it) => acc + it.subtotal, 0);
     const newReturnRecord: PurchaseReturnRecord = {
       id: `RET-${Date.now().toString().slice(-6)}`,
       invoiceId: inv.id,
       invoiceNo: inv.invoiceNo,
       pbfName: inv.pbfName,
-      date: new Date().toISOString().split('T')[0],
+      date: nowIso.split('T')[0],
       time: new Date().toLocaleTimeString('id-ID'),
       salesman: inv.salesman,
       items: detailedItems,
       totalReturValue: totalVal,
       petugas: userName,
-      branchId: currentBranch.id
+      branchId: currentBranch.id,
+      createdAt: nowIso,
+      updatedAt: nowIso
     };
 
-    setPurchaseReturns((prev) => [newReturnRecord, ...prev]);
+    purchaseReturnsMutationEpochRef.current += 1;
+    setPurchaseReturns((prev) => {
+      const next = [newReturnRecord, ...prev];
+      persistPurchaseReturnsNow(next);
+      return next;
+    });
+    if (!isDemoActive && !isDemoMode()) {
+      markIdsPendingSync('purchase_returns', [newReturnRecord.id]);
+      syncPurchaseReturnToSupabase(newReturnRecord)
+        .then((res) => {
+          if (res.needsTableSetup) setPurchaseReturnsNeedsTableSetup(true);
+          if (res.success) {
+            setPurchaseReturnsNeedsTableSetup(false);
+            confirmCloudSync('purchase_returns', [newReturnRecord.id]);
+          }
+        })
+        .catch((err) => console.warn('Supabase purchase return sync error:', err));
+    }
     addAuditLog('Retur PBF', `Proses retur faktur #${inv.invoiceNo} ke ${inv.pbfName} sebanyak ${returnedItems.length} item obat.`);
   };
 
   const handleDeletePurchaseReturn = (id: string) => {
-    setPurchaseReturns((prev) => prev.filter((r) => r.id !== id));
+    purchaseReturnsMutationEpochRef.current += 1;
+    markIdsDeleted('purchase_returns', [id]);
+    setPurchaseReturns((prev) => {
+      const next = prev.filter((r) => r.id !== id);
+      persistPurchaseReturnsNow(next);
+      return next;
+    });
+    if (!isDemoActive && !isDemoMode()) {
+      deletePurchaseReturnsFromSupabase([id])
+        .then((res) => {
+          if (res.needsTableSetup) setPurchaseReturnsNeedsTableSetup(true);
+          if (res.success) confirmCloudDeletes('purchase_returns', [id]);
+        })
+        .catch((err) => console.warn('Supabase delete purchase return error:', err));
+    }
     addAuditLog('Retur PBF', `Hapus arsip riwayat retur #${id}`);
   };
 
-  // Handler: Pemusnahan produk ED / mendekati ED dari Submenu Kelola Produk
-  const handleProcessExpiryDisposal = (payload: {
+  // Handler: Pemusnahan produk ED / mendekati ED dari Submenu Kelola Produk (Terintegrasi 2-Arah Supabase)
+  const handleProcessExpiryDisposal = async (payload: {
     baNumber: string;
     method: string;
     witness: string;
     reason: string;
+    disposalLocation?: string;
+    witness1Name?: string;
+    witness1Nip?: string;
+    witness1Role?: string;
+    witness2Name?: string;
+    witness2Nip?: string;
+    witness2Role?: string;
     items: {
       medicineId: string;
       name: string;
@@ -8437,11 +8900,22 @@ export default function App() {
       hpp: number;
       subtotal: number;
     }[];
-  }) => {
-    const today = new Date().toISOString().split('T')[0];
-    const nowTime = new Date().toLocaleTimeString('id-ID');
+  }): Promise<{
+    success: boolean;
+    record: ProductDisposalRecord;
+    medicineSyncOk: boolean;
+    stockCardSyncOk: boolean;
+    disposalSyncOk: boolean;
+    needsDisposalTableSetup?: boolean;
+    error?: string;
+  }> => {
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const today = nowIso.split('T')[0];
+    const nowTime = now.toLocaleTimeString('id-ID');
+    const baseMedicines = medicinesRef.current.length > 0 ? medicinesRef.current : medicines;
     const workingMedMap = new Map<string, Medicine>();
-    medicinesRef.current.forEach((m) => {
+    baseMedicines.forEach((m) => {
       workingMedMap.set(m.id, {
         ...m,
         batches: m.batches ? m.batches.map((b) => ({ ...b })) : undefined
@@ -8456,16 +8930,26 @@ export default function App() {
       if (qtyOut <= 0) return;
       const med = workingMedMap.get(it.medicineId);
       let nextBalance = 0;
+      let actualDeducted = qtyOut;
+      let mutationBatchDetails = [{ batchNo: it.batchNo || '-', expDate: it.expDate || '', qty: qtyOut }];
 
       if (med) {
-        const alloc = allocateBatchesFEFO(med, qtyOut, it.batchNo, it.expDate, false);
-        nextBalance = alloc.stock;
+        const result = deductMedicineStockByBatch(med, qtyOut, {
+          batchId: it.batchId,
+          batchNo: it.batchNo,
+          expDate: it.expDate
+        });
+        nextBalance = result.stock;
+        actualDeducted = result.deductedQty;
+        if (result.allocations.length > 0) {
+          mutationBatchDetails = result.allocations;
+        }
         workingMedMap.set(med.id, {
           ...med,
-          stock: alloc.stock,
-          batchNo: alloc.batchNo,
-          expDate: alloc.expDate,
-          batches: alloc.batches
+          stock: result.stock,
+          batchNo: result.batchNo,
+          expDate: result.expDate,
+          batches: result.batches
         });
         touchedMedIds.add(med.id);
       }
@@ -8479,43 +8963,135 @@ export default function App() {
         refNo: payload.baNumber,
         type: 'PEMUSNAHAN',
         inQty: 0,
-        outQty: qtyOut,
+        outQty: actualDeducted > 0 ? actualDeducted : qtyOut,
         balance: nextBalance,
         ket: `Pemusnahan (${payload.method}) · Saksi: ${payload.witness}${payload.reason ? ` · ${payload.reason}` : ''}`,
         petugas: userName,
         branchId: currentBranch.id,
-        hpp: it.hpp * qtyOut,
+        hpp: it.hpp * (actualDeducted > 0 ? actualDeducted : qtyOut),
         batchNo: it.batchNo || '-',
         expDate: it.expDate || '',
-        batchDetails: [{ batchNo: it.batchNo || '-', expDate: it.expDate || '', qty: qtyOut }]
+        batchDetails: mutationBatchDetails
       });
     });
 
+    let medicineSyncOk = true;
+    const syncErrors: string[] = [];
+
     if (touchedMedIds.size > 0) {
-      setMedicines((prev) =>
-        prev.map((m) => {
-          if (!touchedMedIds.has(m.id)) return m;
-          const updated = workingMedMap.get(m.id);
-          if (!updated) return m;
-          syncMedicineWithTracking(updated).catch((err) =>
-            console.warn('Supabase medicine disposal sync error:', err)
-          );
-          return updated;
-        })
-      );
+      const nextMedicines = baseMedicines.map((m) => workingMedMap.get(m.id) || m);
+      medicinesRef.current = nextMedicines;
+      setMedicines(nextMedicines);
+      try {
+        demoSetItem('latisha_medicines', JSON.stringify(nextMedicines));
+      } catch {}
+
+      if (!isDemoActive && !isDemoMode()) {
+        const medResults = await Promise.all(
+          Array.from(touchedMedIds).map((medId) => {
+            const updated = workingMedMap.get(medId);
+            if (!updated) return Promise.resolve({ success: true as boolean, error: undefined as string | undefined });
+            return updateMedicineWithTracking(updated).catch((err) => ({
+              success: false,
+              error: err?.message || String(err)
+            }));
+          })
+        );
+        const failedMed = medResults.find((r) => !r.success);
+        if (failedMed) {
+          medicineSyncOk = false;
+          if (failedMed.error) syncErrors.push(`Master Obat: ${failedMed.error}`);
+        }
+      }
     }
 
+    let stockCardSyncOk = true;
     if (newMutations.length > 0) {
       setStockMutations((prev) => [...newMutations, ...prev]);
       if (!isDemoActive && !isDemoMode()) {
         const mutIds = newMutations.map((m) => m.id).filter(Boolean);
         markIdsPendingSync('stock_mutations', mutIds);
-        seedStockMutationsToSupabase(newMutations)
-          .then((res) => {
-            if (res.needsTableSetup) setStockMutationsNeedsTableSetup(true);
-            if (res.success) confirmCloudSync('stock_mutations', mutIds);
-          })
-          .catch((err) => console.warn('Supabase disposal mutation sync error:', err));
+        const mutRes = await seedStockMutationsToSupabase(newMutations).catch((err) => ({
+          success: false,
+          count: 0,
+          needsTableSetup: false,
+          error: err?.message || String(err)
+        }));
+        if (mutRes.needsTableSetup) setStockMutationsNeedsTableSetup(true);
+        if (mutRes.success) {
+          confirmCloudSync('stock_mutations', mutIds);
+        } else {
+          stockCardSyncOk = false;
+          if (mutRes.error) syncErrors.push(`Kartu Stok: ${mutRes.error}`);
+        }
+      }
+    }
+
+    const pharmProfile = getSavedPharmacyProfile();
+    const apjProf = getSavedAPJProfile();
+    const fullPharmAddr = formatPharmacyAddress(pharmProfile);
+    const disposalId = isDemoActive || isDemoMode()
+      ? `DIS-DEMO-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`
+      : `DIS-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+
+    const historyEntry: ProductDisposalRecord = {
+      id: disposalId,
+      baNumber: payload.baNumber,
+      date: today,
+      time: nowTime,
+      method: payload.method,
+      witness: payload.witness,
+      reason: payload.reason,
+      petugas: userName,
+      branchId: currentBranch.id,
+      disposalLocation:
+        payload.disposalLocation ||
+        `${pharmProfile.name}${fullPharmAddr ? `, ${fullPharmAddr}` : ''}`,
+      witness1Name: payload.witness1Name,
+      witness1Nip: payload.witness1Nip,
+      witness1Role: payload.witness1Role,
+      witness2Name: payload.witness2Name,
+      witness2Nip: payload.witness2Nip,
+      witness2Role: payload.witness2Role,
+      apjName: apjProf.name,
+      apjSipa: apjProf.sipa,
+      pharmacyName: pharmProfile.name,
+      pharmacyAddress: fullPharmAddr,
+      pharmacyCity: pharmProfile.city || currentBranch.name,
+      totalItems: payload.items.length,
+      totalQty: payload.items.reduce((s, it) => s + Math.round(Number(it.qty) || 0), 0),
+      totalValue: payload.items.reduce((s, it) => s + (Number(it.subtotal) || 0), 0),
+      items: payload.items,
+      createdAt: nowIso,
+      updatedAt: nowIso
+    };
+
+    disposalRecordsMutationEpochRef.current += 1;
+    setDisposalRecords((prev) => {
+      const next = [historyEntry, ...prev];
+      persistDisposalRecordsNow(next);
+      return next;
+    });
+
+    let disposalSyncOk = true;
+    let needsDisposalTableSetup = false;
+    if (!isDemoActive && !isDemoMode()) {
+      markIdsPendingSync('disposal_records', [historyEntry.id]);
+      const disRes = await syncDisposalRecordToSupabase(historyEntry).catch((err) => ({
+        success: false,
+        needsTableSetup: false,
+        error: err?.message || String(err)
+      }));
+      if (disRes.needsTableSetup) {
+        needsDisposalTableSetup = true;
+        setDisposalRecordsNeedsTableSetup(true);
+      }
+      if (disRes.success) {
+        setDisposalRecordsNeedsTableSetup(false);
+        confirmCloudSync('disposal_records', [historyEntry.id]);
+      } else {
+        disposalSyncOk = false;
+        if (disRes.error) syncErrors.push(`Pemusnahan: ${disRes.error}`);
       }
     }
 
@@ -8523,10 +9099,76 @@ export default function App() {
       'Kelola Produk (Pemusnahan)',
       `Proses pemusnahan ${payload.baNumber} (${payload.items.length} item, metode: ${payload.method})`
     );
+
+    return {
+      success: true,
+      record: historyEntry,
+      medicineSyncOk,
+      stockCardSyncOk,
+      disposalSyncOk,
+      needsDisposalTableSetup,
+      error: syncErrors.length > 0 ? syncErrors.join(' | ') : undefined
+    };
   };
 
-  // Handler: Retur produk ED / mendekati ED ke PBF dari Submenu Kelola Produk
-  const handleProcessExpiryReturn = (payload: {
+  const handleUpdateDisposalRecord = async (
+    updatedRecord: ProductDisposalRecord
+  ): Promise<{ success: boolean; needsTableSetup?: boolean; error?: string }> => {
+    const stamped: ProductDisposalRecord = {
+      ...updatedRecord,
+      updatedAt: new Date().toISOString()
+    };
+    disposalRecordsMutationEpochRef.current += 1;
+    setDisposalRecords((prev) => {
+      const next = prev.map((r) => (r.id === stamped.id ? stamped : r));
+      persistDisposalRecordsNow(next);
+      return next;
+    });
+    if (isDemoActive || isDemoMode()) {
+      return { success: true };
+    }
+    markIdsPendingSync('disposal_records', [stamped.id]);
+    const res = await syncDisposalRecordToSupabase(stamped).catch((err) => ({
+      success: false,
+      needsTableSetup: false,
+      error: err?.message || String(err)
+    }));
+    if (res.needsTableSetup) setDisposalRecordsNeedsTableSetup(true);
+    if (res.success) {
+      setDisposalRecordsNeedsTableSetup(false);
+      confirmCloudSync('disposal_records', [stamped.id]);
+    }
+    return res;
+  };
+
+  const handleDeleteDisposalRecord = async (
+    id: string
+  ): Promise<{ success: boolean; needsTableSetup?: boolean; error?: string }> => {
+    disposalRecordsMutationEpochRef.current += 1;
+    markIdsDeleted('disposal_records', [id]);
+    setDisposalRecords((prev) => {
+      const next = prev.filter((r) => r.id !== id);
+      persistDisposalRecordsNow(next);
+      return next;
+    });
+    addAuditLog('Kelola Produk (Pemusnahan)', `Hapus arsip riwayat pemusnahan #${id}`);
+    if (isDemoActive || isDemoMode()) {
+      return { success: true };
+    }
+    const res = await deleteDisposalHistoryFromSupabase([id]).catch((err) => ({
+      success: false,
+      needsTableSetup: false,
+      error: err?.message || String(err)
+    }));
+    if (res.needsTableSetup) setDisposalRecordsNeedsTableSetup(true);
+    if (res.success) {
+      confirmCloudDeletes('disposal_records', [id]);
+    }
+    return res;
+  };
+
+  // Handler: Retur produk ED / mendekati ED ke PBF dari Submenu Kelola Produk (Terintegrasi 2-Arah Supabase)
+  const handleProcessExpiryReturn = async (payload: {
     pbfName: string;
     invoiceNo: string;
     reason: string;
@@ -8541,14 +9183,27 @@ export default function App() {
       price: number;
       subtotal: number;
     }[];
-  }) => {
-    const today = new Date().toISOString().split('T')[0];
-    const nowTime = new Date().toLocaleTimeString('id-ID');
-    const retId = `RET-ED-${Date.now().toString().slice(-6)}`;
+  }): Promise<{
+    success: boolean;
+    record: PurchaseReturnRecord;
+    medicineSyncOk: boolean;
+    stockCardSyncOk: boolean;
+    returnSyncOk: boolean;
+    needsReturnTableSetup?: boolean;
+    error?: string;
+  }> => {
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const today = nowIso.split('T')[0];
+    const nowTime = now.toLocaleTimeString('id-ID');
+    const retId = isDemoActive || isDemoMode()
+      ? `RET-DEMO-ED-${Date.now().toString(36).toUpperCase()}`
+      : `RET-ED-${Date.now().toString().slice(-6)}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
     const refInvNo = payload.invoiceNo || retId;
 
+    const baseMedicines = medicinesRef.current.length > 0 ? medicinesRef.current : medicines;
     const workingMedMap = new Map<string, Medicine>();
-    medicinesRef.current.forEach((m) => {
+    baseMedicines.forEach((m) => {
       workingMedMap.set(m.id, {
         ...m,
         batches: m.batches ? m.batches.map((b) => ({ ...b })) : undefined
@@ -8563,16 +9218,26 @@ export default function App() {
       if (qtyOut <= 0) return;
       const med = workingMedMap.get(it.medicineId);
       let nextBalance = 0;
+      let actualDeducted = qtyOut;
+      let mutationBatchDetails = [{ batchNo: it.batchNo || '-', expDate: it.expDate || '', qty: qtyOut }];
 
       if (med) {
-        const alloc = allocateBatchesFEFO(med, qtyOut, it.batchNo, it.expDate, false);
-        nextBalance = alloc.stock;
+        const result = deductMedicineStockByBatch(med, qtyOut, {
+          batchId: it.batchId,
+          batchNo: it.batchNo,
+          expDate: it.expDate
+        });
+        nextBalance = result.stock;
+        actualDeducted = result.deductedQty;
+        if (result.allocations.length > 0) {
+          mutationBatchDetails = result.allocations;
+        }
         workingMedMap.set(med.id, {
           ...med,
-          stock: alloc.stock,
-          batchNo: alloc.batchNo,
-          expDate: alloc.expDate,
-          batches: alloc.batches
+          stock: result.stock,
+          batchNo: result.batchNo,
+          expDate: result.expDate,
+          batches: result.batches
         });
         touchedMedIds.add(med.id);
       }
@@ -8586,43 +9251,67 @@ export default function App() {
         refNo: retId,
         type: 'RETUR PEMBELIAN',
         inQty: 0,
-        outQty: qtyOut,
+        outQty: actualDeducted > 0 ? actualDeducted : qtyOut,
         balance: nextBalance,
         ket: `Retur Produk ED ke PBF ${payload.pbfName}${payload.reason ? ` - ${payload.reason}` : ''}`,
         petugas: userName,
         branchId: currentBranch.id,
-        hpp: it.price * qtyOut,
+        hpp: it.price * (actualDeducted > 0 ? actualDeducted : qtyOut),
         batchNo: it.batchNo || '-',
         expDate: it.expDate || '',
-        batchDetails: [{ batchNo: it.batchNo || '-', expDate: it.expDate || '', qty: qtyOut }]
+        batchDetails: mutationBatchDetails
       });
     });
 
+    let medicineSyncOk = true;
+    const syncErrors: string[] = [];
+
     if (touchedMedIds.size > 0) {
-      setMedicines((prev) =>
-        prev.map((m) => {
-          if (!touchedMedIds.has(m.id)) return m;
-          const updated = workingMedMap.get(m.id);
-          if (!updated) return m;
-          syncMedicineWithTracking(updated).catch((err) =>
-            console.warn('Supabase medicine return sync error:', err)
-          );
-          return updated;
-        })
-      );
+      const nextMedicines = baseMedicines.map((m) => workingMedMap.get(m.id) || m);
+      medicinesRef.current = nextMedicines;
+      setMedicines(nextMedicines);
+      try {
+        demoSetItem('latisha_medicines', JSON.stringify(nextMedicines));
+      } catch {}
+
+      if (!isDemoActive && !isDemoMode()) {
+        const medResults = await Promise.all(
+          Array.from(touchedMedIds).map((medId) => {
+            const updated = workingMedMap.get(medId);
+            if (!updated) return Promise.resolve({ success: true as boolean, error: undefined as string | undefined });
+            return updateMedicineWithTracking(updated).catch((err) => ({
+              success: false,
+              error: err?.message || String(err)
+            }));
+          })
+        );
+        const failedMed = medResults.find((r) => !r.success);
+        if (failedMed) {
+          medicineSyncOk = false;
+          if (failedMed.error) syncErrors.push(`Master Obat: ${failedMed.error}`);
+        }
+      }
     }
 
+    let stockCardSyncOk = true;
     if (newMutations.length > 0) {
       setStockMutations((prev) => [...newMutations, ...prev]);
       if (!isDemoActive && !isDemoMode()) {
         const mutIds = newMutations.map((m) => m.id).filter(Boolean);
         markIdsPendingSync('stock_mutations', mutIds);
-        seedStockMutationsToSupabase(newMutations)
-          .then((res) => {
-            if (res.needsTableSetup) setStockMutationsNeedsTableSetup(true);
-            if (res.success) confirmCloudSync('stock_mutations', mutIds);
-          })
-          .catch((err) => console.warn('Supabase expiry return mutation sync error:', err));
+        const mutRes = await seedStockMutationsToSupabase(newMutations).catch((err) => ({
+          success: false,
+          count: 0,
+          needsTableSetup: false,
+          error: err?.message || String(err)
+        }));
+        if (mutRes.needsTableSetup) setStockMutationsNeedsTableSetup(true);
+        if (mutRes.success) {
+          confirmCloudSync('stock_mutations', mutIds);
+        } else {
+          stockCardSyncOk = false;
+          if (mutRes.error) syncErrors.push(`Kartu Stok: ${mutRes.error}`);
+        }
       }
     }
 
@@ -8648,14 +9337,54 @@ export default function App() {
       })),
       totalReturValue: totalVal,
       petugas: userName,
-      branchId: currentBranch.id
+      branchId: currentBranch.id,
+      createdAt: nowIso,
+      updatedAt: nowIso
     };
 
-    setPurchaseReturns((prev) => [newReturnRecord, ...prev]);
+    purchaseReturnsMutationEpochRef.current += 1;
+    setPurchaseReturns((prev) => {
+      const next = [newReturnRecord, ...prev];
+      persistPurchaseReturnsNow(next);
+      return next;
+    });
+
+    let returnSyncOk = true;
+    let needsReturnTableSetup = false;
+    if (!isDemoActive && !isDemoMode()) {
+      markIdsPendingSync('purchase_returns', [newReturnRecord.id]);
+      const retRes = await syncPurchaseReturnToSupabase(newReturnRecord).catch((err) => ({
+        success: false,
+        needsTableSetup: false,
+        error: err?.message || String(err)
+      }));
+      if (retRes.needsTableSetup) {
+        needsReturnTableSetup = true;
+        setPurchaseReturnsNeedsTableSetup(true);
+      }
+      if (retRes.success) {
+        setPurchaseReturnsNeedsTableSetup(false);
+        confirmCloudSync('purchase_returns', [newReturnRecord.id]);
+      } else {
+        returnSyncOk = false;
+        if (retRes.error) syncErrors.push(`Retur Pembelian: ${retRes.error}`);
+      }
+    }
+
     addAuditLog(
       'Kelola Produk (Retur PBF)',
       `Proses retur produk ED #${retId} ke ${payload.pbfName} sebanyak ${payload.items.length} item`
     );
+
+    return {
+      success: true,
+      record: newReturnRecord,
+      medicineSyncOk,
+      stockCardSyncOk,
+      returnSyncOk,
+      needsReturnTableSetup,
+      error: syncErrors.length > 0 ? syncErrors.join(' | ') : undefined
+    };
   };
 
   // Handler: Update Existing Purchase Return Record (Overwrite data lama, cegah duplikasi)
@@ -8663,6 +9392,9 @@ export default function App() {
     returnId: string,
     updatedItems: { medicineId: string; name?: string; qty: number; unit: string; batchNo?: string; expDate?: string; price?: number; subtotal?: number; reason?: string; alasan?: string }[]
   ) => {
+    purchaseReturnsMutationEpochRef.current += 1;
+    let updatedTarget: PurchaseReturnRecord | null = null;
+    const nowIso = new Date().toISOString();
     setPurchaseReturns((prev) => {
       const updatedList = prev.map((ret) => {
         if (ret.id === returnId) {
@@ -8684,19 +9416,33 @@ export default function App() {
           });
           const totalVal = detailedItems.reduce((acc, it) => acc + it.subtotal, 0);
 
-          return {
+          const nextRec: PurchaseReturnRecord = {
             ...ret,
             items: detailedItems,
-            totalReturValue: totalVal
+            totalReturValue: totalVal,
+            updatedAt: nowIso
           };
+          updatedTarget = nextRec;
+          return nextRec;
         }
         return ret;
       });
-      try {
-        demoSetItem('latisha_purchase_returns', JSON.stringify(updatedList));
-      } catch (e) {}
+      persistPurchaseReturnsNow(updatedList);
       return updatedList;
     });
+    if (updatedTarget && !isDemoActive && !isDemoMode()) {
+      const targetRec = updatedTarget as PurchaseReturnRecord;
+      markIdsPendingSync('purchase_returns', [targetRec.id]);
+      syncPurchaseReturnToSupabase(targetRec)
+        .then((res) => {
+          if (res.needsTableSetup) setPurchaseReturnsNeedsTableSetup(true);
+          if (res.success) {
+            setPurchaseReturnsNeedsTableSetup(false);
+            confirmCloudSync('purchase_returns', [targetRec.id]);
+          }
+        })
+        .catch((err) => console.warn('Supabase update purchase return sync error:', err));
+    }
     addAuditLog('Retur PBF', `Perbarui data riwayat retur #${returnId}`);
   };
 
@@ -12197,8 +12943,454 @@ export default function App() {
     };
   };
 
+  const handleSyncDisposalHistorySupabase = async (): Promise<{
+    success: boolean;
+    count?: number;
+    needsTableSetup?: boolean;
+    isDemo?: boolean;
+    error?: string;
+  }> => {
+    if (isDemoActive || isDemoMode()) {
+      return { success: false, isDemo: true, error: 'Mode Demo aktif (isolasi sandbox).' };
+    }
+
+    const pendingDeletes = getPendingDeleteIds('disposal_records');
+    if (pendingDeletes.length > 0) {
+      const delRes = await deleteDisposalHistoryFromSupabase(pendingDeletes);
+      if (delRes.needsTableSetup) {
+        setDisposalRecordsNeedsTableSetup(true);
+        return { success: false, needsTableSetup: true, error: delRes.error };
+      }
+      if (delRes.success) {
+        confirmCloudDeletes('disposal_records', pendingDeletes);
+      }
+    }
+
+    const startSyncEpoch = disposalRecordsMutationEpochRef.current;
+    const res = await fetchDisposalHistoryFromSupabase({ forceRefresh: true });
+    setDisposalRecordsNeedsTableSetup(Boolean(res.needsTableSetup));
+
+    if (res.needsTableSetup) {
+      return { success: false, needsTableSetup: true, error: res.error };
+    }
+    if (res.error && (!res.data || res.data.length === 0)) {
+      return { success: false, error: res.error };
+    }
+
+    const deletedSet = getDeletedIdsSet('disposal_records');
+    const pendingSyncSet = getPendingSyncIdsSet('disposal_records');
+    const epochChanged = disposalRecordsMutationEpochRef.current !== startSyncEpoch;
+    const rawRemote = res.data || [];
+
+    const stubbornDeleted = rawRemote.filter((r) => deletedSet.has(r.id)).map((r) => r.id);
+    if (stubbornDeleted.length > 0) {
+      deleteDisposalHistoryFromSupabase(stubbornDeleted)
+        .then((dRes) => {
+          if (dRes.success) confirmCloudDeletes('disposal_records', stubbornDeleted);
+        })
+        .catch(() => {});
+    }
+
+    const remoteList = rawRemote.filter(
+      (r) => r.id && !isDemoDisposalRecordId(r.id) && !deletedSet.has(r.id)
+    );
+    const remoteMap = new Map<string, ProductDisposalRecord>();
+    remoteList.forEach((r) => remoteMap.set(r.id, r));
+
+    const validLocal = disposalRecordsRef.current.filter(
+      (r) => r.id && !isDemoDisposalRecordId(r.id) && !deletedSet.has(r.id)
+    );
+    const toUpload = validLocal.filter((r) => {
+      const remoteVersion = remoteMap.get(r.id);
+      if (pendingSyncSet.has(r.id) || !remoteVersion) return true;
+      return isNewerIsoTimestamp(r.updatedAt, remoteVersion.updatedAt);
+    });
+
+    let seedError: string | undefined;
+    if (toUpload.length > 0) {
+      const seedRes = await seedDisposalHistoryToSupabase(toUpload);
+      if (seedRes.needsTableSetup) setDisposalRecordsNeedsTableSetup(true);
+      if (seedRes.success) {
+        confirmCloudSync('disposal_records', toUpload.map((r) => r.id));
+      } else if (seedRes.error) {
+        seedError = seedRes.error;
+      }
+    }
+
+    const latestDeletedSet = getDeletedIdsSet('disposal_records');
+    const latestPendingSyncSet = getPendingSyncIdsSet('disposal_records');
+    const latestEpochChanged = disposalRecordsMutationEpochRef.current !== startSyncEpoch;
+    const latestLocal = disposalRecordsRef.current.filter(
+      (r) => r.id && !isDemoDisposalRecordId(r.id) && !latestDeletedSet.has(r.id)
+    );
+
+    const mergedMap = new Map<string, ProductDisposalRecord>();
+    remoteList.forEach((r) => {
+      if (!latestDeletedSet.has(r.id)) mergedMap.set(r.id, r);
+    });
+    latestLocal.forEach((r) => {
+      const remoteVersion = mergedMap.get(r.id);
+      if (
+        !remoteVersion ||
+        latestPendingSyncSet.has(r.id) ||
+        epochChanged ||
+        latestEpochChanged ||
+        isNewerIsoTimestamp(r.updatedAt, remoteVersion.updatedAt)
+      ) {
+        mergedMap.set(r.id, r);
+      }
+    });
+    const merged = Array.from(mergedMap.values()).sort((a, b) =>
+      `${b.date || ''} ${b.createdAt || ''}`.localeCompare(`${a.date || ''} ${a.createdAt || ''}`)
+    );
+    setDisposalRecords(merged);
+    persistDisposalRecordsNow(merged);
+    if (!seedError) {
+      markInitialCloudSyncCompleted('disposal_records');
+    }
+
+    if (!disposalChannelRef.current) {
+      disposalChannelRef.current = subscribeDisposalHistoryRealtime(
+        (newRec) => {
+          if (isDemoMode() || isDemoDisposalRecordId(newRec.id)) return;
+          if (getDeletedIdsSet('disposal_records').has(newRec.id)) return;
+          setDisposalRecords((prev) => {
+            const existing = prev.find((r) => r.id === newRec.id);
+            const pendingSync = getPendingSyncIdsSet('disposal_records').has(newRec.id);
+            const mergedRec =
+              existing &&
+              (pendingSync || isNewerIsoTimestamp(existing.updatedAt, newRec.updatedAt))
+                ? existing
+                : newRec;
+            const next = existing
+              ? prev.map((r) => (r.id === newRec.id ? mergedRec : r))
+              : [mergedRec, ...prev];
+            persistDisposalRecordsNow(next);
+            return next;
+          });
+        },
+        (updatedRec) => {
+          if (isDemoMode() || isDemoDisposalRecordId(updatedRec.id)) return;
+          if (getDeletedIdsSet('disposal_records').has(updatedRec.id)) return;
+          setDisposalRecords((prev) => {
+            const existing = prev.find((r) => r.id === updatedRec.id);
+            const pendingSync = getPendingSyncIdsSet('disposal_records').has(updatedRec.id);
+            const mergedRec =
+              existing &&
+              (pendingSync || isNewerIsoTimestamp(existing.updatedAt, updatedRec.updatedAt))
+                ? existing
+                : updatedRec;
+            const next = existing
+              ? prev.map((r) => (r.id === updatedRec.id ? mergedRec : r))
+              : [mergedRec, ...prev];
+            persistDisposalRecordsNow(next);
+            return next;
+          });
+        },
+        (deletedId) => {
+          if (isDemoMode()) return;
+          recordRemoteDeletedId('disposal_records', deletedId);
+          setDisposalRecords((prev) => {
+            const next = prev.filter((r) => r.id !== deletedId);
+            persistDisposalRecordsNow(next);
+            return next;
+          });
+        }
+      );
+    }
+
+    return seedError
+      ? { success: false, count: merged.length, error: seedError }
+      : { success: true, count: merged.length };
+  };
+
+  const handleSyncPurchaseReturnsSupabase = async (): Promise<{
+    success: boolean;
+    count?: number;
+    needsTableSetup?: boolean;
+    isDemo?: boolean;
+    error?: string;
+  }> => {
+    if (isDemoActive || isDemoMode()) {
+      return { success: false, isDemo: true, error: 'Mode Demo aktif (isolasi sandbox).' };
+    }
+
+    const pendingDeletes = getPendingDeleteIds('purchase_returns');
+    if (pendingDeletes.length > 0) {
+      const delRes = await deletePurchaseReturnsFromSupabase(pendingDeletes);
+      if (delRes.needsTableSetup) {
+        setPurchaseReturnsNeedsTableSetup(true);
+        return { success: false, needsTableSetup: true, error: delRes.error };
+      }
+      if (delRes.success) {
+        confirmCloudDeletes('purchase_returns', pendingDeletes);
+      }
+    }
+
+    const startSyncEpoch = purchaseReturnsMutationEpochRef.current;
+    const res = await fetchPurchaseReturnsFromSupabase({ forceRefresh: true });
+    setPurchaseReturnsNeedsTableSetup(Boolean(res.needsTableSetup));
+
+    if (res.needsTableSetup) {
+      return { success: false, needsTableSetup: true, error: res.error };
+    }
+    if (res.error && (!res.data || res.data.length === 0)) {
+      return { success: false, error: res.error };
+    }
+
+    const deletedSet = getDeletedIdsSet('purchase_returns');
+    const pendingSyncSet = getPendingSyncIdsSet('purchase_returns');
+    const epochChanged = purchaseReturnsMutationEpochRef.current !== startSyncEpoch;
+    const rawRemote = res.data || [];
+
+    const stubbornDeleted = rawRemote.filter((r) => deletedSet.has(r.id)).map((r) => r.id);
+    if (stubbornDeleted.length > 0) {
+      deletePurchaseReturnsFromSupabase(stubbornDeleted)
+        .then((dRes) => {
+          if (dRes.success) confirmCloudDeletes('purchase_returns', stubbornDeleted);
+        })
+        .catch(() => {});
+    }
+
+    const remoteList = rawRemote.filter(
+      (r) => r.id && !isDemoPurchaseReturnId(r.id) && !deletedSet.has(r.id)
+    );
+    const remoteMap = new Map<string, PurchaseReturnRecord>();
+    remoteList.forEach((r) => remoteMap.set(r.id, r));
+
+    const validLocal = purchaseReturnsRef.current.filter(
+      (r) => r.id && !isDemoPurchaseReturnId(r.id) && !deletedSet.has(r.id)
+    );
+    const toUpload = validLocal.filter((r) => {
+      const remoteVersion = remoteMap.get(r.id);
+      if (pendingSyncSet.has(r.id) || !remoteVersion) return true;
+      return isNewerIsoTimestamp(r.updatedAt, remoteVersion.updatedAt);
+    });
+
+    let seedError: string | undefined;
+    if (toUpload.length > 0) {
+      const seedRes = await seedPurchaseReturnsToSupabase(toUpload);
+      if (seedRes.needsTableSetup) setPurchaseReturnsNeedsTableSetup(true);
+      if (seedRes.success) {
+        confirmCloudSync('purchase_returns', toUpload.map((r) => r.id));
+      } else if (seedRes.error) {
+        seedError = seedRes.error;
+      }
+    }
+
+    const latestDeletedSet = getDeletedIdsSet('purchase_returns');
+    const latestPendingSyncSet = getPendingSyncIdsSet('purchase_returns');
+    const latestEpochChanged = purchaseReturnsMutationEpochRef.current !== startSyncEpoch;
+    const latestLocal = purchaseReturnsRef.current.filter(
+      (r) => r.id && !isDemoPurchaseReturnId(r.id) && !latestDeletedSet.has(r.id)
+    );
+
+    const mergedMap = new Map<string, PurchaseReturnRecord>();
+    remoteList.forEach((r) => {
+      if (!latestDeletedSet.has(r.id)) mergedMap.set(r.id, r);
+    });
+    latestLocal.forEach((r) => {
+      const remoteVersion = mergedMap.get(r.id);
+      if (
+        !remoteVersion ||
+        latestPendingSyncSet.has(r.id) ||
+        epochChanged ||
+        latestEpochChanged ||
+        isNewerIsoTimestamp(r.updatedAt, remoteVersion.updatedAt)
+      ) {
+        mergedMap.set(r.id, r);
+      }
+    });
+    const merged = Array.from(mergedMap.values()).sort((a, b) =>
+      `${b.date || ''} ${b.createdAt || ''}`.localeCompare(`${a.date || ''} ${a.createdAt || ''}`)
+    );
+    setPurchaseReturns(merged);
+    persistPurchaseReturnsNow(merged);
+    if (!seedError) {
+      markInitialCloudSyncCompleted('purchase_returns');
+    }
+
+    if (!purchaseReturnChannelRef.current) {
+      purchaseReturnChannelRef.current = subscribePurchaseReturnsRealtime(
+        (newRec) => {
+          if (isDemoMode() || isDemoPurchaseReturnId(newRec.id)) return;
+          if (getDeletedIdsSet('purchase_returns').has(newRec.id)) return;
+          setPurchaseReturns((prev) => {
+            const existing = prev.find((r) => r.id === newRec.id);
+            const pendingSync = getPendingSyncIdsSet('purchase_returns').has(newRec.id);
+            const mergedRec =
+              existing &&
+              (pendingSync || isNewerIsoTimestamp(existing.updatedAt, newRec.updatedAt))
+                ? existing
+                : newRec;
+            const next = existing
+              ? prev.map((r) => (r.id === newRec.id ? mergedRec : r))
+              : [mergedRec, ...prev];
+            persistPurchaseReturnsNow(next);
+            return next;
+          });
+        },
+        (updatedRec) => {
+          if (isDemoMode() || isDemoPurchaseReturnId(updatedRec.id)) return;
+          if (getDeletedIdsSet('purchase_returns').has(updatedRec.id)) return;
+          setPurchaseReturns((prev) => {
+            const existing = prev.find((r) => r.id === updatedRec.id);
+            const pendingSync = getPendingSyncIdsSet('purchase_returns').has(updatedRec.id);
+            const mergedRec =
+              existing &&
+              (pendingSync || isNewerIsoTimestamp(existing.updatedAt, updatedRec.updatedAt))
+                ? existing
+                : updatedRec;
+            const next = existing
+              ? prev.map((r) => (r.id === updatedRec.id ? mergedRec : r))
+              : [mergedRec, ...prev];
+            persistPurchaseReturnsNow(next);
+            return next;
+          });
+        },
+        (deletedId) => {
+          if (isDemoMode()) return;
+          recordRemoteDeletedId('purchase_returns', deletedId);
+          setPurchaseReturns((prev) => {
+            const next = prev.filter((r) => r.id !== deletedId);
+            persistPurchaseReturnsNow(next);
+            return next;
+          });
+        }
+      );
+    }
+
+    return seedError
+      ? { success: false, count: merged.length, error: seedError }
+      : { success: true, count: merged.length };
+  };
+
+  const handleSyncKelolaProdukSupabase = async (): Promise<{
+    success: boolean;
+    medicinesCount?: number;
+    disposalCount?: number;
+    returnsCount?: number;
+    needsDisposalTableSetup?: boolean;
+    needsReturnTableSetup?: boolean;
+    isDemo?: boolean;
+    syncedSummary?: string;
+    error?: string;
+  }> => {
+    if (isDemoActive || isDemoMode()) {
+      return {
+        success: false,
+        isDemo: true,
+        error: 'Mode Demo / Sandbox aktif. Sinkronisasi Supabase produksi dinonaktifkan untuk isolasi data demo.'
+      };
+    }
+
+    const [medRes, mutRes, disRes, retRes, facRes] = await Promise.all([
+      handleSyncMedicinesSupabase().catch((err) => ({
+        success: false,
+        count: undefined as number | undefined,
+        error: err?.message || String(err)
+      })),
+      handleSyncStockMutationsSupabase().catch((err) => ({
+        success: false,
+        count: undefined as number | undefined,
+        error: err?.message || String(err)
+      })),
+      handleSyncDisposalHistorySupabase().catch((err) => ({
+        success: false,
+        count: undefined as number | undefined,
+        needsTableSetup: false,
+        error: err?.message || String(err)
+      })),
+      handleSyncPurchaseReturnsSupabase().catch((err) => ({
+        success: false,
+        count: undefined as number | undefined,
+        needsTableSetup: false,
+        error: err?.message || String(err)
+      })),
+      fetchFacilityProfilesFromSupabase().catch(() => ({ data: null }))
+    ]);
+
+    if (facRes && facRes.data && facRes.data.pharmacy) {
+      try {
+        const currentPharm = getSavedPharmacyProfile();
+        const mergedPharm = {
+          ...currentPharm,
+          ...facRes.data.pharmacy,
+          ...(Array.isArray(facRes.data.pharmacy.edAlertThresholds)
+            ? { edAlertThresholds: facRes.data.pharmacy.edAlertThresholds }
+            : {})
+        };
+        demoSetItem('latisha_pharmacy_profile', JSON.stringify(mergedPharm));
+        window.dispatchEvent(new Event('latisha_profile_updated'));
+      } catch {}
+    }
+
+    const medTotal = medRes.count ?? medicinesRef.current.length;
+    const disTotal = disRes.count ?? disposalRecordsRef.current.length;
+    const retTotal = retRes.count ?? purchaseReturnsRef.current.length;
+    const needsDisposalTableSetup = Boolean(disRes.needsTableSetup);
+    const needsReturnTableSetup = Boolean(retRes.needsTableSetup);
+
+    if (!medRes.success) {
+      return {
+        success: false,
+        medicinesCount: medTotal,
+        disposalCount: disTotal,
+        returnsCount: retTotal,
+        needsDisposalTableSetup,
+        needsReturnTableSetup,
+        error: medRes.error || 'Gagal menyinkronkan Master Obat dari Supabase.'
+      };
+    }
+
+    if (needsDisposalTableSetup || needsReturnTableSetup) {
+      const missingNames = [
+        needsDisposalTableSetup ? getSupabaseConfig().disposalHistoryTable || 'pemusnahan_obat' : null,
+        needsReturnTableSetup ? getSupabaseConfig().purchaseReturnTable || 'retur_pembelian' : null
+      ]
+        .filter(Boolean)
+        .join(' & ');
+      return {
+        success: true,
+        medicinesCount: medTotal,
+        disposalCount: disTotal,
+        returnsCount: retTotal,
+        needsDisposalTableSetup,
+        needsReturnTableSetup,
+        syncedSummary: `Master Obat (${medTotal.toLocaleString('id-ID')} produk), Kartu Stok & Filter Masa ED tersinkronisasi. Jalankan Skema SQL untuk mengaktifkan tabel cloud ${missingNames}.`
+      };
+    }
+
+    const nonTableErrors = [mutRes.error, disRes.error, retRes.error].filter(
+      (e): e is string => typeof e === 'string' && e.length > 0
+    );
+    if (nonTableErrors.length > 0) {
+      return {
+        success: false,
+        medicinesCount: medTotal,
+        disposalCount: disTotal,
+        returnsCount: retTotal,
+        error: nonTableErrors[0]
+      };
+    }
+
+    return {
+      success: true,
+      medicinesCount: medTotal,
+      disposalCount: disTotal,
+      returnsCount: retTotal,
+      needsDisposalTableSetup: false,
+      needsReturnTableSetup: false,
+      syncedSummary: `Sinkronisasi Supabase Kelola Produk berhasil! Master Obat (${medTotal.toLocaleString('id-ID')} produk), Riwayat Pemusnahan (${disTotal}), Riwayat Retur (${retTotal}), Kartu Stok & Filter Masa ED tersinkronisasi 2-arah.`
+    };
+  };
+
   const syncPurchaseOrdersFnRef = React.useRef(handleSyncPurchaseOrdersSupabase);
   syncPurchaseOrdersFnRef.current = handleSyncPurchaseOrdersSupabase;
+  const syncDisposalFnRef = React.useRef(handleSyncDisposalHistorySupabase);
+  syncDisposalFnRef.current = handleSyncDisposalHistorySupabase;
+  const syncPurchaseReturnsFnRef = React.useRef(handleSyncPurchaseReturnsSupabase);
+  syncPurchaseReturnsFnRef.current = handleSyncPurchaseReturnsSupabase;
 
   useEffect(() => {
     if (typeof window === 'undefined' || isDemoActive) return;
@@ -12208,6 +13400,18 @@ export default function App() {
       const hasPendingDelete = getPendingDeleteIds('purchase_orders').length > 0;
       if (hasPendingSync || hasPendingDelete) {
         void syncPurchaseOrdersFnRef.current();
+      }
+      if (
+        getPendingSyncIdsSet('disposal_records').size > 0 ||
+        getPendingDeleteIds('disposal_records').length > 0
+      ) {
+        void syncDisposalFnRef.current();
+      }
+      if (
+        getPendingSyncIdsSet('purchase_returns').size > 0 ||
+        getPendingDeleteIds('purchase_returns').length > 0
+      ) {
+        void syncPurchaseReturnsFnRef.current();
       }
     };
     window.addEventListener('online', retryIfPending);
@@ -12445,6 +13649,7 @@ export default function App() {
     setMitraList(readJson('latisha_mitra', bundle.mitraList));
     setSuppliers(readJson('latisha_suppliers', bundle.suppliers));
     setPurchaseReturns(readJson('latisha_purchase_returns', bundle.purchaseReturns));
+    setDisposalRecords(readJson('latisha_product_disposal_history', []));
     const deletedOpnameSet = getDeletedIdsSet('opname_records');
     setOpnameRecords(
       readJson('latisha_stock_opname_records', bundle.opnameRecords).filter(
@@ -14747,11 +15952,18 @@ export default function App() {
                   medicines={medicines}
                   suppliers={suppliers}
                   purchaseInvoices={purchaseInvoices}
+                  disposalHistory={disposalRecords}
                   currentBranch={currentBranch}
                   userName={userName}
                   onProcessDisposal={handleProcessExpiryDisposal}
                   onProcessReturn={handleProcessExpiryReturn}
+                  onUpdateDisposalRecord={handleUpdateDisposalRecord}
+                  onDeleteDisposalRecord={handleDeleteDisposalRecord}
                   onSyncMedicinesSupabase={handleSyncMedicinesSupabase}
+                  onSyncKelolaProdukSupabase={handleSyncKelolaProdukSupabase}
+                  needsDisposalTableSetup={disposalRecordsNeedsTableSetup}
+                  needsReturnTableSetup={purchaseReturnsNeedsTableSetup}
+                  isDemoSandbox={isDemoActive}
                   onNavigateTab={handleNavigateTab}
                 />
               )}

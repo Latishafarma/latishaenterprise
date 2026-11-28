@@ -91,6 +91,7 @@ import {
   PROMO_BANNER_THEMES,
   findBestCartDiscount,
   formatDiscountShortBadge,
+  getBestProductUnitDiscount,
   getLivePortalPromos,
   isMedicineEligibleForDiscount,
   isWithinDateWindow,
@@ -2596,9 +2597,16 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
                   const qtyInCart = cart[med.id]?.qtyBox || 0;
                   const rxReq = getMedicinePrescriptionRequirement(med, rxStatusConfigs);
                   const isMitraLocked = activeRoom === 'MITRA' && !isVerifiedMitra;
-                  const matchedMedDisc = activePortalDiscounts.find((d) =>
-                    isMedicineEligibleForDiscount(med, d)
+                  const unitDisc = getBestProductUnitDiscount(
+                    med,
+                    roomPrice,
+                    activePortalDiscounts,
+                    activeChannelScope,
+                    portalVoucherInput
                   );
+                  const matchedMedDisc =
+                    unitDisc?.discount ||
+                    activePortalDiscounts.find((d) => isMedicineEligibleForDiscount(med, d));
 
                   return (
                     <article
@@ -2665,19 +2673,41 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
 
                         {/* Active Room Price & Pack Info */}
                         <div className="pt-2 border-t border-slate-100 flex items-end justify-between gap-2">
-                          <div>
+                          <div className="min-w-0">
                             <span className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block">
                               {activeRoom === 'REGULER'
                                 ? `Harga Reguler / ${unitLabel}`
                                 : `Harga Khusus Mitra / ${unitBesar}`}
                             </span>
-                            <div className="text-lg font-black text-slate-900 font-mono tabular-nums leading-tight">
-                              {formatRupiah(roomPrice)}
-                            </div>
+                            {unitDisc ? (
+                              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 leading-tight mt-0.5">
+                                <span className="text-xs font-semibold text-slate-400 line-through decoration-slate-400 decoration-[1.5px] font-mono tabular-nums">
+                                  {formatRupiah(unitDisc.originalPrice)}
+                                </span>
+                                <span className="text-lg font-black text-emerald-600 font-mono tabular-nums">
+                                  {formatRupiah(unitDisc.discountedPrice)}
+                                </span>
+                              </div>
+                            ) : (
+                              <div className="text-lg font-black text-slate-900 font-mono tabular-nums leading-tight">
+                                {formatRupiah(roomPrice)}
+                              </div>
+                            )}
                             {matchedMedDisc && (
-                              <span className="inline-flex items-center gap-1 mt-1 text-sky-700 text-[11px] font-bold">
-                                <TicketPercent className="w-3 h-3 text-sky-600" />
+                              <span
+                                className={`inline-flex flex-wrap items-center gap-1 mt-1 text-[11px] font-bold ${
+                                  unitDisc ? 'text-emerald-700' : 'text-sky-700'
+                                }`}
+                              >
+                                <TicketPercent
+                                  className={`w-3 h-3 shrink-0 ${unitDisc ? 'text-emerald-600' : 'text-sky-600'}`}
+                                />
                                 <span>{formatDiscountShortBadge(matchedMedDisc)}</span>
+                                {unitDisc?.conditionHint && (
+                                  <span className="text-[10px] font-medium text-slate-500">
+                                    ({unitDisc.conditionHint})
+                                  </span>
+                                )}
                               </span>
                             )}
                           </div>
@@ -3055,8 +3085,15 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
                   </span>
                 )}
               </div>
-              <div className="text-base sm:text-lg font-black text-emerald-400 font-mono tabular-nums truncate">
-                {formatRupiah(netCartAmount)}
+              <div className="flex flex-wrap items-baseline gap-x-2 leading-tight truncate">
+                {portalDiscountAmount > 0 && (
+                  <span className="text-xs font-semibold text-slate-400 line-through decoration-slate-400 font-mono tabular-nums">
+                    {formatRupiah(totalCartAmount)}
+                  </span>
+                )}
+                <span className="text-base sm:text-lg font-black text-emerald-400 font-mono tabular-nums">
+                  {formatRupiah(netCartAmount)}
+                </span>
               </div>
             </div>
             <button
@@ -3163,6 +3200,13 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
         const qtyInCart = cart[med.id]?.qtyBox || 0;
         const isMitraLocked = activeRoom === 'MITRA' && !isVerifiedMitra;
         const ratio = Math.max(1, Number(med.rasioKonversi) || 1);
+        const inspectUnitDisc = getBestProductUnitDiscount(
+          med,
+          roomPrice,
+          activePortalDiscounts,
+          activeChannelScope,
+          portalVoucherInput
+        );
 
         return (
           <div className="fixed inset-0 z-[60] bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
@@ -3192,9 +3236,31 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
                     <span className="text-[10px] uppercase font-bold text-slate-400 block">
                       {activeRoom === 'REGULER' ? `Harga Reguler / ${unitLabel}` : `Harga Mitra / ${unitLabel}`}
                     </span>
-                    <span className="text-lg font-black text-slate-900 font-mono tabular-nums">
-                      {formatRupiah(roomPrice)}
-                    </span>
+                    {inspectUnitDisc ? (
+                      <>
+                        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 mt-0.5">
+                          <span className="text-xs font-semibold text-slate-400 line-through decoration-slate-400 decoration-[1.5px] font-mono tabular-nums">
+                            {formatRupiah(inspectUnitDisc.originalPrice)}
+                          </span>
+                          <span className="text-lg font-black text-emerald-600 font-mono tabular-nums">
+                            {formatRupiah(inspectUnitDisc.discountedPrice)}
+                          </span>
+                        </div>
+                        <span className="inline-flex flex-wrap items-center gap-1 mt-0.5 text-[11px] font-bold text-emerald-700">
+                          <TicketPercent className="w-3 h-3 text-emerald-600 shrink-0" />
+                          <span>{formatDiscountShortBadge(inspectUnitDisc.discount)}</span>
+                          {inspectUnitDisc.conditionHint && (
+                            <span className="text-[10px] font-medium text-slate-500">
+                              ({inspectUnitDisc.conditionHint})
+                            </span>
+                          )}
+                        </span>
+                      </>
+                    ) : (
+                      <span className="text-lg font-black text-slate-900 font-mono tabular-nums">
+                        {formatRupiah(roomPrice)}
+                      </span>
+                    )}
                   </div>
                   <div className="text-right">
                     <span className="text-[10px] uppercase font-bold text-slate-400 block">
@@ -3322,6 +3388,13 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
                       const unitPrice = getRoomUnitPrice(med, activeRoom);
                       const availStock = getRoomAvailableStock(med, activeRoom);
                       const rxReq = getMedicinePrescriptionRequirement(med, rxStatusConfigs);
+                      const cartItemDisc = getBestProductUnitDiscount(
+                        med,
+                        unitPrice,
+                        activePortalDiscounts,
+                        activeChannelScope,
+                        portalVoucherInput
+                      );
 
                       return (
                         <div key={med.id} className="p-3 bg-white flex items-center justify-between gap-3">
@@ -3329,8 +3402,22 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
                             <p className="text-xs font-extrabold text-slate-900 truncate">
                               {med.name} {med.kekuatan && med.kekuatan !== '-' ? med.kekuatan : ''}
                             </p>
-                            <p className="text-[11px] text-slate-500 font-mono tabular-nums">
-                              {formatRupiah(unitPrice)} / {unitLabel} · Stok: {availStock.toLocaleString('id-ID')}
+                            <p className="text-[11px] text-slate-500 font-mono tabular-nums flex flex-wrap items-baseline gap-x-1.5">
+                              {cartItemDisc ? (
+                                <>
+                                  <span className="line-through text-slate-400">
+                                    {formatRupiah(cartItemDisc.originalPrice)}
+                                  </span>
+                                  <span className="font-bold text-emerald-600">
+                                    {formatRupiah(cartItemDisc.discountedPrice)}
+                                  </span>
+                                </>
+                              ) : (
+                                <span>{formatRupiah(unitPrice)}</span>
+                              )}
+                              <span>
+                                / {unitLabel} · Stok: {availStock.toLocaleString('id-ID')}
+                              </span>
                             </p>
                             {rxReq.requiresRx && (
                               <span
@@ -3719,13 +3806,20 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
                       <span className="font-mono tabular-nums">-{formatRupiah(portalDiscountAmount)}</span>
                     </div>
                   )}
-                  <div className="flex items-center justify-between pt-1 border-t border-slate-100">
+                  <div className="flex items-center justify-between pt-1 border-t border-slate-100 gap-2">
                     <span className="text-xs font-bold text-slate-800">
                       Estimasi Total Tagihan ({activeRoom === 'REGULER' ? 'Reguler/Umum' : 'Mitra'})
                     </span>
-                    <span className="text-xl font-black text-emerald-700 font-mono tabular-nums">
-                      {formatRupiah(netCartAmount)}
-                    </span>
+                    <div className="flex flex-wrap items-baseline justify-end gap-x-2">
+                      {portalDiscountAmount > 0 && (
+                        <span className="text-xs font-semibold text-slate-400 line-through decoration-slate-400 font-mono tabular-nums">
+                          {formatRupiah(totalCartAmount)}
+                        </span>
+                      )}
+                      <span className="text-xl font-black text-emerald-600 font-mono tabular-nums">
+                        {formatRupiah(netCartAmount)}
+                      </span>
+                    </div>
                   </div>
                 </div>
 

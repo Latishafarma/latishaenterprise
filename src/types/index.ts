@@ -1116,6 +1116,50 @@ export interface PurchaseReturnRecord {
   totalReturValue: number;
   petugas: string;
   branchId: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ProductDisposalItem {
+  medicineId: string;
+  name: string;
+  batchId?: string;
+  batchNo: string;
+  expDate: string;
+  qty: number;
+  unit: string;
+  hpp: number;
+  subtotal: number;
+}
+
+export interface ProductDisposalRecord {
+  id: string;
+  baNumber: string;
+  date: string;
+  time: string;
+  method: string;
+  witness: string;
+  reason: string;
+  petugas: string;
+  branchId?: string;
+  disposalLocation?: string;
+  witness1Name?: string;
+  witness1Nip?: string;
+  witness1Role?: string;
+  witness2Name?: string;
+  witness2Nip?: string;
+  witness2Role?: string;
+  apjName?: string;
+  apjSipa?: string;
+  pharmacyName?: string;
+  pharmacyAddress?: string;
+  pharmacyCity?: string;
+  totalItems: number;
+  totalQty: number;
+  totalValue: number;
+  items: ProductDisposalItem[];
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface DebtPaymentRecord {

@@ -1,5 +1,5 @@
 import { createClient, SupabaseClient, RealtimeChannel } from '@supabase/supabase-js';
-import { Patient, OnlineRegistration, ICD10Item, Staff, StaffRole, StaffStatus, PtkpStatus, StaffTaxCategory, normalizeStaffRole, ensurePrimaryOwnerStaffRole, RMERecord, VitalSign, PrescriptionItem, StaffFeeItem, DutySchedule, Medicine, Mitra, MitraOrder, MitraOrderItem, MitraOrderStatus, MitraPaymentStatus, DrugInteractionRecord, DrugInteractionSeverity, PharmacyProfile, PharmacyBankAccount, APJProfile, DPJProfile, EPrescription, MedicalMorbidityReportRecord, MorbidityTopDiagnosis, Transaction, CartItem, StockMutation, LabTestRecord, LabTestItem, StockOpnameRecord, StockOpnameItemRecord, StockOpnameKind, LiveOpnameItemActivity, Supplier, Branch, StockTransfer, PurchaseInvoice, PurchaseItem, PurchaseOrder, PurchaseOrderItem, SPGroupType, SPPrintLogEntry, DebtPaymentRecord, ReceivablePaymentRecord, CashFlowRecord, SalesDiscount, PromoAd, FeeConfig, TariffItem, DEFAULT_FEE_CONFIG, PayrollOvertimeConfig, DEFAULT_PAYROLL_OVERTIME_CONFIG, MarketingCampaign, MarketingStrategyType, MarketingCampaignStatus, ServiceFeeRole, ServiceFeeType, ServiceFeeRecipientRule, StaffFeeLedgerEntry, StaffFeeLedgerPaymentStatus, WpOpTaxConfig, WpOpTaxScheme, TaxScopeMode, PphMonthlySnapshot, PphAuditEntry, Pph21StaffBreakdown } from '../types';
+import { Patient, OnlineRegistration, ICD10Item, Staff, StaffRole, StaffStatus, PtkpStatus, StaffTaxCategory, normalizeStaffRole, ensurePrimaryOwnerStaffRole, RMERecord, VitalSign, PrescriptionItem, StaffFeeItem, DutySchedule, Medicine, Mitra, MitraOrder, MitraOrderItem, MitraOrderStatus, MitraPaymentStatus, DrugInteractionRecord, DrugInteractionSeverity, PharmacyProfile, PharmacyBankAccount, APJProfile, DPJProfile, EPrescription, MedicalMorbidityReportRecord, MorbidityTopDiagnosis, Transaction, CartItem, StockMutation, LabTestRecord, LabTestItem, StockOpnameRecord, StockOpnameItemRecord, StockOpnameKind, LiveOpnameItemActivity, Supplier, Branch, StockTransfer, PurchaseInvoice, PurchaseItem, PurchaseOrder, PurchaseOrderItem, SPGroupType, SPPrintLogEntry, PurchaseReturnRecord, PurchaseReturnItem, ProductDisposalRecord, ProductDisposalItem, DebtPaymentRecord, ReceivablePaymentRecord, CashFlowRecord, SalesDiscount, PromoAd, FeeConfig, TariffItem, DEFAULT_FEE_CONFIG, PayrollOvertimeConfig, DEFAULT_PAYROLL_OVERTIME_CONFIG, MarketingCampaign, MarketingStrategyType, MarketingCampaignStatus, ServiceFeeRole, ServiceFeeType, ServiceFeeRecipientRule, StaffFeeLedgerEntry, StaffFeeLedgerPaymentStatus, WpOpTaxConfig, WpOpTaxScheme, TaxScopeMode, PphMonthlySnapshot, PphAuditEntry, Pph21StaffBreakdown } from '../types';
 import { INITIAL_ICD10_LIST, INITIAL_STAFF, INITIAL_DUTY_SCHEDULES, INITIAL_MEDICINES } from '../data/initialData';
 import { resolveGenericDrugName } from '../data/drugInteractions';
 import { isDemoMode, demoGetItem, demoSetItem } from './demoSandbox';
@@ -44,7 +44,9 @@ export const SUPABASE_STORAGE_KEYS = {
   MARKETING_TABLE: 'latisha_supabase_marketing_table',
   PPH_CONFIG_TABLE: 'latisha_supabase_pph_config_table',
   PPH_SNAPSHOT_TABLE: 'latisha_supabase_pph_snapshot_table',
-  PPH_AUDIT_TABLE: 'latisha_supabase_pph_audit_table'
+  PPH_AUDIT_TABLE: 'latisha_supabase_pph_audit_table',
+  DISPOSAL_HISTORY_TABLE: 'latisha_supabase_disposal_history_table',
+  PURCHASE_RETURN_TABLE: 'latisha_supabase_purchase_return_table'
 };
 
 export const DEFAULT_SUPABASE_URL = 'https://aolhizbzrggatxizvenj.supabase.co';
@@ -85,6 +87,8 @@ export const DEFAULT_PPH_CONFIG_TABLE = 'pph_wpop_config';
 export const DEFAULT_PPH_CONFIG_ROW_ID = 'MAIN-WPOP-TAX-CONFIG';
 export const DEFAULT_PPH_SNAPSHOT_TABLE = 'pph_wpop_snapshots';
 export const DEFAULT_PPH_AUDIT_TABLE = 'pph_wpop_audit';
+export const DEFAULT_DISPOSAL_HISTORY_TABLE = 'pemusnahan_obat';
+export const DEFAULT_PURCHASE_RETURN_TABLE = 'retur_pembelian';
 
 export interface SupabaseConfig {
   url: string;
@@ -122,6 +126,8 @@ export interface SupabaseConfig {
   pphConfigTable: string;
   pphSnapshotTable: string;
   pphAuditTable: string;
+  disposalHistoryTable: string;
+  purchaseReturnTable: string;
 }
 
 export function getSupabaseConfig(): SupabaseConfig {
@@ -161,7 +167,9 @@ export function getSupabaseConfig(): SupabaseConfig {
       marketingTable: DEFAULT_MARKETING_TABLE,
       pphConfigTable: DEFAULT_PPH_CONFIG_TABLE,
       pphSnapshotTable: DEFAULT_PPH_SNAPSHOT_TABLE,
-      pphAuditTable: DEFAULT_PPH_AUDIT_TABLE
+      pphAuditTable: DEFAULT_PPH_AUDIT_TABLE,
+      disposalHistoryTable: DEFAULT_DISPOSAL_HISTORY_TABLE,
+      purchaseReturnTable: DEFAULT_PURCHASE_RETURN_TABLE
     };
   }
   const storedUrl = localStorage.getItem(SUPABASE_STORAGE_KEYS.URL)?.trim();
@@ -199,6 +207,8 @@ export function getSupabaseConfig(): SupabaseConfig {
   const storedPphConfigTable = localStorage.getItem(SUPABASE_STORAGE_KEYS.PPH_CONFIG_TABLE)?.trim();
   const storedPphSnapshotTable = localStorage.getItem(SUPABASE_STORAGE_KEYS.PPH_SNAPSHOT_TABLE)?.trim();
   const storedPphAuditTable = localStorage.getItem(SUPABASE_STORAGE_KEYS.PPH_AUDIT_TABLE)?.trim();
+  const storedDisposalHistoryTable = localStorage.getItem(SUPABASE_STORAGE_KEYS.DISPOSAL_HISTORY_TABLE)?.trim();
+  const storedPurchaseReturnTable = localStorage.getItem(SUPABASE_STORAGE_KEYS.PURCHASE_RETURN_TABLE)?.trim();
 
   return {
     url: storedUrl || DEFAULT_SUPABASE_URL,
@@ -235,7 +245,9 @@ export function getSupabaseConfig(): SupabaseConfig {
     marketingTable: storedMarketingTable || DEFAULT_MARKETING_TABLE,
     pphConfigTable: storedPphConfigTable || DEFAULT_PPH_CONFIG_TABLE,
     pphSnapshotTable: storedPphSnapshotTable || DEFAULT_PPH_SNAPSHOT_TABLE,
-    pphAuditTable: storedPphAuditTable || DEFAULT_PPH_AUDIT_TABLE
+    pphAuditTable: storedPphAuditTable || DEFAULT_PPH_AUDIT_TABLE,
+    disposalHistoryTable: storedDisposalHistoryTable || DEFAULT_DISPOSAL_HISTORY_TABLE,
+    purchaseReturnTable: storedPurchaseReturnTable || DEFAULT_PURCHASE_RETURN_TABLE
   };
 }
 
@@ -341,6 +353,18 @@ export function setSupabaseConfig(cfg: Partial<SupabaseConfig>): void {
   }
   if (cfg.pphAuditTable !== undefined) {
     localStorage.setItem(SUPABASE_STORAGE_KEYS.PPH_AUDIT_TABLE, cfg.pphAuditTable.trim() || DEFAULT_PPH_AUDIT_TABLE);
+  }
+  if (cfg.disposalHistoryTable !== undefined) {
+    localStorage.setItem(
+      SUPABASE_STORAGE_KEYS.DISPOSAL_HISTORY_TABLE,
+      cfg.disposalHistoryTable.trim() || DEFAULT_DISPOSAL_HISTORY_TABLE
+    );
+  }
+  if (cfg.purchaseReturnTable !== undefined) {
+    localStorage.setItem(
+      SUPABASE_STORAGE_KEYS.PURCHASE_RETURN_TABLE,
+      cfg.purchaseReturnTable.trim() || DEFAULT_PURCHASE_RETURN_TABLE
+    );
   }
   // Reset cached instance
   cachedClient = null;
@@ -6642,9 +6666,7 @@ export function facilityProfilesToSupabaseRow(bundle: {
         ? { branchLocations: pharmacy.branchLocations }
         : {}),
       allowPosZeroOrNegativeStock: Boolean(pharmacy.allowPosZeroOrNegativeStock),
-      ...(Array.isArray(pharmacy.edAlertThresholds) && pharmacy.edAlertThresholds.length > 0
-        ? { edAlertThresholds: pharmacy.edAlertThresholds }
-        : {})
+      edAlertThresholds: Array.isArray(pharmacy.edAlertThresholds) ? pharmacy.edAlertThresholds : []
     },
     apj_nama: apj.name || '',
     apj_sipa: apj.sipa || '',
@@ -16385,6 +16407,891 @@ ${buildMultiTenantRlsSqlBlock('pph_wpop_config', { includeFunctions: false })}
 ${buildMultiTenantRlsSqlBlock('pph_wpop_snapshots', { hasBranchId: true, includeFunctions: false })}
 ${buildMultiTenantRlsSqlBlock('pph_wpop_audit', { hasBranchId: true, includeFunctions: false })}
 `;
+
+// ============================================================================
+// KELOLA PRODUK: RIWAYAT PEMUSNAHAN OBAT (pemusnahan_obat) — Two-Way Sync
+// ============================================================================
+
+export function isDemoDisposalRecordId(id?: string): boolean {
+  if (!id) return false;
+  return id.toUpperCase().startsWith('DIS-DEMO-');
+}
+
+export function disposalRecordToSupabaseRow(rec: ProductDisposalRecord): Record<string, any> {
+  const nowIso = new Date().toISOString();
+  const safeItems: ProductDisposalItem[] = Array.isArray(rec.items)
+    ? rec.items.map((it) => ({
+        medicineId: String(it.medicineId || ''),
+        name: String(it.name || ''),
+        ...(it.batchId ? { batchId: String(it.batchId) } : {}),
+        batchNo: String(it.batchNo || '-'),
+        expDate: String(it.expDate || ''),
+        qty: Math.max(0, Math.round(Number(it.qty) || 0)),
+        unit: String(it.unit || 'Pcs'),
+        hpp: Math.max(0, Number(it.hpp) || 0),
+        subtotal: Math.max(0, Number(it.subtotal) || 0)
+      }))
+    : [];
+
+  return {
+    id: String(rec.id),
+    ba_number: String(rec.baNumber || rec.id),
+    date: String(rec.date || nowIso.split('T')[0]),
+    time: String(rec.time || ''),
+    method: String(rec.method || ''),
+    witness: String(rec.witness || ''),
+    reason: String(rec.reason || ''),
+    petugas: String(rec.petugas || 'Apoteker'),
+    branch_id: String(rec.branchId || 'BR-01'),
+    disposal_location: rec.disposalLocation || '',
+    witness1_name: rec.witness1Name || '',
+    witness1_nip: rec.witness1Nip || '',
+    witness1_role: rec.witness1Role || '',
+    witness2_name: rec.witness2Name || '',
+    witness2_nip: rec.witness2Nip || '',
+    witness2_role: rec.witness2Role || '',
+    apj_name: rec.apjName || '',
+    apj_sipa: rec.apjSipa || '',
+    pharmacy_name: rec.pharmacyName || '',
+    pharmacy_address: rec.pharmacyAddress || '',
+    pharmacy_city: rec.pharmacyCity || '',
+    total_items: Number(rec.totalItems) || safeItems.length,
+    total_qty: Number(rec.totalQty) || safeItems.reduce((s, it) => s + it.qty, 0),
+    total_value: Number(rec.totalValue) || safeItems.reduce((s, it) => s + it.subtotal, 0),
+    items: safeItems,
+    created_at: rec.createdAt || nowIso,
+    updated_at: rec.updatedAt || nowIso
+  };
+}
+
+export function supabaseRowToDisposalRecord(row: Record<string, any>): ProductDisposalRecord {
+  let parsedItems: ProductDisposalItem[] = [];
+  const rawItems = row.items ?? row.daftar_obat ?? [];
+  try {
+    const arr = typeof rawItems === 'string' ? JSON.parse(rawItems) : rawItems;
+    if (Array.isArray(arr)) {
+      parsedItems = arr.map((it: any) => ({
+        medicineId: String(it?.medicineId ?? it?.medicine_id ?? ''),
+        name: String(it?.name ?? it?.nama_obat ?? ''),
+        ...(it?.batchId || it?.batch_id ? { batchId: String(it.batchId || it.batch_id) } : {}),
+        batchNo: String(it?.batchNo ?? it?.batch_no ?? '-'),
+        expDate: String(it?.expDate ?? it?.exp_date ?? ''),
+        qty: Math.max(0, Math.round(Number(it?.qty) || 0)),
+        unit: String(it?.unit ?? it?.satuan ?? 'Pcs'),
+        hpp: Math.max(0, Number(it?.hpp) || 0),
+        subtotal: Math.max(0, Number(it?.subtotal) || 0)
+      }));
+    }
+  } catch {
+    parsedItems = [];
+  }
+
+  return {
+    id: String(row.id || ''),
+    baNumber: String(row.ba_number ?? row.baNumber ?? row.id ?? ''),
+    date: String(row.date || ''),
+    time: String(row.time || ''),
+    method: String(row.method ?? row.metode ?? ''),
+    witness: String(row.witness ?? row.saksi ?? ''),
+    reason: String(row.reason ?? row.alasan ?? ''),
+    petugas: String(row.petugas || 'Apoteker'),
+    branchId: String(row.branch_id ?? row.branchId ?? 'BR-01'),
+    disposalLocation: row.disposal_location ?? row.disposalLocation ?? undefined,
+    witness1Name: row.witness1_name ?? row.witness1Name ?? undefined,
+    witness1Nip: row.witness1_nip ?? row.witness1Nip ?? undefined,
+    witness1Role: row.witness1_role ?? row.witness1Role ?? undefined,
+    witness2Name: row.witness2_name ?? row.witness2Name ?? undefined,
+    witness2Nip: row.witness2_nip ?? row.witness2Nip ?? undefined,
+    witness2Role: row.witness2_role ?? row.witness2Role ?? undefined,
+    apjName: row.apj_name ?? row.apjName ?? undefined,
+    apjSipa: row.apj_sipa ?? row.apjSipa ?? undefined,
+    pharmacyName: row.pharmacy_name ?? row.pharmacyName ?? undefined,
+    pharmacyAddress: row.pharmacy_address ?? row.pharmacyAddress ?? undefined,
+    pharmacyCity: row.pharmacy_city ?? row.pharmacyCity ?? undefined,
+    totalItems: Number(row.total_items ?? row.totalItems) || parsedItems.length,
+    totalQty:
+      Number(row.total_qty ?? row.totalQty) || parsedItems.reduce((s, it) => s + it.qty, 0),
+    totalValue:
+      Number(row.total_value ?? row.totalValue) ||
+      parsedItems.reduce((s, it) => s + it.subtotal, 0),
+    items: parsedItems,
+    createdAt: row.created_at ? String(row.created_at) : undefined,
+    updatedAt: row.updated_at ? String(row.updated_at) : undefined
+  };
+}
+
+export async function fetchDisposalHistoryFromSupabase(options?: {
+  forceRefresh?: boolean;
+  timeoutMs?: number;
+}): Promise<{
+  data: ProductDisposalRecord[] | null;
+  isEmpty?: boolean;
+  needsTableSetup?: boolean;
+  isDemo?: boolean;
+  error?: string;
+}> {
+  if (isDemoMode()) return { data: null, isDemo: true };
+  const client = getSupabaseClient();
+  if (!client) return { data: null, error: 'Klien Supabase belum dikonfigurasi' };
+
+  const { disposalHistoryTable } = getSupabaseConfig();
+  const tableName = disposalHistoryTable || DEFAULT_DISPOSAL_HISTORY_TABLE;
+  const shouldRefresh = Boolean(options?.forceRefresh) || missingTablesInSession.has(tableName);
+  const available = await isSupabaseTableAvailable(tableName, shouldRefresh);
+  if (available === false) {
+    return {
+      data: null,
+      needsTableSetup: true,
+      error: `Tabel "${tableName}" belum tersedia di Supabase.`
+    };
+  }
+
+  const timeoutMs = options?.timeoutMs ?? 12000;
+  const PAGE_SIZE = 500;
+  const allRows: Record<string, any>[] = [];
+  let from = 0;
+  let hasMore = true;
+
+  try {
+    while (hasMore) {
+      const to = from + PAGE_SIZE - 1;
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<{ data: null; error: { message: string } }>((resolve) => {
+        timeoutHandle = setTimeout(() => {
+          resolve({
+            data: null,
+            error: { message: `Timeout mengambil data dari tabel ${tableName}` }
+          });
+        }, timeoutMs);
+      });
+
+      const queryPromise = client
+        .from(tableName)
+        .select('*')
+        .order('created_at', { ascending: false })
+        .range(from, to);
+
+      const result = await Promise.race([queryPromise, timeoutPromise]);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+
+      const { data, error } = result as {
+        data: any[] | null;
+        error: { message: string; code?: string } | null;
+      };
+
+      if (error) {
+        const needsTableSetup = isMissingTableOrRlsError(error.message, error.code);
+        if (needsTableSetup) missingTablesInSession.add(tableName);
+        console.warn(`[Supabase Pemusnahan Obat] Fetch error (${tableName}):`, error.message);
+        return { data: null, needsTableSetup, error: error.message };
+      }
+
+      if (data && data.length > 0) {
+        allRows.push(...data);
+        if (data.length < PAGE_SIZE) {
+          hasMore = false;
+        } else {
+          from += PAGE_SIZE;
+        }
+      } else {
+        hasMore = false;
+      }
+    }
+
+    missingTablesInSession.delete(tableName);
+    const uniqueMap = new Map<string, ProductDisposalRecord>();
+    for (const rawRow of allRows) {
+      const mapped = supabaseRowToDisposalRecord(rawRow);
+      if (mapped.id && !isDemoDisposalRecordId(mapped.id)) {
+        uniqueMap.set(mapped.id, mapped);
+      }
+    }
+    const records = Array.from(uniqueMap.values());
+    return { data: records, isEmpty: records.length === 0 };
+  } catch (err: any) {
+    return { data: null, error: err?.message || String(err) };
+  }
+}
+
+export async function syncDisposalRecordToSupabase(
+  rec: ProductDisposalRecord,
+  timeoutMs = 10000
+): Promise<{
+  success: boolean;
+  needsTableSetup?: boolean;
+  isDemo?: boolean;
+  error?: string;
+}> {
+  if (isDemoMode()) return { success: false, isDemo: true };
+  if (!rec?.id || isDemoDisposalRecordId(rec.id)) return { success: true };
+
+  const client = getSupabaseClient();
+  if (!client) return { success: false, error: 'Klien Supabase belum dikonfigurasi' };
+
+  const { disposalHistoryTable } = getSupabaseConfig();
+  const tableName = disposalHistoryTable || DEFAULT_DISPOSAL_HISTORY_TABLE;
+  const available = await isSupabaseTableAvailable(tableName, missingTablesInSession.has(tableName));
+  if (available === false) {
+    return {
+      success: false,
+      needsTableSetup: true,
+      error: `Tabel "${tableName}" belum tersedia di Supabase.`
+    };
+  }
+
+  const row = disposalRecordToSupabaseRow(rec);
+
+  try {
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<{ error: { message: string } }>((resolve) => {
+      timeoutHandle = setTimeout(() => {
+        resolve({ error: { message: `Timeout menyimpan data pemusnahan ke ${tableName}` } });
+      }, timeoutMs);
+    });
+
+    const upsertPromise = client.from(tableName).upsert(row, { onConflict: 'id' });
+    const result = await Promise.race([upsertPromise, timeoutPromise]);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+
+    const { error } = result as { error: { message: string; code?: string } | null };
+    if (error) {
+      const needsTableSetup = isMissingTableOrRlsError(error.message, error.code);
+      if (needsTableSetup) missingTablesInSession.add(tableName);
+      console.warn(`[Supabase Pemusnahan Obat] Upsert error (${tableName}):`, error.message);
+      return { success: false, needsTableSetup, error: error.message };
+    }
+
+    missingTablesInSession.delete(tableName);
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+
+export async function seedDisposalHistoryToSupabase(
+  records: ProductDisposalRecord[],
+  timeoutMs = 12000
+): Promise<{
+  success: boolean;
+  count: number;
+  needsTableSetup?: boolean;
+  isDemo?: boolean;
+  error?: string;
+}> {
+  if (isDemoMode()) return { success: false, count: 0, isDemo: true };
+  const client = getSupabaseClient();
+  if (!client) return { success: false, count: 0, error: 'Klien Supabase belum dikonfigurasi' };
+
+  const valid = (records || []).filter((r) => Boolean(r?.id) && !isDemoDisposalRecordId(r.id));
+  if (valid.length === 0) return { success: true, count: 0 };
+
+  const { disposalHistoryTable } = getSupabaseConfig();
+  const tableName = disposalHistoryTable || DEFAULT_DISPOSAL_HISTORY_TABLE;
+  const available = await isSupabaseTableAvailable(tableName, missingTablesInSession.has(tableName));
+  if (available === false) {
+    return {
+      success: false,
+      count: 0,
+      needsTableSetup: true,
+      error: `Tabel "${tableName}" belum tersedia di Supabase.`
+    };
+  }
+
+  const CHUNK_SIZE = 150;
+  let totalSynced = 0;
+
+  try {
+    for (let i = 0; i < valid.length; i += CHUNK_SIZE) {
+      const chunk = valid.slice(i, i + CHUNK_SIZE);
+      const rows = chunk.map((r) => disposalRecordToSupabaseRow(r));
+
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<{ error: { message: string } }>((resolve) => {
+        timeoutHandle = setTimeout(() => {
+          resolve({ error: { message: `Timeout menyemai riwayat pemusnahan ke ${tableName}` } });
+        }, timeoutMs);
+      });
+
+      const upsertPromise = client.from(tableName).upsert(rows, { onConflict: 'id' });
+      const result = await Promise.race([upsertPromise, timeoutPromise]);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+
+      const { error } = result as { error: { message: string; code?: string } | null };
+      if (error) {
+        const needsTableSetup = isMissingTableOrRlsError(error.message, error.code);
+        if (needsTableSetup) missingTablesInSession.add(tableName);
+        return { success: false, count: totalSynced, needsTableSetup, error: error.message };
+      }
+      totalSynced += rows.length;
+    }
+
+    missingTablesInSession.delete(tableName);
+    return { success: true, count: totalSynced };
+  } catch (err: any) {
+    return { success: false, count: totalSynced, error: err?.message || String(err) };
+  }
+}
+
+export async function deleteDisposalHistoryFromSupabase(
+  ids: string[]
+): Promise<{
+  success: boolean;
+  needsTableSetup?: boolean;
+  isDemo?: boolean;
+  error?: string;
+}> {
+  if (isDemoMode()) return { success: false, isDemo: true };
+  const validIds = (ids || []).filter((id) => Boolean(id) && !isDemoDisposalRecordId(id));
+  if (validIds.length === 0) return { success: true };
+
+  const client = getSupabaseClient();
+  if (!client) return { success: false, error: 'Klien Supabase belum dikonfigurasi' };
+
+  const { disposalHistoryTable } = getSupabaseConfig();
+  const tableName = disposalHistoryTable || DEFAULT_DISPOSAL_HISTORY_TABLE;
+  const available = await isSupabaseTableAvailable(tableName, missingTablesInSession.has(tableName));
+  if (available === false) {
+    return {
+      success: false,
+      needsTableSetup: true,
+      error: `Tabel "${tableName}" belum tersedia di Supabase.`
+    };
+  }
+
+  try {
+    const CHUNK_SIZE = 200;
+    for (let i = 0; i < validIds.length; i += CHUNK_SIZE) {
+      const chunkIds = validIds.slice(i, i + CHUNK_SIZE);
+      const { error } = await client.from(tableName).delete().in('id', chunkIds);
+      if (error) {
+        const needsTableSetup = isMissingTableOrRlsError(error.message, error.code);
+        if (needsTableSetup) missingTablesInSession.add(tableName);
+        return { success: false, needsTableSetup, error: error.message };
+      }
+    }
+    missingTablesInSession.delete(tableName);
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+
+export function subscribeDisposalHistoryRealtime(
+  onInsert: (rec: ProductDisposalRecord) => void,
+  onUpdate: (rec: ProductDisposalRecord) => void,
+  onDelete: (id: string) => void
+): RealtimeChannel | null {
+  if (isDemoMode()) return null;
+  const client = getSupabaseClient();
+  if (!client) return null;
+
+  const { disposalHistoryTable } = getSupabaseConfig();
+  const table = disposalHistoryTable || DEFAULT_DISPOSAL_HISTORY_TABLE;
+  if (missingTablesInSession.has(table)) return null;
+  const channelName = `realtime_${table}_${Date.now()}`;
+
+  try {
+    const channel = client
+      .channel(channelName)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table }, (p) => {
+        if (p.new) {
+          const mapped = supabaseRowToDisposalRecord(p.new);
+          if (mapped.id && !isDemoDisposalRecordId(mapped.id)) onInsert(mapped);
+        }
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table }, (p) => {
+        if (p.new) {
+          const mapped = supabaseRowToDisposalRecord(p.new);
+          if (mapped.id && !isDemoDisposalRecordId(mapped.id)) onUpdate(mapped);
+        }
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table }, (p) => {
+        if (p.old && p.old.id) onDelete(String(p.old.id));
+      })
+      .subscribe();
+
+    return channel;
+  } catch (err) {
+    console.warn('[Supabase Pemusnahan Obat Realtime Error]:', err);
+    return null;
+  }
+}
+
+// ============================================================================
+// KELOLA PRODUK & RETUR PBF: RIWAYAT RETUR PEMBELIAN (retur_pembelian)
+// ============================================================================
+
+export function isDemoPurchaseReturnId(id?: string): boolean {
+  if (!id) return false;
+  return id.toUpperCase().startsWith('RET-DEMO-');
+}
+
+export function purchaseReturnToSupabaseRow(rec: PurchaseReturnRecord): Record<string, any> {
+  const nowIso = new Date().toISOString();
+  const safeItems: PurchaseReturnItem[] = Array.isArray(rec.items)
+    ? rec.items.map((it) => ({
+        medicineId: String(it.medicineId || ''),
+        name: String(it.name || ''),
+        qty: Math.max(0, Math.round(Number(it.qty) || 0)),
+        unit: String(it.unit || 'Pcs'),
+        batchNo: String(it.batchNo || '-'),
+        expDate: String(it.expDate || ''),
+        price: Math.max(0, Number(it.price) || 0),
+        subtotal: Math.max(0, Number(it.subtotal) || 0),
+        reason: String(it.reason || it.alasan || ''),
+        alasan: String(it.alasan || it.reason || '')
+      }))
+    : [];
+
+  return {
+    id: String(rec.id),
+    invoice_id: String(rec.invoiceId || ''),
+    invoice_no: String(rec.invoiceNo || ''),
+    pbf_name: String(rec.pbfName || ''),
+    date: String(rec.date || nowIso.split('T')[0]),
+    time: String(rec.time || ''),
+    salesman: rec.salesman || '',
+    items: safeItems,
+    total_retur_value: Number(rec.totalReturValue) || safeItems.reduce((s, it) => s + it.subtotal, 0),
+    petugas: String(rec.petugas || 'Apoteker'),
+    branch_id: String(rec.branchId || 'BR-01'),
+    created_at: rec.createdAt || nowIso,
+    updated_at: rec.updatedAt || nowIso
+  };
+}
+
+export function supabaseRowToPurchaseReturn(row: Record<string, any>): PurchaseReturnRecord {
+  let parsedItems: PurchaseReturnItem[] = [];
+  const rawItems = row.items ?? [];
+  try {
+    const arr = typeof rawItems === 'string' ? JSON.parse(rawItems) : rawItems;
+    if (Array.isArray(arr)) {
+      parsedItems = arr.map((it: any) => ({
+        medicineId: String(it?.medicineId ?? it?.medicine_id ?? ''),
+        name: String(it?.name ?? ''),
+        qty: Math.max(0, Math.round(Number(it?.qty) || 0)),
+        unit: String(it?.unit ?? 'Pcs'),
+        batchNo: String(it?.batchNo ?? it?.batch_no ?? '-'),
+        expDate: String(it?.expDate ?? it?.exp_date ?? ''),
+        price: Math.max(0, Number(it?.price) || 0),
+        subtotal: Math.max(0, Number(it?.subtotal) || 0),
+        reason: String(it?.reason ?? it?.alasan ?? ''),
+        alasan: String(it?.alasan ?? it?.reason ?? '')
+      }));
+    }
+  } catch {
+    parsedItems = [];
+  }
+
+  return {
+    id: String(row.id || ''),
+    invoiceId: String(row.invoice_id ?? row.invoiceId ?? ''),
+    invoiceNo: String(row.invoice_no ?? row.invoiceNo ?? ''),
+    pbfName: String(row.pbf_name ?? row.pbfName ?? ''),
+    date: String(row.date || ''),
+    time: String(row.time || ''),
+    salesman: row.salesman ? String(row.salesman) : undefined,
+    items: parsedItems,
+    totalReturValue:
+      Number(row.total_retur_value ?? row.totalReturValue) ||
+      parsedItems.reduce((s, it) => s + it.subtotal, 0),
+    petugas: String(row.petugas || 'Apoteker'),
+    branchId: String(row.branch_id ?? row.branchId ?? 'BR-01'),
+    createdAt: row.created_at ? String(row.created_at) : undefined,
+    updatedAt: row.updated_at ? String(row.updated_at) : undefined
+  };
+}
+
+export async function fetchPurchaseReturnsFromSupabase(options?: {
+  forceRefresh?: boolean;
+  timeoutMs?: number;
+}): Promise<{
+  data: PurchaseReturnRecord[] | null;
+  isEmpty?: boolean;
+  needsTableSetup?: boolean;
+  isDemo?: boolean;
+  error?: string;
+}> {
+  if (isDemoMode()) return { data: null, isDemo: true };
+  const client = getSupabaseClient();
+  if (!client) return { data: null, error: 'Klien Supabase belum dikonfigurasi' };
+
+  const { purchaseReturnTable } = getSupabaseConfig();
+  const tableName = purchaseReturnTable || DEFAULT_PURCHASE_RETURN_TABLE;
+  const shouldRefresh = Boolean(options?.forceRefresh) || missingTablesInSession.has(tableName);
+  const available = await isSupabaseTableAvailable(tableName, shouldRefresh);
+  if (available === false) {
+    return {
+      data: null,
+      needsTableSetup: true,
+      error: `Tabel "${tableName}" belum tersedia di Supabase.`
+    };
+  }
+
+  const timeoutMs = options?.timeoutMs ?? 12000;
+  const PAGE_SIZE = 500;
+  const allRows: Record<string, any>[] = [];
+  let from = 0;
+  let hasMore = true;
+
+  try {
+    while (hasMore) {
+      const to = from + PAGE_SIZE - 1;
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<{ data: null; error: { message: string } }>((resolve) => {
+        timeoutHandle = setTimeout(() => {
+          resolve({
+            data: null,
+            error: { message: `Timeout mengambil data dari tabel ${tableName}` }
+          });
+        }, timeoutMs);
+      });
+
+      const queryPromise = client
+        .from(tableName)
+        .select('*')
+        .order('created_at', { ascending: false })
+        .range(from, to);
+
+      const result = await Promise.race([queryPromise, timeoutPromise]);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+
+      const { data, error } = result as {
+        data: any[] | null;
+        error: { message: string; code?: string } | null;
+      };
+
+      if (error) {
+        const needsTableSetup = isMissingTableOrRlsError(error.message, error.code);
+        if (needsTableSetup) missingTablesInSession.add(tableName);
+        console.warn(`[Supabase Retur Pembelian] Fetch error (${tableName}):`, error.message);
+        return { data: null, needsTableSetup, error: error.message };
+      }
+
+      if (data && data.length > 0) {
+        allRows.push(...data);
+        if (data.length < PAGE_SIZE) {
+          hasMore = false;
+        } else {
+          from += PAGE_SIZE;
+        }
+      } else {
+        hasMore = false;
+      }
+    }
+
+    missingTablesInSession.delete(tableName);
+    const uniqueMap = new Map<string, PurchaseReturnRecord>();
+    for (const rawRow of allRows) {
+      const mapped = supabaseRowToPurchaseReturn(rawRow);
+      if (mapped.id && !isDemoPurchaseReturnId(mapped.id)) {
+        uniqueMap.set(mapped.id, mapped);
+      }
+    }
+    const records = Array.from(uniqueMap.values());
+    return { data: records, isEmpty: records.length === 0 };
+  } catch (err: any) {
+    return { data: null, error: err?.message || String(err) };
+  }
+}
+
+export async function syncPurchaseReturnToSupabase(
+  rec: PurchaseReturnRecord,
+  timeoutMs = 10000
+): Promise<{
+  success: boolean;
+  needsTableSetup?: boolean;
+  isDemo?: boolean;
+  error?: string;
+}> {
+  if (isDemoMode()) return { success: false, isDemo: true };
+  if (!rec?.id || isDemoPurchaseReturnId(rec.id)) return { success: true };
+
+  const client = getSupabaseClient();
+  if (!client) return { success: false, error: 'Klien Supabase belum dikonfigurasi' };
+
+  const { purchaseReturnTable } = getSupabaseConfig();
+  const tableName = purchaseReturnTable || DEFAULT_PURCHASE_RETURN_TABLE;
+  const available = await isSupabaseTableAvailable(tableName, missingTablesInSession.has(tableName));
+  if (available === false) {
+    return {
+      success: false,
+      needsTableSetup: true,
+      error: `Tabel "${tableName}" belum tersedia di Supabase.`
+    };
+  }
+
+  const row = purchaseReturnToSupabaseRow(rec);
+
+  try {
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<{ error: { message: string } }>((resolve) => {
+      timeoutHandle = setTimeout(() => {
+        resolve({ error: { message: `Timeout menyimpan data retur ke ${tableName}` } });
+      }, timeoutMs);
+    });
+
+    const upsertPromise = client.from(tableName).upsert(row, { onConflict: 'id' });
+    const result = await Promise.race([upsertPromise, timeoutPromise]);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+
+    const { error } = result as { error: { message: string; code?: string } | null };
+    if (error) {
+      const needsTableSetup = isMissingTableOrRlsError(error.message, error.code);
+      if (needsTableSetup) missingTablesInSession.add(tableName);
+      console.warn(`[Supabase Retur Pembelian] Upsert error (${tableName}):`, error.message);
+      return { success: false, needsTableSetup, error: error.message };
+    }
+
+    missingTablesInSession.delete(tableName);
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+
+export async function seedPurchaseReturnsToSupabase(
+  records: PurchaseReturnRecord[],
+  timeoutMs = 12000
+): Promise<{
+  success: boolean;
+  count: number;
+  needsTableSetup?: boolean;
+  isDemo?: boolean;
+  error?: string;
+}> {
+  if (isDemoMode()) return { success: false, count: 0, isDemo: true };
+  const client = getSupabaseClient();
+  if (!client) return { success: false, count: 0, error: 'Klien Supabase belum dikonfigurasi' };
+
+  const valid = (records || []).filter((r) => Boolean(r?.id) && !isDemoPurchaseReturnId(r.id));
+  if (valid.length === 0) return { success: true, count: 0 };
+
+  const { purchaseReturnTable } = getSupabaseConfig();
+  const tableName = purchaseReturnTable || DEFAULT_PURCHASE_RETURN_TABLE;
+  const available = await isSupabaseTableAvailable(tableName, missingTablesInSession.has(tableName));
+  if (available === false) {
+    return {
+      success: false,
+      count: 0,
+      needsTableSetup: true,
+      error: `Tabel "${tableName}" belum tersedia di Supabase.`
+    };
+  }
+
+  const CHUNK_SIZE = 150;
+  let totalSynced = 0;
+
+  try {
+    for (let i = 0; i < valid.length; i += CHUNK_SIZE) {
+      const chunk = valid.slice(i, i + CHUNK_SIZE);
+      const rows = chunk.map((r) => purchaseReturnToSupabaseRow(r));
+
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<{ error: { message: string } }>((resolve) => {
+        timeoutHandle = setTimeout(() => {
+          resolve({ error: { message: `Timeout menyemai riwayat retur ke ${tableName}` } });
+        }, timeoutMs);
+      });
+
+      const upsertPromise = client.from(tableName).upsert(rows, { onConflict: 'id' });
+      const result = await Promise.race([upsertPromise, timeoutPromise]);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+
+      const { error } = result as { error: { message: string; code?: string } | null };
+      if (error) {
+        const needsTableSetup = isMissingTableOrRlsError(error.message, error.code);
+        if (needsTableSetup) missingTablesInSession.add(tableName);
+        return { success: false, count: totalSynced, needsTableSetup, error: error.message };
+      }
+      totalSynced += rows.length;
+    }
+
+    missingTablesInSession.delete(tableName);
+    return { success: true, count: totalSynced };
+  } catch (err: any) {
+    return { success: false, count: totalSynced, error: err?.message || String(err) };
+  }
+}
+
+export async function deletePurchaseReturnsFromSupabase(
+  ids: string[]
+): Promise<{
+  success: boolean;
+  needsTableSetup?: boolean;
+  isDemo?: boolean;
+  error?: string;
+}> {
+  if (isDemoMode()) return { success: false, isDemo: true };
+  const validIds = (ids || []).filter((id) => Boolean(id) && !isDemoPurchaseReturnId(id));
+  if (validIds.length === 0) return { success: true };
+
+  const client = getSupabaseClient();
+  if (!client) return { success: false, error: 'Klien Supabase belum dikonfigurasi' };
+
+  const { purchaseReturnTable } = getSupabaseConfig();
+  const tableName = purchaseReturnTable || DEFAULT_PURCHASE_RETURN_TABLE;
+  const available = await isSupabaseTableAvailable(tableName, missingTablesInSession.has(tableName));
+  if (available === false) {
+    return {
+      success: false,
+      needsTableSetup: true,
+      error: `Tabel "${tableName}" belum tersedia di Supabase.`
+    };
+  }
+
+  try {
+    const CHUNK_SIZE = 200;
+    for (let i = 0; i < validIds.length; i += CHUNK_SIZE) {
+      const chunkIds = validIds.slice(i, i + CHUNK_SIZE);
+      const { error } = await client.from(tableName).delete().in('id', chunkIds);
+      if (error) {
+        const needsTableSetup = isMissingTableOrRlsError(error.message, error.code);
+        if (needsTableSetup) missingTablesInSession.add(tableName);
+        return { success: false, needsTableSetup, error: error.message };
+      }
+    }
+    missingTablesInSession.delete(tableName);
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+
+export function subscribePurchaseReturnsRealtime(
+  onInsert: (rec: PurchaseReturnRecord) => void,
+  onUpdate: (rec: PurchaseReturnRecord) => void,
+  onDelete: (id: string) => void
+): RealtimeChannel | null {
+  if (isDemoMode()) return null;
+  const client = getSupabaseClient();
+  if (!client) return null;
+
+  const { purchaseReturnTable } = getSupabaseConfig();
+  const table = purchaseReturnTable || DEFAULT_PURCHASE_RETURN_TABLE;
+  if (missingTablesInSession.has(table)) return null;
+  const channelName = `realtime_${table}_${Date.now()}`;
+
+  try {
+    const channel = client
+      .channel(channelName)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table }, (p) => {
+        if (p.new) {
+          const mapped = supabaseRowToPurchaseReturn(p.new);
+          if (mapped.id && !isDemoPurchaseReturnId(mapped.id)) onInsert(mapped);
+        }
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table }, (p) => {
+        if (p.new) {
+          const mapped = supabaseRowToPurchaseReturn(p.new);
+          if (mapped.id && !isDemoPurchaseReturnId(mapped.id)) onUpdate(mapped);
+        }
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table }, (p) => {
+        if (p.old && p.old.id) onDelete(String(p.old.id));
+      })
+      .subscribe();
+
+    return channel;
+  } catch (err) {
+    console.warn('[Supabase Retur Pembelian Realtime Error]:', err);
+    return null;
+  }
+}
+
+export const SUPABASE_KELOLA_PRODUK_SQL_SCHEMA = `-- SKEMA TABEL KELOLA PRODUK: PEMUSNAHAN OBAT (PERMENKES 73/2016) & RETUR PEMBELIAN KE PBF
+-- Jalankan skrip ini sekali saja pada SQL Editor di Dashboard Supabase Anda:
+
+-- 1. Tabel Riwayat Pemusnahan Obat & Berita Acara (pemusnahan_obat)
+CREATE TABLE IF NOT EXISTS pemusnahan_obat (
+  id VARCHAR(100) PRIMARY KEY,
+  ba_number VARCHAR(120) NOT NULL,
+  date VARCHAR(50) NOT NULL,
+  time VARCHAR(50) DEFAULT '',
+  method VARCHAR(255) NOT NULL DEFAULT '',
+  witness TEXT DEFAULT '',
+  reason TEXT DEFAULT '',
+  petugas VARCHAR(255) DEFAULT 'Apoteker',
+  branch_id VARCHAR(50) DEFAULT 'BR-01',
+  disposal_location TEXT DEFAULT '',
+  witness1_name VARCHAR(255) DEFAULT '',
+  witness1_nip VARCHAR(100) DEFAULT '',
+  witness1_role VARCHAR(255) DEFAULT '',
+  witness2_name VARCHAR(255) DEFAULT '',
+  witness2_nip VARCHAR(100) DEFAULT '',
+  witness2_role VARCHAR(255) DEFAULT '',
+  apj_name VARCHAR(255) DEFAULT '',
+  apj_sipa VARCHAR(120) DEFAULT '',
+  pharmacy_name VARCHAR(255) DEFAULT '',
+  pharmacy_address TEXT DEFAULT '',
+  pharmacy_city VARCHAR(150) DEFAULT '',
+  total_items INT DEFAULT 0,
+  total_qty INT DEFAULT 0,
+  total_value NUMERIC(14,2) DEFAULT 0,
+  items JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pemusnahan_obat_ba ON pemusnahan_obat (ba_number);
+CREATE INDEX IF NOT EXISTS idx_pemusnahan_obat_date ON pemusnahan_obat (date DESC);
+CREATE INDEX IF NOT EXISTS idx_pemusnahan_obat_created ON pemusnahan_obat (created_at DESC);
+
+ALTER TABLE pemusnahan_obat REPLICA IDENTITY FULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND tablename = 'pemusnahan_obat'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE pemusnahan_obat;
+  END IF;
+END $$;
+
+${buildMultiTenantRlsSqlBlock('pemusnahan_obat', { hasBranchId: true })}
+
+-- 2. Tabel Riwayat Retur Pembelian / Retur Produk ED ke PBF (retur_pembelian)
+CREATE TABLE IF NOT EXISTS retur_pembelian (
+  id VARCHAR(100) PRIMARY KEY,
+  invoice_id VARCHAR(120) DEFAULT '',
+  invoice_no VARCHAR(120) DEFAULT '',
+  pbf_name VARCHAR(255) NOT NULL DEFAULT '',
+  date VARCHAR(50) NOT NULL,
+  time VARCHAR(50) DEFAULT '',
+  salesman VARCHAR(255) DEFAULT '',
+  items JSONB NOT NULL DEFAULT '[]'::jsonb,
+  total_retur_value NUMERIC(14,2) DEFAULT 0,
+  petugas VARCHAR(255) DEFAULT 'Apoteker',
+  branch_id VARCHAR(50) DEFAULT 'BR-01',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_retur_pembelian_pbf ON retur_pembelian (pbf_name);
+CREATE INDEX IF NOT EXISTS idx_retur_pembelian_date ON retur_pembelian (date DESC);
+CREATE INDEX IF NOT EXISTS idx_retur_pembelian_created ON retur_pembelian (created_at DESC);
+
+ALTER TABLE retur_pembelian REPLICA IDENTITY FULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND tablename = 'retur_pembelian'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE retur_pembelian;
+  END IF;
+END $$;
+
+${buildMultiTenantRlsSqlBlock('retur_pembelian', { hasBranchId: true, includeFunctions: false })}
+
+-- 3. Pastikan kolom batch & ED pada kartu_stok tersedia (aman jika sudah ada)
+ALTER TABLE IF EXISTS kartu_stok ADD COLUMN IF NOT EXISTS batch_no VARCHAR(100);
+ALTER TABLE IF EXISTS kartu_stok ADD COLUMN IF NOT EXISTS exp_date VARCHAR(50);
+ALTER TABLE IF EXISTS kartu_stok ADD COLUMN IF NOT EXISTS batch_details JSONB DEFAULT '[]'::jsonb;
+`;
+
 
 
 
