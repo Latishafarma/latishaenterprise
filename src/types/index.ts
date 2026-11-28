@@ -147,6 +147,7 @@ export interface Patient {
   noRm?: string; // Nilai kolom `no_rm` asli di tabel `pasien` Supabase
   nik: string;
   name: string;
+  husbandName?: string;
   age: number;
   gender: 'Laki-laki' | 'Perempuan';
   birthDate: string;
@@ -969,6 +970,7 @@ export interface FeeConfig {
   homeVisitFee: number;
   pharmacistFee: number;
   activeOnlyForVisit?: boolean;
+  rmeStaffFeeEnabled?: boolean;
   customTariffs?: TariffItem[];
   systemTariffConfigs?: Record<string, Partial<TariffItem>>;
   payrollConfig?: PayrollOvertimeConfig;
@@ -1005,6 +1007,7 @@ export const DEFAULT_FEE_CONFIG: FeeConfig = {
   homeVisitFee: 35000,
   pharmacistFee: 10000,
   activeOnlyForVisit: true,
+  rmeStaffFeeEnabled: true,
   customTariffs: [],
   systemTariffConfigs: {},
   payrollConfig: DEFAULT_PAYROLL_OVERTIME_CONFIG

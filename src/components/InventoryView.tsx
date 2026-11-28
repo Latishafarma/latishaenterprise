@@ -99,6 +99,7 @@ const CATEGORY_DISPLAY_LABELS: Record<string, string> = {
 type MasterObatColumnKey =
   | 'aksi'
   | 'name'
+  | 'barcode'
   | 'kekuatan'
   | 'bentukSediaan'
   | 'category'
@@ -112,6 +113,7 @@ type MasterObatColumnKey =
   | 'sellPriceKlinik'
   | 'sellPriceMitra'
   | 'batch'
+  | 'rack'
   | 'stock';
 
 const MASTER_OBAT_TABLE_COLUMNS: readonly {
@@ -120,6 +122,7 @@ const MASTER_OBAT_TABLE_COLUMNS: readonly {
 }[] = [
   { key: 'aksi', label: 'Aksi' },
   { key: 'name', label: 'Nama Produk' },
+  { key: 'barcode', label: 'Barcode' },
   { key: 'kekuatan', label: 'Zat Aktif & Kekuatan' },
   { key: 'bentukSediaan', label: 'Bentuk Sediaan' },
   { key: 'category', label: 'Kategori / Golongan' },
@@ -133,6 +136,7 @@ const MASTER_OBAT_TABLE_COLUMNS: readonly {
   { key: 'sellPriceKlinik', label: 'Jual Klinik' },
   { key: 'sellPriceMitra', label: 'Jual Mitra' },
   { key: 'batch', label: 'Batch & Exp (FEFO)' },
+  { key: 'rack', label: 'Rak / Lokasi' },
   { key: 'stock', label: 'Stock' }
 ] as const;
 
@@ -140,6 +144,7 @@ const DEFAULT_MASTER_OBAT_VISIBLE_COLUMNS: MasterObatColumnKey[] =
   MASTER_OBAT_TABLE_COLUMNS.map((c) => c.key);
 
 const MASTER_OBAT_VISIBLE_COLUMNS_STORAGE_KEY = 'latisha_master_obat_visible_columns';
+const MASTER_OBAT_KNOWN_COLUMNS_STORAGE_KEY = 'latisha_master_obat_known_columns';
 
 const COMMON_BENTUK_SEDIAAN_OPTIONS = [
   'Tablet',
@@ -256,11 +261,58 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [visibleColumns, setVisibleColumns] = useState<MasterObatColumnKey[]>(() => {
     try {
       const saved = demoGetItem(MASTER_OBAT_VISIBLE_COLUMNS_STORAGE_KEY);
-      if (!saved) return DEFAULT_MASTER_OBAT_VISIBLE_COLUMNS;
+      const validSet = new Set<string>(DEFAULT_MASTER_OBAT_VISIBLE_COLUMNS);
+      if (!saved) {
+        try {
+          demoSetItem(
+            MASTER_OBAT_KNOWN_COLUMNS_STORAGE_KEY,
+            JSON.stringify(DEFAULT_MASTER_OBAT_VISIBLE_COLUMNS)
+          );
+        } catch {}
+        return DEFAULT_MASTER_OBAT_VISIBLE_COLUMNS;
+      }
       const parsed = JSON.parse(saved);
       if (!Array.isArray(parsed)) return DEFAULT_MASTER_OBAT_VISIBLE_COLUMNS;
-      const validSet = new Set<string>(DEFAULT_MASTER_OBAT_VISIBLE_COLUMNS);
-      return parsed.filter((k): k is MasterObatColumnKey => typeof k === 'string' && validSet.has(k));
+      const sanitized = parsed.filter(
+        (k): k is MasterObatColumnKey => typeof k === 'string' && validSet.has(k)
+      );
+      const knownRaw = demoGetItem(MASTER_OBAT_KNOWN_COLUMNS_STORAGE_KEY);
+      let knownSet: Set<string>;
+      if (knownRaw) {
+        try {
+          const parsedKnown = JSON.parse(knownRaw);
+          knownSet = Array.isArray(parsedKnown)
+            ? new Set(parsedKnown.filter((k): k is string => typeof k === 'string'))
+            : new Set<string>();
+        } catch {
+          knownSet = new Set<string>();
+        }
+      } else {
+        // Legacy saved state prior to adding 'barcode' and 'rack'
+        knownSet = new Set(
+          DEFAULT_MASTER_OBAT_VISIBLE_COLUMNS.filter((k) => k !== 'barcode' && k !== 'rack')
+        );
+      }
+      const newlyIntroduced = DEFAULT_MASTER_OBAT_VISIBLE_COLUMNS.filter(
+        (k) => !knownSet.has(k)
+      );
+      if (newlyIntroduced.length > 0) {
+        try {
+          demoSetItem(
+            MASTER_OBAT_KNOWN_COLUMNS_STORAGE_KEY,
+            JSON.stringify(DEFAULT_MASTER_OBAT_VISIBLE_COLUMNS)
+          );
+        } catch {}
+        if (sanitized.length > 0) {
+          const mergedSet = new Set<MasterObatColumnKey>([...sanitized, ...newlyIntroduced]);
+          const ordered = DEFAULT_MASTER_OBAT_VISIBLE_COLUMNS.filter((k) => mergedSet.has(k));
+          try {
+            demoSetItem(MASTER_OBAT_VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify(ordered));
+          } catch {}
+          return ordered;
+        }
+      }
+      return sanitized;
     } catch {
       return DEFAULT_MASTER_OBAT_VISIBLE_COLUMNS;
     }
@@ -377,6 +429,10 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     setVisibleColumns(next);
     try {
       demoSetItem(MASTER_OBAT_VISIBLE_COLUMNS_STORAGE_KEY, JSON.stringify(next));
+      demoSetItem(
+        MASTER_OBAT_KNOWN_COLUMNS_STORAGE_KEY,
+        JSON.stringify(DEFAULT_MASTER_OBAT_VISIBLE_COLUMNS)
+      );
     } catch {}
   }, []);
 
@@ -981,6 +1037,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         (m.statusResep && m.statusResep.toLowerCase().includes(q)) ||
         (m.kekuatan && m.kekuatan.toLowerCase().includes(q)) ||
         (m.form && m.form.toLowerCase().includes(q)) ||
+        (m.rack && m.rack.toLowerCase().includes(q)) ||
         (m.barcode || '').toLowerCase().includes(q);
 
       const matchCat = categoryFilter === 'SEMUA' || m.category === categoryFilter;
@@ -1185,7 +1242,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       stock: m.stock,
       expDate: m.expDate,
       batches: getNormalizedBatches(m),
-      rack: m.rack,
+      rack: m.rack || '',
       supplier: m.supplier
     });
     setIsModalOpen(true);
@@ -1316,7 +1373,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       batchNo: resolvedFEFO.batchNo,
       expDate: resolvedFEFO.expDate,
       batches: resolvedFEFO.batches,
-      rack: form.rack,
+      rack: (form.rack || '').trim(),
       supplier: form.supplier,
       branchId: existingMedForEdit?.branchId || 'cabang-pusat'
     };
@@ -1494,11 +1551,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
   const exportExcel = () => {
     const headers =
-      'ID,Barcode,Nama,ZatAktifDanKekuatan,BentukSediaan,Kategori,KelasTerapi,NAPPZA,Satuan,Stok,MinStok,HPP,HargaJual,Batch,ExpDate\n';
+      'ID,Barcode,Nama,ZatAktifDanKekuatan,BentukSediaan,Kategori,KelasTerapi,NAPPZA,RakLokasi,Satuan,Stok,MinStok,HPP,HargaJual,Batch,ExpDate\n';
     const rows = medicines
       .map((m) => {
         const { effectiveHppBesar } = computeMedicineDisplayMetrics(m);
-        return `"${m.id}","${m.barcode}","${m.name}","${m.kekuatan || ''}","${m.form || 'Tablet'}","${m.category}","${m.kelas || 'Umum'}","${m.nappza || 'Non-NAPPZA'}","${m.unit}",${m.stock},${m.minStock},${effectiveHppBesar},${m.sellPrice},"${m.batchNo}","${m.expDate}"`;
+        return `"${m.id}","${m.barcode}","${m.name}","${m.kekuatan || ''}","${m.form || 'Tablet'}","${m.category}","${m.kelas || 'Umum'}","${m.nappza || 'Non-NAPPZA'}","${m.rack || ''}","${m.unit}",${m.stock},${m.minStock},${effectiveHppBesar},${m.sellPrice},"${m.batchNo}","${m.expDate}"`;
       })
       .join('\n');
     const blob = new Blob([headers + rows], { type: 'application/vnd.ms-excel;charset=utf-8;' });
@@ -2271,6 +2328,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                             ) : (
                               <span className="text-slate-400 font-medium px-1.5 py-0.5">Non-NAPPZA</span>
                             )}
+                            {m.rack && (
+                              <span className="font-bold text-amber-900 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                                Rak: {m.rack}
+                              </span>
+                            )}
                           </>
                         );
                       })()}
@@ -2451,6 +2513,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                         </button>
                       </th>
                     )}
+                    {isColVisible('barcode') && (
+                      <th className="px-2 py-2.5 min-w-[115px] whitespace-nowrap">Barcode</th>
+                    )}
                     {isColVisible('kekuatan') && (
                       <th className="px-2 py-2.5 text-center min-w-[130px]">Zat Aktif &amp; Kekuatan</th>
                     )}
@@ -2570,6 +2635,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     {isColVisible('batch') && (
                       <th className="px-2 py-2.5 text-center min-w-[115px]">Batch &amp; Exp (FEFO)</th>
                     )}
+                    {isColVisible('rack') && (
+                      <th className="px-2 py-2.5 text-center min-w-[95px] whitespace-nowrap">
+                        Rak / Lokasi
+                      </th>
+                    )}
                     {isColVisible('stock') && (
                       <th className="px-2 py-2.5 text-center whitespace-nowrap">
                         <button
@@ -2676,8 +2746,20 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                           <td className="px-2 py-2.5">
                             <strong className="text-slate-900 block leading-snug">{m.name}</strong>
                             <span className="font-mono text-[10px] text-slate-400 tabular-nums">
-                              {m.barcode}
+                              ID: {m.id}
                             </span>
+                          </td>
+                        )}
+
+                        {isColVisible('barcode') && (
+                          <td className="px-2 py-2.5 font-mono text-[11px] tabular-nums whitespace-nowrap">
+                            {m.barcode ? (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-slate-800 font-bold">
+                                {m.barcode}
+                              </span>
+                            ) : (
+                              <span className="text-slate-400">-</span>
+                            )}
                           </td>
                         )}
 
@@ -2850,6 +2932,18 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                                   {m.expDate}
                                 </span>
                               </>
+                            )}
+                          </td>
+                        )}
+
+                        {isColVisible('rack') && (
+                          <td className="px-2 py-2.5 text-center whitespace-nowrap">
+                            {m.rack ? (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-amber-50 border border-amber-200 text-amber-900 font-bold text-[10px]">
+                                {m.rack}
+                              </span>
+                            ) : (
+                              <span className="text-slate-400">-</span>
                             )}
                           </td>
                         )}
@@ -3179,6 +3273,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     </div>
                   )}
                 </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Kelas Terapi *</label>
                   <input
@@ -3226,6 +3323,41 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                       .sort()
                       .map((k) => (
                         <option key={k} value={k} />
+                      ))}
+                  </datalist>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Rak / Lokasi Penyimpanan
+                  </label>
+                  <input
+                    type="text"
+                    list="rackLocationList"
+                    placeholder="Contoh: Rak A-1, Etalase Depan, Kulkas"
+                    value={form.rack}
+                    onChange={(e) => setForm({ ...form, rack: e.target.value })}
+                    className="w-full p-2.5 border rounded-xl font-bold bg-white focus:ring-2 focus:ring-sky-500 outline-none"
+                  />
+                  <datalist id="rackLocationList">
+                    {Array.from(
+                      new Set([
+                        'Rak A-1',
+                        'Rak A-2',
+                        'Rak B-1',
+                        'Rak B-2',
+                        'Rak C-1',
+                        'Rak Obat Bebas',
+                        'Rak Obat Keras',
+                        'Etalase Depan',
+                        'Lemari Narkotik & Psikotropik',
+                        'Kulkas (2-8°C)',
+                        ...medicines.map((m) => m.rack).filter((r): r is string => Boolean(r && r.trim()))
+                      ])
+                    )
+                      .sort()
+                      .map((r) => (
+                        <option key={r} value={r} />
                       ))}
                   </datalist>
                 </div>

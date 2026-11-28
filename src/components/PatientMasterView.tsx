@@ -97,6 +97,7 @@ export const PatientMasterView: React.FC<PatientMasterViewProps> = ({
   const [formData, setFormData] = useState({
     nik: '',
     name: '',
+    husbandName: '',
     birthDate: '',
     gender: 'Laki-laki' as 'Laki-laki' | 'Perempuan',
     phone: '',
@@ -181,6 +182,7 @@ export const PatientMasterView: React.FC<PatientMasterViewProps> = ({
       if (!q) return true;
       return (
         p.name.toLowerCase().includes(q) ||
+        (p.husbandName || '').toLowerCase().includes(q) ||
         p.id.toLowerCase().includes(q) ||
         (p.noRm || '').toLowerCase().includes(q) ||
         p.nik.toLowerCase().includes(q) ||
@@ -214,6 +216,7 @@ export const PatientMasterView: React.FC<PatientMasterViewProps> = ({
     setFormData({
       nik: '',
       name: '',
+      husbandName: '',
       birthDate: '',
       gender: 'Laki-laki',
       phone: '',
@@ -232,6 +235,7 @@ export const PatientMasterView: React.FC<PatientMasterViewProps> = ({
     setFormData({
       nik: p.nik,
       name: p.name,
+      husbandName: p.husbandName || '',
       birthDate: p.birthDate || '1990-01-01',
       gender: p.gender,
       phone: p.phone,
@@ -277,6 +281,7 @@ export const PatientMasterView: React.FC<PatientMasterViewProps> = ({
           dbId: existing.dbId || existing.id,
           noRm: existing.noRm || existing.id,
           name: formData.name.trim(),
+          husbandName: formData.husbandName.trim(),
           nik: formData.nik.trim(),
           age: calculatedAge
         };
@@ -292,7 +297,18 @@ export const PatientMasterView: React.FC<PatientMasterViewProps> = ({
             )
           );
         }
-        setSyncStatusMsg({ text: `Data pasien ${formData.name.trim()} berhasil diperbarui.` });
+        const missingHusbandCol =
+          Array.isArray(res?.missingColumns) &&
+          res.missingColumns.includes('nama_suami') &&
+          Boolean(formData.husbandName.trim());
+        setSyncStatusMsg(
+          missingHusbandCol
+            ? {
+                text: `Data pasien ${formData.name.trim()} diperbarui, namun kolom nama_suami belum ada di tabel Supabase pasien. Jalankan skrip SQL di ikon Database untuk sinkronisasi kolom Nama Suami.`,
+                isError: true
+              }
+            : { text: `Data pasien ${formData.name.trim()} berhasil diperbarui.` }
+        );
       } else {
         // Collision-safe RM ID generation even when only a single page of 25 rows is loaded in memory
         const combined = [...serverPatients, ...patients];
@@ -312,6 +328,7 @@ export const PatientMasterView: React.FC<PatientMasterViewProps> = ({
           noRm: newId,
           ...formData,
           name: formData.name.trim(),
+          husbandName: formData.husbandName.trim(),
           nik: formData.nik.trim(),
           age: calculatedAge,
           registrationDate: new Date().toISOString().split('T')[0]
@@ -321,9 +338,20 @@ export const PatientMasterView: React.FC<PatientMasterViewProps> = ({
           setFormError(`Gagal menyimpan pasien baru ke Supabase: ${res.error}`);
           return;
         }
-        setSyncStatusMsg({
-          text: `Pasien baru ${newPatient.name} (${newPatient.id}) berhasil didaftarkan.`
-        });
+        const missingHusbandCol =
+          Array.isArray(res?.missingColumns) &&
+          res.missingColumns.includes('nama_suami') &&
+          Boolean(formData.husbandName.trim());
+        setSyncStatusMsg(
+          missingHusbandCol
+            ? {
+                text: `Pasien ${newPatient.name} (${newPatient.id}) tersimpan, namun kolom nama_suami belum ada di tabel Supabase pasien. Jalankan skrip SQL di ikon Database untuk sinkronisasi kolom Nama Suami.`,
+                isError: true
+              }
+            : {
+                text: `Pasien baru ${newPatient.name} (${newPatient.id}) berhasil didaftarkan.`
+              }
+        );
       }
 
       setShowModal(false);
@@ -332,7 +360,7 @@ export const PatientMasterView: React.FC<PatientMasterViewProps> = ({
       if (useServerPagination) {
         triggerServerRefresh();
       }
-      setTimeout(() => setSyncStatusMsg(null), 4000);
+      setTimeout(() => setSyncStatusMsg(null), 5000);
     } finally {
       setIsSaving(false);
     }
@@ -623,6 +651,11 @@ export const PatientMasterView: React.FC<PatientMasterViewProps> = ({
                     </td>
                     <td className="p-3">
                       <span className="font-bold text-slate-800 block">{patient.name}</span>
+                      {patient.husbandName && (
+                        <span className="text-[10px] text-slate-600 block">
+                          Suami: <strong className="font-semibold text-slate-700">{patient.husbandName}</strong>
+                        </span>
+                      )}
                       <span className="text-[10px] text-slate-500">
                         {patient.gender}, {patient.age} thn · Tgl Lahir: {patient.birthDate || '-'}
                       </span>
@@ -746,18 +779,32 @@ export const PatientMasterView: React.FC<PatientMasterViewProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">
-                  Nama Lengkap Pasien *
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="Contoh: Tn. Bambang Irawan"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  className="w-full px-3 py-2 border rounded-xl font-bold text-slate-800 bg-white focus:ring-2 focus:ring-sky-500 outline-none"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Nama Lengkap Pasien *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Contoh: Tn. Bambang Irawan"
+                    value={formData.name}
+                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                    className="w-full px-3 py-2 border rounded-xl font-bold text-slate-800 bg-white focus:ring-2 focus:ring-sky-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Nama Suami (Opsional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Nama suami (bila ada)"
+                    value={formData.husbandName}
+                    onChange={(e) => setFormData({ ...formData, husbandName: e.target.value })}
+                    className="w-full px-3 py-2 border rounded-xl font-semibold text-slate-800 bg-white focus:ring-2 focus:ring-sky-500 outline-none"
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-3 gap-3">

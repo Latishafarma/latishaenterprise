@@ -496,6 +496,7 @@ export function patientToSupabaseRow(p: Patient): Record<string, any> {
     no_rm: noRm,
     nik: p.nik || '',
     nama_lengkap: p.name || '',
+    nama_suami: (p.husbandName || '').trim(),
     jenis_kelamin: p.gender || 'Laki-laki',
     tanggal_lahir: p.birthDate || null,
     kategori: p.category || 'Pasien Praktik',
@@ -530,6 +531,45 @@ function isMissingSatusehatPatientColError(error: any): boolean {
   );
 }
 
+function stripOptionalHusbandNamePatientCol(fields: Record<string, any>): Record<string, any> {
+  const copy = { ...fields };
+  delete copy.nama_suami;
+  return copy;
+}
+
+function isMissingHusbandNamePatientColError(error: any): boolean {
+  if (!error) return false;
+  const msg = String(error.message || '').toLowerCase();
+  return msg.includes('nama_suami');
+}
+
+function stripMissingOptionalPatientColsFromError(
+  fields: Record<string, any>,
+  error: any,
+  missingColsOut?: string[]
+): { nextFields: Record<string, any>; didStrip: boolean } {
+  let nextFields = { ...fields };
+  let didStrip = false;
+  if (isMissingHusbandNamePatientColError(error) && 'nama_suami' in nextFields) {
+    nextFields = stripOptionalHusbandNamePatientCol(nextFields);
+    didStrip = true;
+    if (missingColsOut && !missingColsOut.includes('nama_suami')) {
+      missingColsOut.push('nama_suami');
+    }
+  }
+  if (
+    isMissingSatusehatPatientColError(error) &&
+    ('ihs_number' in nextFields || 'sync_satusehat' in nextFields || 'satusehat_synced_at' in nextFields)
+  ) {
+    nextFields = stripOptionalSatusehatPatientCols(nextFields);
+    didStrip = true;
+    if (missingColsOut && !missingColsOut.includes('ihs_number')) {
+      missingColsOut.push('ihs_number');
+    }
+  }
+  return { nextFields, didStrip };
+}
+
 // Convert from Supabase row to local Patient format (handles column name variations)
 export function supabaseRowToPatient(row: Record<string, any>): Patient {
   const currentYear = new Date().getFullYear();
@@ -551,6 +591,14 @@ export function supabaseRowToPatient(row: Record<string, any>): Patient {
   const rmId = cleanNoRm || rawDbId || `RM-${Date.now().toString().slice(-4)}`;
   const genderRaw = (row.jenis_kelamin || row.gender || row.jk || '').toString().toLowerCase();
   const isFemale = genderRaw.includes('p') || genderRaw.includes('fem');
+  const rawHusband =
+    row.nama_suami !== undefined
+      ? row.nama_suami
+      : row.husband_name !== undefined
+      ? row.husband_name
+      : row.namaSuami !== undefined
+      ? row.namaSuami
+      : row.husbandName;
 
   return {
     id: rmId,
@@ -558,6 +606,7 @@ export function supabaseRowToPatient(row: Record<string, any>): Patient {
     noRm: cleanNoRm || rmId,
     nik: row.nik || '',
     name: row.nama_lengkap || row.nama || row.name || 'Tanpa Nama',
+    husbandName: rawHusband !== undefined ? String(rawHusband || '') : undefined,
     age: row.age || calculatedAge,
     gender: isFemale ? 'Perempuan' : 'Laki-laki',
     birthDate: birthDateStr,
@@ -577,7 +626,9 @@ export function supabaseRowToPatient(row: Record<string, any>): Patient {
 }
 
 // Outbound: Upsert (Insert/Update) patient to Supabase
-export async function syncPatientToSupabase(patient: Patient): Promise<{ success: boolean; error?: string }> {
+export async function syncPatientToSupabase(
+  patient: Patient
+): Promise<{ success: boolean; error?: string; missingColumns?: string[] }> {
   if (isDemoMode()) return { success: false, error: 'Mode Demo aktif (isolasi sandbox)' };
   const client = getSupabaseClient();
   if (!client) {
@@ -585,17 +636,25 @@ export async function syncPatientToSupabase(patient: Patient): Promise<{ success
   }
 
   const { patientTable } = getSupabaseConfig();
-  const row = patientToSupabaseRow(patient);
+  let activeRow = patientToSupabaseRow(patient);
+  const missingColumns: string[] = [];
 
   try {
     let { error } = await client
       .from(patientTable)
-      .upsert(row, { onConflict: 'id' });
+      .upsert(activeRow, { onConflict: 'id' });
 
-    if (error && isMissingSatusehatPatientColError(error)) {
+    for (let attempt = 0; attempt < 2 && error; attempt++) {
+      const { nextFields, didStrip } = stripMissingOptionalPatientColsFromError(
+        activeRow,
+        error,
+        missingColumns
+      );
+      if (!didStrip) break;
+      activeRow = nextFields;
       const retry = await client
         .from(patientTable)
-        .upsert(stripOptionalSatusehatPatientCols(row), { onConflict: 'id' });
+        .upsert(activeRow, { onConflict: 'id' });
       error = retry.error;
     }
 
@@ -603,8 +662,8 @@ export async function syncPatientToSupabase(patient: Patient): Promise<{ success
       console.warn('[Supabase Outbound Error]:', error.message);
       return { success: false, error: error.message };
     }
-    console.info(`[Supabase Outbound Success] Pasien ${patient.name} (${row.id}) tersinkronisasi.`);
-    return { success: true };
+    console.info(`[Supabase Outbound Success] Pasien ${patient.name} (${activeRow.id}) tersinkronisasi.`);
+    return missingColumns.length > 0 ? { success: true, missingColumns } : { success: true };
   } catch (err: any) {
     console.warn('[Supabase Outbound Exception]:', err);
     return { success: false, error: err?.message || String(err) };
@@ -645,9 +704,12 @@ function mergePatientPair(existing: Patient, incoming: Patient): Patient {
     ? existing.dbId
     : incoming.dbId || existing.dbId || incoming.id || existing.id;
   const resolvedNoRm = incoming.noRm || existing.noRm || incoming.id || existing.id;
+  const resolvedHusbandName =
+    incoming.husbandName !== undefined ? incoming.husbandName : existing.husbandName;
   return {
     ...existing,
     ...incoming,
+    husbandName: resolvedHusbandName,
     id: resolvedNoRm || incoming.id || existing.id,
     dbId: resolvedDbId,
     noRm: resolvedNoRm
@@ -722,7 +784,9 @@ export function mergePatientLists(localList: Patient[], remoteList: Patient[]): 
 }
 
 // Outbound: Strict in-place UPDATE for editing existing patient row (prevents inserting duplicate rows when id != no_rm)
-export async function updatePatientInSupabase(patient: Patient): Promise<{ success: boolean; error?: string }> {
+export async function updatePatientInSupabase(
+  patient: Patient
+): Promise<{ success: boolean; error?: string; missingColumns?: string[] }> {
   if (isDemoMode()) return { success: false, error: 'Mode Demo aktif (isolasi sandbox)' };
   const client = getSupabaseClient();
   if (!client) {
@@ -733,6 +797,7 @@ export async function updatePatientInSupabase(patient: Patient): Promise<{ succe
   const row = patientToSupabaseRow(patient);
   const targetId = row.id;
   const { id: _omitId, ...updateFields } = row;
+  const missingColumns: string[] = [];
 
   try {
     let activeFields = updateFields;
@@ -742,8 +807,14 @@ export async function updatePatientInSupabase(patient: Patient): Promise<{ succe
       .eq('id', targetId)
       .select('id');
 
-    if (error && isMissingSatusehatPatientColError(error)) {
-      activeFields = stripOptionalSatusehatPatientCols(updateFields);
+    for (let attempt = 0; attempt < 2 && error; attempt++) {
+      const { nextFields, didStrip } = stripMissingOptionalPatientColsFromError(
+        activeFields,
+        error,
+        missingColumns
+      );
+      if (!didStrip) break;
+      activeFields = nextFields;
       const retry = await client
         .from(patientTable)
         .update(activeFields)
@@ -760,7 +831,7 @@ export async function updatePatientInSupabase(patient: Patient): Promise<{ succe
 
     if (data && data.length > 0) {
       console.info(`[Supabase Update Patient Success] Pasien ${patient.name} (ID DB: ${targetId}) diperbarui in-place.`);
-      return { success: true };
+      return missingColumns.length > 0 ? { success: true, missingColumns } : { success: true };
     }
 
     // Lookup existing row across candidate ID / No. RM keys BEFORE ever falling back to insert/upsert
@@ -795,10 +866,17 @@ export async function updatePatientInSupabase(patient: Patient): Promise<{ succe
           .update(activeFields)
           .eq('id', realDbId);
 
-        if (retryErr && isMissingSatusehatPatientColError(retryErr)) {
+        for (let attempt = 0; attempt < 2 && retryErr; attempt++) {
+          const { nextFields, didStrip } = stripMissingOptionalPatientColsFromError(
+            activeFields,
+            retryErr,
+            missingColumns
+          );
+          if (!didStrip) break;
+          activeFields = nextFields;
           const secondTry = await client
             .from(patientTable)
-            .update(stripOptionalSatusehatPatientCols(activeFields))
+            .update(activeFields)
             .eq('id', realDbId);
           retryErr = secondTry.error;
         }
@@ -808,7 +886,7 @@ export async function updatePatientInSupabase(patient: Patient): Promise<{ succe
           return { success: false, error: retryErr.message };
         }
         console.info(`[Supabase Update Patient Success] Pasien ${patient.name} (ID DB: ${realDbId}) diperbarui in-place.`);
-        return { success: true };
+        return missingColumns.length > 0 ? { success: true, missingColumns } : { success: true };
       }
     }
 
@@ -924,33 +1002,44 @@ export async function fetchPatientsPaginatedFromSupabase(params: {
     : cleanSearch;
 
   try {
-    let query = client.from(tableName).select('*', { count: 'exact' });
+    const buildPaginatedQuery = (includeHusbandCol: boolean) => {
+      let query = client.from(tableName).select('*', { count: 'exact' });
 
-    if (params.categoryFilter && params.categoryFilter !== 'SEMUA') {
-      query = query.eq('kategori', params.categoryFilter);
-    }
-
-    if (cleanSearch) {
-      const orClauses = [
-        `nama_lengkap.ilike.%${cleanSearch}%`,
-        `nik.ilike.%${cleanSearch}%`,
-        `no_rm.ilike.%${cleanSearch}%`,
-        `id.ilike.%${cleanSearch}%`,
-        `kontak.ilike.%${cleanSearch}%`,
-        `alamat.ilike.%${cleanSearch}%`
-      ];
-      if (altRmCompact && altRmCompact.toLowerCase() !== cleanSearch.toLowerCase()) {
-        orClauses.push(`no_rm.ilike.%${altRmCompact}%`, `id.ilike.%${altRmCompact}%`);
+      if (params.categoryFilter && params.categoryFilter !== 'SEMUA') {
+        query = query.eq('kategori', params.categoryFilter);
       }
-      if (altRmHyphen && altRmHyphen.toLowerCase() !== cleanSearch.toLowerCase()) {
-        orClauses.push(`no_rm.ilike.%${altRmHyphen}%`, `id.ilike.%${altRmHyphen}%`);
-      }
-      query = query.or(orClauses.join(','));
-    }
 
-    const { data, count, error } = await query
-      .order('created_at', { ascending: false })
-      .range(from, to);
+      if (cleanSearch) {
+        const orClauses = [
+          `nama_lengkap.ilike.%${cleanSearch}%`,
+          ...(includeHusbandCol ? [`nama_suami.ilike.%${cleanSearch}%`] : []),
+          `nik.ilike.%${cleanSearch}%`,
+          `no_rm.ilike.%${cleanSearch}%`,
+          `id.ilike.%${cleanSearch}%`,
+          `kontak.ilike.%${cleanSearch}%`,
+          `alamat.ilike.%${cleanSearch}%`
+        ];
+        if (altRmCompact && altRmCompact.toLowerCase() !== cleanSearch.toLowerCase()) {
+          orClauses.push(`no_rm.ilike.%${altRmCompact}%`, `id.ilike.%${altRmCompact}%`);
+        }
+        if (altRmHyphen && altRmHyphen.toLowerCase() !== cleanSearch.toLowerCase()) {
+          orClauses.push(`no_rm.ilike.%${altRmHyphen}%`, `id.ilike.%${altRmHyphen}%`);
+        }
+        query = query.or(orClauses.join(','));
+      }
+
+      return query
+        .order('created_at', { ascending: false })
+        .range(from, to);
+    };
+
+    let { data, count, error } = await buildPaginatedQuery(true);
+    if (error && cleanSearch && isMissingHusbandNamePatientColError(error)) {
+      const retry = await buildPaginatedQuery(false);
+      data = retry.data;
+      count = retry.count;
+      error = retry.error;
+    }
 
     if (error) {
       if (isPatientTableMissingError(error)) {
@@ -1161,12 +1250,21 @@ export async function upsertPatientsBatchToSupabase(
 
   try {
     for (let i = 0; i < deduped.length; i += chunkSize) {
-      const batchRows = deduped.slice(i, i + chunkSize).map(patientToSupabaseRow);
+      let batchRows = deduped.slice(i, i + chunkSize).map(patientToSupabaseRow);
       let { error } = await client.from(tableName).upsert(batchRows, { onConflict: 'id' });
 
-      if (error && isMissingSatusehatPatientColError(error)) {
-        const strippedRows = batchRows.map(stripOptionalSatusehatPatientCols);
-        const retry = await client.from(tableName).upsert(strippedRows, { onConflict: 'id' });
+      for (let attempt = 0; attempt < 2 && error; attempt++) {
+        let strippedSomething = false;
+        if (isMissingHusbandNamePatientColError(error)) {
+          batchRows = batchRows.map(stripOptionalHusbandNamePatientCol);
+          strippedSomething = true;
+        }
+        if (isMissingSatusehatPatientColError(error)) {
+          batchRows = batchRows.map(stripOptionalSatusehatPatientCols);
+          strippedSomething = true;
+        }
+        if (!strippedSomething) break;
+        const retry = await client.from(tableName).upsert(batchRows, { onConflict: 'id' });
         error = retry.error;
       }
 
@@ -1780,6 +1878,7 @@ export async function lookupPatientByNikFromMaster(
 export interface PatientRegistrationInput {
   nik: string;
   name: string;
+  husbandName?: string;
   birthDate: string;
   gender: 'Laki-laki' | 'Perempuan';
   phone: string;
@@ -1852,6 +1951,7 @@ export async function checkOrRegisterPatientSupabase(
     noRm: nextNoRm,
     nik: cleanNik,
     name: input.name.trim(),
+    husbandName: input.husbandName?.trim() || '',
     age: calculatedAge,
     gender: input.gender,
     birthDate: input.birthDate || '',
@@ -1941,6 +2041,7 @@ CREATE TABLE IF NOT EXISTS pasien (
   no_rm VARCHAR(50),
   nik VARCHAR(20) NOT NULL,
   nama_lengkap VARCHAR(255) NOT NULL,
+  nama_suami VARCHAR(255) DEFAULT '',
   jenis_kelamin VARCHAR(20) NOT NULL DEFAULT 'Laki-laki',
   tanggal_lahir DATE,
   kategori VARCHAR(50) DEFAULT 'Pasien Praktik', -- Pasien Umum, Pasien Praktik, Mitra Perusahaan
@@ -1956,9 +2057,14 @@ CREATE TABLE IF NOT EXISTS pasien (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Buat index untuk pencarian cepat NIK, Nama, No. RM, Kontak
+-- Penambahan kolom opsional bila tabel pasien sudah dibuat sebelumnya
+ALTER TABLE pasien
+  ADD COLUMN IF NOT EXISTS nama_suami VARCHAR(255) DEFAULT '';
+
+-- Buat index untuk pencarian cepat NIK, Nama, Nama Suami, No. RM, Kontak
 CREATE INDEX IF NOT EXISTS idx_pasien_nik ON pasien (nik);
 CREATE INDEX IF NOT EXISTS idx_pasien_nama ON pasien (nama_lengkap);
+CREATE INDEX IF NOT EXISTS idx_pasien_nama_suami ON pasien (nama_suami);
 CREATE INDEX IF NOT EXISTS idx_pasien_no_rm ON pasien (no_rm);
 CREATE INDEX IF NOT EXISTS idx_pasien_kontak ON pasien (kontak);
 
@@ -14009,6 +14115,7 @@ export function feeConfigToSupabaseRow(
     homeVisitFee: Number(config.homeVisitFee) || 0,
     pharmacistFee: Number(config.pharmacistFee) || 0,
     activeOnlyForVisit: config.activeOnlyForVisit ?? true,
+    rmeStaffFeeEnabled: config.rmeStaffFeeEnabled ?? true,
     customTariffs: normalizedCustomTariffs,
     systemTariffConfigs: normalizedSystemTariffConfigs,
     payrollConfig: normalizedPayroll
@@ -14113,6 +14220,14 @@ export function supabaseRowToFeeConfig(row: Record<string, any>): FeeConfig {
       }
     : DEFAULT_PAYROLL_OVERTIME_CONFIG;
 
+  const rmeStaffFeeRaw = pickDefined('rme_staff_fee_enabled', 'rmestafffeeenabled');
+  const rmeStaffFeeEnabled =
+    rmeStaffFeeRaw !== undefined
+      ? Boolean(rmeStaffFeeRaw)
+      : jsonPayload.rmeStaffFeeEnabled !== undefined
+        ? Boolean(jsonPayload.rmeStaffFeeEnabled)
+        : true;
+
   return {
     doctorFee: pickNumeric(DEFAULT_FEE_CONFIG.doctorFee, jsonPayload.doctorFee, 'doctor_fee', 'doctorfee', 'jasa_dokter'),
     specialistFee: pickNumeric(DEFAULT_FEE_CONFIG.specialistFee, jsonPayload.specialistFee, 'specialist_fee', 'specialistfee', 'jasa_spesialis'),
@@ -14121,6 +14236,7 @@ export function supabaseRowToFeeConfig(row: Record<string, any>): FeeConfig {
     homeVisitFee: pickNumeric(DEFAULT_FEE_CONFIG.homeVisitFee, jsonPayload.homeVisitFee, 'home_visit_fee', 'homevisitfee', 'jasa_home_visit'),
     pharmacistFee: pickNumeric(DEFAULT_FEE_CONFIG.pharmacistFee, jsonPayload.pharmacistFee, 'pharmacist_fee', 'pharmacistfee', 'jasa_apoteker'),
     activeOnlyForVisit,
+    rmeStaffFeeEnabled,
     customTariffs,
     systemTariffConfigs,
     payrollConfig

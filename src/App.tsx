@@ -5815,6 +5815,85 @@ export default function App() {
     addAuditLog('RME Dokter', `Pemeriksaan RME pasien ${record.patientName} (${record.rmId}) disimpan.`);
   };
 
+  // Handler: Add Manual RME Record from Arsip e-RME with Two-Way Supabase Sync Feedback
+  const handleAddManualRME = async (
+    record: RMERecord,
+    prescription?: EPrescription
+  ): Promise<{
+    success: boolean;
+    syncedToCloud?: boolean;
+    needsTableSetup?: boolean;
+    isDemo?: boolean;
+    error?: string;
+  }> => {
+    setRmeRecords((prev) => {
+      const next = [record, ...prev.filter((r) => r.id !== record.id)];
+      persistRmeNow(next);
+      return next;
+    });
+
+    if (prescription) {
+      setPrescriptions((prev) => {
+        const next = [prescription, ...prev.filter((p) => p.id !== prescription.id)];
+        persistPrescriptionsNow(next);
+        return next;
+      });
+    }
+
+    addAuditLog('RME Dokter', `Input RME manual pasien ${record.patientName} (${record.rmId}) disimpan.`);
+
+    if (isDemoActive || isDemoMode()) {
+      return { success: true, isDemo: true };
+    }
+
+    if (prescription) {
+      markIdsPendingSync('prescriptions', [prescription.id]);
+      syncPrescriptionToSupabase(prescription)
+        .then((rxRes) => {
+          if (rxRes.success) confirmCloudSync('prescriptions', [prescription.id]);
+        })
+        .catch((err) => console.warn('Supabase manual RME prescription sync error:', err));
+    }
+
+    markIdsPendingSync('rme_records', [record.id]);
+    try {
+      const res = await syncRmeToSupabase(record);
+      if (res.needsTableSetup) {
+        setRmeNeedsTableSetup(true);
+      }
+      if (res.success) {
+        confirmCloudSync('rme_records', [record.id]);
+        const matchedPat = patients.find(
+          (p) =>
+            p.noRm === record.rmId ||
+            p.id === record.rmId ||
+            (record.nik && p.nik === record.nik) ||
+            p.name.toLowerCase() === record.patientName.toLowerCase()
+        );
+        enqueueClinicalSatuSehatBackground({
+          rmeRecord: record,
+          patient: matchedPat,
+          prescription
+        });
+        return { success: true, syncedToCloud: true };
+      }
+      return {
+        success: false,
+        syncedToCloud: false,
+        needsTableSetup: res.needsTableSetup,
+        error: res.error
+      };
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      console.warn('Supabase manual RME sync error:', msg);
+      return {
+        success: false,
+        syncedToCloud: false,
+        error: msg
+      };
+    }
+  };
+
   // Handler: Update RME Record & Auto-Sync Antrean E-Resep & Skrining Standar Apoteker
   const handleUpdateRME = (updatedRecord: RMERecord) => {
     const prevRecord = rmeRecordsRef.current.find((rec) => rec.id === updatedRecord.id);
@@ -13800,9 +13879,20 @@ export default function App() {
               {activeTab === 'rme-riwayat' && (
                 <RMEHistoryView
                   rmeRecords={rmeRecords}
+                  patients={patients}
                   staffList={effectiveStaffList}
                   medicines={medicines}
                   icd10List={icd10List}
+                  currentBranchId={currentBranch.id}
+                  feeConfig={feeConfig}
+                  onToggleStaffFeeEnabled={async (enabled) => {
+                    const updatedConfig = {
+                      ...feeConfig,
+                      rmeStaffFeeEnabled: enabled
+                    };
+                    await handleSaveFeeConfig(updatedConfig);
+                  }}
+                  onAddRecord={handleAddManualRME}
                   onUpdateRecord={handleUpdateRME}
                   onDeleteRecord={handleDeleteRME}
                   onBulkDeleteRecords={handleBulkDeleteRME}
