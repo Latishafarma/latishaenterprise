@@ -2780,7 +2780,9 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
                   <div className="flex justify-between pt-6 text-xs">
                     <div className="text-center w-52">
                       <div>Petugas Pelaksana</div>
-                      <div className="h-14" />
+                      <div className="print-signature-space h-20 min-h-[80px]" aria-hidden="true">
+                        &nbsp;
+                      </div>
                       <div className="font-bold underline">{userName}</div>
                     </div>
                     <div className="text-center w-60">
@@ -2793,7 +2795,9 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
                         })}
                       </div>
                       <div>Apoteker Penanggung Jawab (APJ)</div>
-                      <div className="h-12" />
+                      <div className="print-signature-space h-20 min-h-[80px]" aria-hidden="true">
+                        &nbsp;
+                      </div>
                       <div className="font-bold underline">{apjProfile.name}</div>
                       <div className="text-[11px] text-slate-500">SIPA: {apjProfile.sipa}</div>
                     </div>
@@ -3012,7 +3016,9 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
                             <div className="font-semibold">Saksi-saksi:</div>
                             <div className="space-y-1">
                               <div>1. {w1Name ? '' : '...............................................'}</div>
-                              <div className="h-12" />
+                              <div className="print-signature-space-sm h-14 min-h-[52px]" aria-hidden="true">
+                                &nbsp;
+                              </div>
                               <div className="font-bold underline">
                                 {w1Name ? `( ${w1Name} )` : '( ............................................... )'}
                               </div>
@@ -3022,7 +3028,9 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
                             </div>
                             <div className="space-y-1 pt-1">
                               <div>2. {w2Name ? '' : '...............................................'}</div>
-                              <div className="h-12" />
+                              <div className="print-signature-space-sm h-14 min-h-[52px]" aria-hidden="true">
+                                &nbsp;
+                              </div>
                               <div className="font-bold underline">
                                 {w2Name ? `( ${w2Name} )` : '( ............................................... )'}
                               </div>
@@ -3042,7 +3050,9 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
                               <div className="text-xs italic text-slate-600">
                                 (Apoteker Pengelola Apotek)
                               </div>
-                              <div className="h-24" />
+                              <div className="print-signature-space h-24 min-h-[80px]" aria-hidden="true">
+                                &nbsp;
+                              </div>
                               <div className="font-bold underline">( {docApjName} )</div>
                               <div className="text-[11px] font-mono text-slate-700 mt-0.5">
                                 SIPA. {docApjSipa}
@@ -3163,13 +3173,25 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
                             <div className="space-y-4">
                               <div className="font-semibold">Saksi-saksi:</div>
                               <div>
-                                <div>1. {w1Name ? `( ${w1Name} )` : '( ............................................... )'}</div>
+                                <div>1. {w1Name ? '' : '...............................................'}</div>
+                                <div className="print-signature-space-sm h-12 min-h-[52px]" aria-hidden="true">
+                                  &nbsp;
+                                </div>
+                                <div className="font-bold underline pl-4">
+                                  {w1Name ? `( ${w1Name} )` : '( ............................................... )'}
+                                </div>
                                 <div className="text-[11px] font-mono text-slate-600 pl-4 mt-0.5">
                                   NIP/SIPTTK/SIPA: {w1Nip || '..................................'}
                                 </div>
                               </div>
                               <div>
-                                <div>2. {w2Name ? `( ${w2Name} )` : '( ............................................... )'}</div>
+                                <div>2. {w2Name ? '' : '...............................................'}</div>
+                                <div className="print-signature-space-sm h-12 min-h-[52px]" aria-hidden="true">
+                                  &nbsp;
+                                </div>
+                                <div className="font-bold underline pl-4">
+                                  {w2Name ? `( ${w2Name} )` : '( ............................................... )'}
+                                </div>
                                 <div className="text-[11px] font-mono text-slate-600 pl-4 mt-0.5">
                                   NIP/SIPTTK/SIPA: {w2Nip || '..................................'}
                                 </div>
@@ -3184,7 +3206,9 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
                               <div className="text-xs italic text-slate-600">
                                 (Apoteker Pengelola Apotek)
                               </div>
-                              <div className="h-20" />
+                              <div className="print-signature-space h-24 min-h-[80px]" aria-hidden="true">
+                                &nbsp;
+                              </div>
                               <div className="font-bold underline">( {docApjName} )</div>
                               <div className="text-[11px] font-mono text-slate-700 mt-0.5">
                                 SIPA. {docApjSipa}

@@ -142,6 +142,19 @@ textarea {
     visibility: hidden !important;
   }
 
+  /* Preserve explicit vertical signature space inside printed documents (overrides global div height: auto) */
+  #printable-section .print-signature-space {
+    display: block !important;
+    height: 80px !important;
+    min-height: 80px !important;
+  }
+
+  #printable-section .print-signature-space-sm {
+    display: block !important;
+    height: 52px !important;
+    min-height: 52px !important;
+  }
+
   #printable-section img {
     display: block !important;
     visibility: visible !important;
