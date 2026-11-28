@@ -94,6 +94,7 @@ const MUTATION_TYPE_LABELS: { value: string; label: string }[] = [
   { value: 'PENYESUAIAN', label: 'Penyesuaian / Retur Jual' },
   { value: 'STOK_OPNAME', label: 'Stok Opname' },
   { value: 'RETUR PEMBELIAN', label: 'Retur Pembelian' },
+  { value: 'PEMUSNAHAN', label: 'Pemusnahan Produk ED' },
   { value: 'RESEP_DOKTER', label: 'Resep Dokter' },
   { value: 'TRANSFER_MASUK', label: 'Transfer Masuk' },
   { value: 'TRANSFER_KELUAR', label: 'Transfer Keluar' }
@@ -114,6 +115,7 @@ const getMutationBadgeClass = (type: StockMutation['type']): string => {
     case 'STOK_OPNAME':
       return 'bg-indigo-100 text-indigo-800 border-indigo-200';
     case 'RETUR PEMBELIAN':
+    case 'PEMUSNAHAN':
       return 'bg-rose-100 text-rose-800 border-rose-200';
     default:
       return 'bg-slate-100 text-slate-700 border-slate-200';

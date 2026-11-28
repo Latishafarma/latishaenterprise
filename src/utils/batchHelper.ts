@@ -8,7 +8,12 @@ export function sortBatchesFEFO(batches: MedicineBatch[]): MedicineBatch[] {
   });
 }
 
-export function getNormalizedBatches(med: Medicine): MedicineBatch[] {
+export function getNormalizedBatches(
+  med: Medicine,
+  preserveNegative: boolean = false
+): MedicineBatch[] {
+  const clampStock = (val: number) => (preserveNegative ? Math.round(val) : Math.max(0, Math.round(val)));
+
   if (Array.isArray(med.batches) && med.batches.length > 0) {
     const sumBatches = med.batches.reduce((acc, b) => acc + (Number(b.stock) || 0), 0);
     // Keep batches consistent with med.stock if single batch or if sum matches
@@ -18,7 +23,7 @@ export function getNormalizedBatches(med: Medicine): MedicineBatch[] {
           id: med.batches[0].id || `${med.id}-B1`,
           batchNo: med.batches[0].batchNo || med.batchNo || '-',
           expDate: med.batches[0].expDate || med.expDate || '',
-          stock: Math.max(0, Number(med.stock) || 0)
+          stock: clampStock(Number(med.stock) || 0)
         }
       ];
     }
@@ -27,7 +32,7 @@ export function getNormalizedBatches(med: Medicine): MedicineBatch[] {
         id: b.id || `${med.id}-B${idx + 1}`,
         batchNo: b.batchNo || '-',
         expDate: b.expDate || '',
-        stock: Math.max(0, Number(b.stock) || 0)
+        stock: clampStock(Number(b.stock) || 0)
       }))
     );
   }
@@ -37,7 +42,7 @@ export function getNormalizedBatches(med: Medicine): MedicineBatch[] {
       id: `${med.id}-B1`,
       batchNo: med.batchNo || '-',
       expDate: med.expDate || '',
-      stock: Math.max(0, Number(med.stock) || 0)
+      stock: clampStock(Number(med.stock) || 0)
     }
   ];
 }
@@ -46,7 +51,8 @@ export function resolvePrimaryBatchAndStock(
   rawBatches: MedicineBatch[],
   fallbackBatchNo: string = '-',
   fallbackExpDate: string = '',
-  removeEmptyWhenMultiple: boolean = true
+  removeEmptyWhenMultiple: boolean = true,
+  allowNegativeStock: boolean = false
 ): {
   batches: MedicineBatch[];
   stock: number;
@@ -57,15 +63,18 @@ export function resolvePrimaryBatchAndStock(
     id: b.id || `B-${Date.now()}-${idx + 1}`,
     batchNo: (b.batchNo || '').trim() || '-',
     expDate: (b.expDate || '').trim(),
-    stock: Math.max(0, Math.round(Number(b.stock) || 0))
+    stock: allowNegativeStock
+      ? Math.round(Number(b.stock) || 0)
+      : Math.max(0, Math.round(Number(b.stock) || 0))
   }));
 
   const sorted = sortBatchesFEFO(cleaned);
-  const nonEmpty = sorted.filter((b) => b.stock > 0);
+  const nonZero = sorted.filter((b) => (allowNegativeStock ? b.stock !== 0 : b.stock > 0));
+  const positive = sorted.filter((b) => b.stock > 0);
 
   let finalBatches = sorted;
-  if (removeEmptyWhenMultiple && nonEmpty.length > 0) {
-    finalBatches = nonEmpty;
+  if (removeEmptyWhenMultiple && nonZero.length > 0) {
+    finalBatches = nonZero;
   } else if (finalBatches.length === 0) {
     finalBatches = [
       {
@@ -78,7 +87,7 @@ export function resolvePrimaryBatchAndStock(
   }
 
   const totalStock = finalBatches.reduce((acc, b) => acc + b.stock, 0);
-  const primary = nonEmpty[0] || finalBatches[0];
+  const primary = positive[0] || nonZero[0] || finalBatches[0];
 
   return {
     batches: finalBatches,
@@ -98,7 +107,8 @@ export function allocateBatchesFEFO(
   med: Medicine,
   qtyOut: number,
   preferredBatchNo?: string,
-  preferredExpDate?: string
+  preferredExpDate?: string,
+  allowNegativeStock: boolean = false
 ): {
   allocations: BatchAllocation[];
   batches: MedicineBatch[];
@@ -106,7 +116,7 @@ export function allocateBatchesFEFO(
   batchNo: string;
   expDate: string;
 } {
-  const normalized = getNormalizedBatches(med);
+  const normalized = getNormalizedBatches(med, allowNegativeStock);
   const targetQty = Math.max(0, Math.round(Number(qtyOut) || 0));
   let remaining = targetQty;
   const allocations: BatchAllocation[] = [];
@@ -177,9 +187,35 @@ export function allocateBatchesFEFO(
         qty: remaining
       });
     }
+
+    if (allowNegativeStock) {
+      const targetIdx = working.findIndex(
+        (b) =>
+          b.batchNo.trim().toLowerCase() === fallbackBatch.trim().toLowerCase() &&
+          (b.expDate || '').trim() === fallbackExp.trim()
+      );
+      if (targetIdx >= 0) {
+        working[targetIdx].stock -= remaining;
+      } else if (working.length > 0) {
+        working[0].stock -= remaining;
+      } else {
+        working.push({
+          id: `${med.id}-B1`,
+          batchNo: fallbackBatch,
+          expDate: fallbackExp,
+          stock: -remaining
+        });
+      }
+    }
   }
 
-  const resolved = resolvePrimaryBatchAndStock(working, med.batchNo, med.expDate, true);
+  const resolved = resolvePrimaryBatchAndStock(
+    working,
+    med.batchNo,
+    med.expDate,
+    true,
+    allowNegativeStock
+  );
   const summaryBatchNo =
     allocations.length > 0
       ? allocations.map((a) => a.batchNo || '-').join(', ')
@@ -202,14 +238,15 @@ export function allocateBatchesFEFO(
 
 export function deductBatchesFEFO(
   med: Medicine,
-  qtyOut: number
+  qtyOut: number,
+  allowNegativeStock: boolean = false
 ): {
   batches: MedicineBatch[];
   stock: number;
   batchNo: string;
   expDate: string;
 } {
-  const normalized = getNormalizedBatches(med);
+  const normalized = getNormalizedBatches(med, allowNegativeStock);
   let remaining = Math.max(0, Math.round(Number(qtyOut) || 0));
 
   const updated = normalized.map((b) => {
@@ -222,7 +259,29 @@ export function deductBatchesFEFO(
     };
   });
 
-  return resolvePrimaryBatchAndStock(updated, med.batchNo, med.expDate, true);
+  if (allowNegativeStock && remaining > 0) {
+    if (updated.length > 0) {
+      updated[0] = {
+        ...updated[0],
+        stock: updated[0].stock - remaining
+      };
+    } else {
+      updated.push({
+        id: `${med.id}-B1`,
+        batchNo: med.batchNo || '-',
+        expDate: med.expDate || '',
+        stock: -remaining
+      });
+    }
+  }
+
+  return resolvePrimaryBatchAndStock(
+    updated,
+    med.batchNo,
+    med.expDate,
+    true,
+    allowNegativeStock
+  );
 }
 
 export function addBatchStock(
@@ -236,12 +295,24 @@ export function addBatchStock(
   batchNo: string;
   expDate: string;
 } {
-  const normalized = getNormalizedBatches(med);
+  const hasNegativeStock = (Number(med.stock) || 0) < 0 || (med.batches || []).some((b) => (Number(b.stock) || 0) < 0);
+  const normalized = getNormalizedBatches(med, hasNegativeStock);
   const cleanBatch = (batchNo || '').trim() || '-';
   const cleanExp = (expDate || '').trim();
-  const addQty = Math.max(0, Math.round(Number(qtyIn) || 0));
+  let addQty = Math.max(0, Math.round(Number(qtyIn) || 0));
 
-  const existingIdx = normalized.findIndex(
+  // Offset any prior negative deficit first so total stock reconciles accurately
+  const reconciled = normalized.map((b) => {
+    if (b.stock < 0 && addQty > 0) {
+      const deficit = Math.abs(b.stock);
+      const offset = Math.min(deficit, addQty);
+      addQty -= offset;
+      return { ...b, stock: b.stock + offset };
+    }
+    return b;
+  });
+
+  const existingIdx = reconciled.findIndex(
     (b) =>
       b.batchNo.trim().toLowerCase() === cleanBatch.toLowerCase() &&
       (b.expDate || '').trim() === cleanExp
@@ -249,12 +320,12 @@ export function addBatchStock(
 
   let updated: MedicineBatch[];
   if (existingIdx >= 0) {
-    updated = normalized.map((b, idx) =>
+    updated = reconciled.map((b, idx) =>
       idx === existingIdx ? { ...b, stock: b.stock + addQty } : b
     );
-  } else {
+  } else if (addQty > 0) {
     updated = [
-      ...normalized,
+      ...reconciled,
       {
         id: `${med.id}-B${Date.now().toString().slice(-5)}`,
         batchNo: cleanBatch,
@@ -262,9 +333,12 @@ export function addBatchStock(
         stock: addQty
       }
     ];
+  } else {
+    updated = reconciled;
   }
 
-  return resolvePrimaryBatchAndStock(updated, med.batchNo, med.expDate, true);
+  const stillNegative = updated.some((b) => b.stock < 0);
+  return resolvePrimaryBatchAndStock(updated, med.batchNo, med.expDate, true, stillNegative);
 }
 
 /**

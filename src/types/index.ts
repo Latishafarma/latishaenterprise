@@ -64,7 +64,7 @@ export interface StockMutation {
   medicineId: string;
   medicineName: string;
   refNo: string;
-  type: 'PEMBELIAN' | 'PENJUALAN' | 'TRANSFER_KELUAR' | 'TRANSFER_MASUK' | 'PENYESUAIAN' | 'RESEP_DOKTER' | 'RETUR PEMBELIAN' | 'STOK_OPNAME' | 'BATAL_BELI' | 'STOK_AWAL';
+  type: 'PEMBELIAN' | 'PENJUALAN' | 'TRANSFER_KELUAR' | 'TRANSFER_MASUK' | 'PENYESUAIAN' | 'RESEP_DOKTER' | 'RETUR PEMBELIAN' | 'STOK_OPNAME' | 'BATAL_BELI' | 'STOK_AWAL' | 'PEMUSNAHAN';
   inQty: number;
   outQty: number;
   balance: number;
@@ -366,6 +366,7 @@ export const SYSTEM_PERMISSIONS: PermissionItem[] = [
   { id: 'pos-mitra-orders', label: 'Pesanan Penjualan Mitra', category: '3. Farmasi & Kasir POS' },
   { id: 'pos-riwayat', label: 'Riwayat & Faktur Penjualan', category: '3. Farmasi & Kasir POS' },
   { id: 'inv-master', label: 'Master Obat & Harga Bertingkat', category: '4. Inventaris & Logistik Pusat' },
+  { id: 'inv-kelola-produk', label: 'Kelola Produk (ED & Mendekati ED)', category: '4. Inventaris & Logistik Pusat' },
   { id: 'inv-kartu-stok', label: 'Mutasi & Kartu Stok Digital', category: '4. Inventaris & Logistik Pusat' },
   { id: 'inv-stok-opname', label: 'Stok Opname (Live)', category: '4. Inventaris & Logistik Pusat' },
   { id: 'inv-pembelian', label: 'Pembelian & Faktur PBF', category: '4. Inventaris & Logistik Pusat' },
@@ -415,6 +416,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'pos-mitra-orders',
     'pos-riwayat',
     'inv-master',
+    'inv-kelola-produk',
     'inv-kartu-stok',
     'inv-stok-opname',
     'inv-pembelian',
@@ -1290,6 +1292,17 @@ export interface PharmacyProfile {
   longitude?: number;
   checkInRadiusMeters?: number;
   branchLocations?: Record<string, { latitude: number; longitude: number; radiusMeters?: number }>;
+  allowPosZeroOrNegativeStock?: boolean;
+  edAlertThresholds?: EdAlertThreshold[];
+}
+
+export interface EdAlertThreshold {
+  id: string;
+  label: string;
+  value: number;
+  unit: 'hari' | 'bulan';
+  days: number;
+  isDefault?: boolean;
 }
 
 export interface APJProfile {

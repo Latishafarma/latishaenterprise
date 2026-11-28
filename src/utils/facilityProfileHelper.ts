@@ -127,7 +127,8 @@ export const DEFAULT_PHARMACY_PROFILE: PharmacyProfile = {
   operationalOpenTime: DEFAULT_PHARMACY_OPEN_TIME,
   operationalCloseTime: DEFAULT_PHARMACY_CLOSE_TIME,
   operationalSchedule: DEFAULT_PHARMACY_OPERATIONAL_SCHEDULE,
-  bankAccounts: DEFAULT_BANK_ACCOUNTS
+  bankAccounts: DEFAULT_BANK_ACCOUNTS,
+  allowPosZeroOrNegativeStock: false
 };
 
 export const DEFAULT_APJ_PROFILE: APJProfile = {
@@ -290,7 +291,12 @@ export const sanitizeLegacyDummyPharmacy = (raw: Partial<PharmacyProfile>): Phar
     operationalCloseTime: resolvedOp.closeTime,
     operationalSchedule: resolvedOp.summary,
     bankAccounts: rawBankAccounts.length > 0 ? rawBankAccounts : DEFAULT_BANK_ACCOUNTS,
-    logoUrl: savedLogo || ''
+    logoUrl: savedLogo || '',
+    allowPosZeroOrNegativeStock:
+      typeof raw.allowPosZeroOrNegativeStock === 'boolean'
+        ? raw.allowPosZeroOrNegativeStock
+        : Boolean(DEFAULT_PHARMACY_PROFILE.allowPosZeroOrNegativeStock),
+    ...(Array.isArray(raw.edAlertThresholds) ? { edAlertThresholds: raw.edAlertThresholds } : {})
   };
 
   if (
@@ -447,7 +453,9 @@ export const computeFacilityBundleHash = (
         latitude: pharmacy.latitude ?? null,
         longitude: pharmacy.longitude ?? null,
         checkInRadiusMeters: pharmacy.checkInRadiusMeters ?? 50,
-        branchLocations: pharmacy.branchLocations || {}
+        branchLocations: pharmacy.branchLocations || {},
+        allowPosZeroOrNegativeStock: Boolean(pharmacy.allowPosZeroOrNegativeStock),
+        edAlertThresholds: Array.isArray(pharmacy.edAlertThresholds) ? pharmacy.edAlertThresholds : []
       },
       apj: {
         name: apj.name || '',

@@ -6640,6 +6640,10 @@ export function facilityProfilesToSupabaseRow(bundle: {
         : {}),
       ...(pharmacy.branchLocations && Object.keys(pharmacy.branchLocations).length > 0
         ? { branchLocations: pharmacy.branchLocations }
+        : {}),
+      allowPosZeroOrNegativeStock: Boolean(pharmacy.allowPosZeroOrNegativeStock),
+      ...(Array.isArray(pharmacy.edAlertThresholds) && pharmacy.edAlertThresholds.length > 0
+        ? { edAlertThresholds: pharmacy.edAlertThresholds }
         : {})
     },
     apj_nama: apj.name || '',
@@ -6750,7 +6754,15 @@ export function supabaseRowToFacilityProfiles(row: Record<string, any>): Facilit
       ? { operationalSchedule: pickNonEmptyString('jadwal_operasional', 'operational_schedule') }
       : {}),
     ...(pickDefined('logo_url', 'logo') !== undefined ? { logoUrl: String(pickDefined('logo_url', 'logo')) } : {}),
-    ...(Array.isArray(rawBanks) ? { bankAccounts: rawBanks } : {})
+    ...(Array.isArray(rawBanks) ? { bankAccounts: rawBanks } : {}),
+    ...(typeof pharmJson?.allowPosZeroOrNegativeStock === 'boolean'
+      ? { allowPosZeroOrNegativeStock: pharmJson.allowPosZeroOrNegativeStock }
+      : typeof pickDefined('allow_pos_zero_or_negative_stock') === 'boolean'
+      ? { allowPosZeroOrNegativeStock: Boolean(pickDefined('allow_pos_zero_or_negative_stock')) }
+      : {}),
+    ...(Array.isArray(pharmJson?.edAlertThresholds)
+      ? { edAlertThresholds: pharmJson.edAlertThresholds }
+      : {})
   };
 
   const apj: Partial<APJProfile> = {

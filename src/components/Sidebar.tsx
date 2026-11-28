@@ -98,6 +98,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
 
   const hasInventory =
     canAccess('inv-master') ||
+    canAccess('inv-kelola-produk') ||
     canAccess('inv-kartu-stok') ||
     canAccess('inv-stok-opname') ||
     canAccess('inv-pembelian') ||
@@ -141,6 +142,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
     { id: 'pos-mitra-orders', title: 'Pesanan Penjualan Mitra', group: 'Farmasi & Kasir POS', perm: 'pos-mitra-orders', icon: ShoppingBag },
     { id: 'pos-riwayat', title: 'Riwayat & Faktur Penjualan', group: 'Farmasi & Kasir POS', perm: 'pos-riwayat', icon: FileText },
     { id: 'inv-master', title: 'Master Obat & Harga Bertingkat', group: 'Inventaris & Logistik Pusat', perm: 'inv-master', icon: Boxes },
+    { id: 'inv-kelola-produk', title: 'Kelola Produk (ED & Mendekati ED)', group: 'Inventaris & Logistik Pusat', perm: 'inv-kelola-produk', icon: CalendarClock },
     { id: 'inv-kartu-stok', title: 'Mutasi & Kartu Stok Digital', group: 'Inventaris & Logistik Pusat', perm: 'inv-kartu-stok', icon: ClipboardList },
     { id: 'inv-stok-opname', title: 'Stok Opname Fisik & Sistem', group: 'Inventaris & Logistik Pusat', perm: 'inv-stok-opname', icon: ClipboardCheck },
     { id: 'inv-pembelian', title: 'Pembelian & Faktur PBF', group: 'Inventaris & Logistik Pusat', perm: 'inv-pembelian', icon: Truck },
@@ -537,6 +539,20 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                   >
                     <Boxes className="w-4 h-4 text-sky-400" />
                     <span>Master Obat & Harga Bertingkat</span>
+                  </button>
+                )}
+
+                {canAccess('inv-kelola-produk') && (
+                  <button
+                    onClick={() => handleSelectTab('inv-kelola-produk')}
+                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg font-medium transition-colors ${
+                      activeTab === 'inv-kelola-produk'
+                        ? 'bg-slate-800 text-white font-bold'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                    }`}
+                  >
+                    <CalendarClock className="w-4 h-4 text-amber-400" />
+                    <span>Kelola Produk</span>
                   </button>
                 )}
 

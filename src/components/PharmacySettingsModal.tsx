@@ -1867,6 +1867,90 @@ export const PharmacySettingsModal: React.FC<PharmacySettingsModalProps> = ({
                         </div>
                       </div>
                     </div>
+
+                    {/* KEBIJAKAN TRANSAKSI POS: IZINKAN STOK 0 / MINUS (ON / OFF) */}
+                    <div className="sm:col-span-2 pt-2">
+                      {(() => {
+                        const isAllowZeroNegative = Boolean(pharmacy.allowPosZeroOrNegativeStock);
+                        return (
+                          <div
+                            className={`p-4 rounded-2xl border transition-colors ${
+                              isAllowZeroNegative
+                                ? 'bg-amber-50/70 border-amber-300'
+                                : 'bg-slate-50 border-slate-200'
+                            }`}
+                          >
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                              <div className="space-y-1 flex-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-extrabold text-slate-900 text-xs flex items-center gap-1.5">
+                                    <ShieldCheck
+                                      className={`w-4 h-4 ${
+                                        isAllowZeroNegative ? 'text-amber-600' : 'text-sky-700'
+                                      }`}
+                                    />
+                                    <span>Transaksi POS Produk dengan Stok 0 / Minus</span>
+                                  </span>
+                                  <span
+                                    className={`px-2 py-0.5 rounded-md font-black text-[10px] uppercase tracking-wider border ${
+                                      isAllowZeroNegative
+                                        ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                                        : 'bg-rose-100 text-rose-800 border-rose-200'
+                                    }`}
+                                  >
+                                    {isAllowZeroNegative ? 'ON · Diizinkan' : 'OFF · Diblokir'}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-slate-600 leading-relaxed">
+                                  {isAllowZeroNegative
+                                    ? 'Aktif (ON): Kasir diperbolehkan menambahkan dan memproses transaksi POS untuk produk dengan stok 0, minus, atau melebihi stok tersedia. Stok produk & kartu stok akan tercatat hingga nilai minus dan otomatis tersinkron ke seluruh perangkat kasir via Supabase.'
+                                    : 'Nonaktif (OFF): Kasir diblokir saat memilih, memindai barcode, atau menyelesaikan checkout POS untuk produk yang stoknya 0, minus, atau jumlah melebihi stok tersedia.'}
+                                </p>
+                              </div>
+
+                              <div className="flex items-center gap-2.5 shrink-0">
+                                <span
+                                  className={`text-[11px] font-black uppercase tracking-wider ${
+                                    !isAllowZeroNegative ? 'text-rose-700' : 'text-slate-400'
+                                  }`}
+                                >
+                                  OFF
+                                </span>
+                                <button
+                                  type="button"
+                                  role="switch"
+                                  aria-checked={isAllowZeroNegative}
+                                  aria-label="Aktifkan atau nonaktifkan transaksi POS pada produk dengan stok 0 atau minus"
+                                  onClick={() =>
+                                    updatePharmacyField({
+                                      allowPosZeroOrNegativeStock: !isAllowZeroNegative
+                                    })
+                                  }
+                                  className={`relative inline-flex h-7 w-13 shrink-0 items-center rounded-full border-2 transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-1 ${
+                                    isAllowZeroNegative
+                                      ? 'bg-emerald-600 border-emerald-600'
+                                      : 'bg-slate-300 border-slate-300'
+                                  }`}
+                                >
+                                  <span
+                                    className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition-transform ${
+                                      isAllowZeroNegative ? 'translate-x-6' : 'translate-x-0.5'
+                                    }`}
+                                  />
+                                </button>
+                                <span
+                                  className={`text-[11px] font-black uppercase tracking-wider ${
+                                    isAllowZeroNegative ? 'text-emerald-700' : 'text-slate-400'
+                                  }`}
+                                >
+                                  ON
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
                   </div>
 
                   <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">

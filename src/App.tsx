@@ -160,6 +160,7 @@ const RMEReportsView = lazy(() => import('./components/RMEReportsView').then((m)
 const POSCashierView = lazy(() => import('./components/POSCashierView').then((m) => ({ default: m.POSCashierView })));
 const EPrescriptionQueueView = lazy(() => import('./components/EPrescriptionQueueView').then((m) => ({ default: m.EPrescriptionQueueView })));
 const InventoryView = lazy(() => import('./components/InventoryView').then((m) => ({ default: m.InventoryView })));
+const ProductManagementView = lazy(() => import('./components/ProductManagementView').then((m) => ({ default: m.ProductManagementView })));
 const StockCardView = lazy(() => import('./components/StockCardView').then((m) => ({ default: m.StockCardView })));
 const StockOpnameView = lazy(() => import('./components/StockOpnameView').then((m) => ({ default: m.StockOpnameView })));
 const DefectaView = lazy(() => import('./components/DefectaView').then((m) => ({ default: m.DefectaView })));
@@ -6309,6 +6310,8 @@ export default function App() {
       });
     }
 
+    const allowNegativePosStock = Boolean(getSavedPharmacyProfile().allowPosZeroOrNegativeStock);
+
     const enrichedMutations: StockMutation[] = (mutations || []).map((mut) => {
       const med = workingMedMap.get(mut.medicineId);
       if (!med) return mut;
@@ -6320,7 +6323,8 @@ export default function App() {
           med,
           qtyOut,
           pref?.batchNo || mut.batchNo,
-          pref?.expDate || mut.expDate
+          pref?.expDate || mut.expDate,
+          allowNegativePosStock
         );
         // Update sequential working snapshot for multiple cart lines of same medicine
         workingMedMap.set(med.id, {
@@ -6406,8 +6410,8 @@ export default function App() {
         if (totalOut > 0) {
           const pref = preferredByMedId.get(m.id);
           const updated = pref?.batchNo
-            ? allocateBatchesFEFO(m, totalOut, pref.batchNo, pref.expDate)
-            : deductBatchesFEFO(m, totalOut);
+            ? allocateBatchesFEFO(m, totalOut, pref.batchNo, pref.expDate, allowNegativePosStock)
+            : deductBatchesFEFO(m, totalOut, allowNegativePosStock);
           const nextMed: Medicine = {
             ...m,
             stock: updated.stock,
@@ -8414,6 +8418,244 @@ export default function App() {
   const handleDeletePurchaseReturn = (id: string) => {
     setPurchaseReturns((prev) => prev.filter((r) => r.id !== id));
     addAuditLog('Retur PBF', `Hapus arsip riwayat retur #${id}`);
+  };
+
+  // Handler: Pemusnahan produk ED / mendekati ED dari Submenu Kelola Produk
+  const handleProcessExpiryDisposal = (payload: {
+    baNumber: string;
+    method: string;
+    witness: string;
+    reason: string;
+    items: {
+      medicineId: string;
+      name: string;
+      batchId?: string;
+      batchNo: string;
+      expDate: string;
+      qty: number;
+      unit: string;
+      hpp: number;
+      subtotal: number;
+    }[];
+  }) => {
+    const today = new Date().toISOString().split('T')[0];
+    const nowTime = new Date().toLocaleTimeString('id-ID');
+    const workingMedMap = new Map<string, Medicine>();
+    medicinesRef.current.forEach((m) => {
+      workingMedMap.set(m.id, {
+        ...m,
+        batches: m.batches ? m.batches.map((b) => ({ ...b })) : undefined
+      });
+    });
+
+    const newMutations: StockMutation[] = [];
+    const touchedMedIds = new Set<string>();
+
+    payload.items.forEach((it) => {
+      const qtyOut = Math.max(0, Math.round(Number(it.qty) || 0));
+      if (qtyOut <= 0) return;
+      const med = workingMedMap.get(it.medicineId);
+      let nextBalance = 0;
+
+      if (med) {
+        const alloc = allocateBatchesFEFO(med, qtyOut, it.batchNo, it.expDate, false);
+        nextBalance = alloc.stock;
+        workingMedMap.set(med.id, {
+          ...med,
+          stock: alloc.stock,
+          batchNo: alloc.batchNo,
+          expDate: alloc.expDate,
+          batches: alloc.batches
+        });
+        touchedMedIds.add(med.id);
+      }
+
+      newMutations.push({
+        id: `MUT-MUSNAH-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        date: today,
+        time: nowTime,
+        medicineId: it.medicineId,
+        medicineName: it.name,
+        refNo: payload.baNumber,
+        type: 'PEMUSNAHAN',
+        inQty: 0,
+        outQty: qtyOut,
+        balance: nextBalance,
+        ket: `Pemusnahan (${payload.method}) · Saksi: ${payload.witness}${payload.reason ? ` · ${payload.reason}` : ''}`,
+        petugas: userName,
+        branchId: currentBranch.id,
+        hpp: it.hpp * qtyOut,
+        batchNo: it.batchNo || '-',
+        expDate: it.expDate || '',
+        batchDetails: [{ batchNo: it.batchNo || '-', expDate: it.expDate || '', qty: qtyOut }]
+      });
+    });
+
+    if (touchedMedIds.size > 0) {
+      setMedicines((prev) =>
+        prev.map((m) => {
+          if (!touchedMedIds.has(m.id)) return m;
+          const updated = workingMedMap.get(m.id);
+          if (!updated) return m;
+          syncMedicineWithTracking(updated).catch((err) =>
+            console.warn('Supabase medicine disposal sync error:', err)
+          );
+          return updated;
+        })
+      );
+    }
+
+    if (newMutations.length > 0) {
+      setStockMutations((prev) => [...newMutations, ...prev]);
+      if (!isDemoActive && !isDemoMode()) {
+        const mutIds = newMutations.map((m) => m.id).filter(Boolean);
+        markIdsPendingSync('stock_mutations', mutIds);
+        seedStockMutationsToSupabase(newMutations)
+          .then((res) => {
+            if (res.needsTableSetup) setStockMutationsNeedsTableSetup(true);
+            if (res.success) confirmCloudSync('stock_mutations', mutIds);
+          })
+          .catch((err) => console.warn('Supabase disposal mutation sync error:', err));
+      }
+    }
+
+    addAuditLog(
+      'Kelola Produk (Pemusnahan)',
+      `Proses pemusnahan ${payload.baNumber} (${payload.items.length} item, metode: ${payload.method})`
+    );
+  };
+
+  // Handler: Retur produk ED / mendekati ED ke PBF dari Submenu Kelola Produk
+  const handleProcessExpiryReturn = (payload: {
+    pbfName: string;
+    invoiceNo: string;
+    reason: string;
+    items: {
+      medicineId: string;
+      name: string;
+      batchId?: string;
+      batchNo: string;
+      expDate: string;
+      qty: number;
+      unit: string;
+      price: number;
+      subtotal: number;
+    }[];
+  }) => {
+    const today = new Date().toISOString().split('T')[0];
+    const nowTime = new Date().toLocaleTimeString('id-ID');
+    const retId = `RET-ED-${Date.now().toString().slice(-6)}`;
+    const refInvNo = payload.invoiceNo || retId;
+
+    const workingMedMap = new Map<string, Medicine>();
+    medicinesRef.current.forEach((m) => {
+      workingMedMap.set(m.id, {
+        ...m,
+        batches: m.batches ? m.batches.map((b) => ({ ...b })) : undefined
+      });
+    });
+
+    const newMutations: StockMutation[] = [];
+    const touchedMedIds = new Set<string>();
+
+    payload.items.forEach((it) => {
+      const qtyOut = Math.max(0, Math.round(Number(it.qty) || 0));
+      if (qtyOut <= 0) return;
+      const med = workingMedMap.get(it.medicineId);
+      let nextBalance = 0;
+
+      if (med) {
+        const alloc = allocateBatchesFEFO(med, qtyOut, it.batchNo, it.expDate, false);
+        nextBalance = alloc.stock;
+        workingMedMap.set(med.id, {
+          ...med,
+          stock: alloc.stock,
+          batchNo: alloc.batchNo,
+          expDate: alloc.expDate,
+          batches: alloc.batches
+        });
+        touchedMedIds.add(med.id);
+      }
+
+      newMutations.push({
+        id: `MUT-RETED-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        date: today,
+        time: nowTime,
+        medicineId: it.medicineId,
+        medicineName: it.name,
+        refNo: retId,
+        type: 'RETUR PEMBELIAN',
+        inQty: 0,
+        outQty: qtyOut,
+        balance: nextBalance,
+        ket: `Retur Produk ED ke PBF ${payload.pbfName}${payload.reason ? ` - ${payload.reason}` : ''}`,
+        petugas: userName,
+        branchId: currentBranch.id,
+        hpp: it.price * qtyOut,
+        batchNo: it.batchNo || '-',
+        expDate: it.expDate || '',
+        batchDetails: [{ batchNo: it.batchNo || '-', expDate: it.expDate || '', qty: qtyOut }]
+      });
+    });
+
+    if (touchedMedIds.size > 0) {
+      setMedicines((prev) =>
+        prev.map((m) => {
+          if (!touchedMedIds.has(m.id)) return m;
+          const updated = workingMedMap.get(m.id);
+          if (!updated) return m;
+          syncMedicineWithTracking(updated).catch((err) =>
+            console.warn('Supabase medicine return sync error:', err)
+          );
+          return updated;
+        })
+      );
+    }
+
+    if (newMutations.length > 0) {
+      setStockMutations((prev) => [...newMutations, ...prev]);
+      if (!isDemoActive && !isDemoMode()) {
+        const mutIds = newMutations.map((m) => m.id).filter(Boolean);
+        markIdsPendingSync('stock_mutations', mutIds);
+        seedStockMutationsToSupabase(newMutations)
+          .then((res) => {
+            if (res.needsTableSetup) setStockMutationsNeedsTableSetup(true);
+            if (res.success) confirmCloudSync('stock_mutations', mutIds);
+          })
+          .catch((err) => console.warn('Supabase expiry return mutation sync error:', err));
+      }
+    }
+
+    const totalVal = payload.items.reduce((acc, it) => acc + it.subtotal, 0);
+    const newReturnRecord: PurchaseReturnRecord = {
+      id: retId,
+      invoiceId: refInvNo,
+      invoiceNo: refInvNo,
+      pbfName: payload.pbfName,
+      date: today,
+      time: nowTime,
+      items: payload.items.map((it) => ({
+        medicineId: it.medicineId,
+        name: it.name,
+        qty: it.qty,
+        unit: it.unit,
+        batchNo: it.batchNo || '-',
+        expDate: it.expDate || '',
+        price: it.price,
+        subtotal: it.subtotal,
+        reason: payload.reason,
+        alasan: payload.reason
+      })),
+      totalReturValue: totalVal,
+      petugas: userName,
+      branchId: currentBranch.id
+    };
+
+    setPurchaseReturns((prev) => [newReturnRecord, ...prev]);
+    addAuditLog(
+      'Kelola Produk (Retur PBF)',
+      `Proses retur produk ED #${retId} ke ${payload.pbfName} sebanyak ${payload.items.length} item`
+    );
   };
 
   // Handler: Update Existing Purchase Return Record (Overwrite data lama, cegah duplikasi)
@@ -14497,6 +14739,20 @@ export default function App() {
                     }
                     addAuditLog('Master Obat', 'Bersihkan seluruh data master obat & harga bertingkat');
                   }}
+                />
+              )}
+
+              {activeTab === 'inv-kelola-produk' && (
+                <ProductManagementView
+                  medicines={medicines}
+                  suppliers={suppliers}
+                  purchaseInvoices={purchaseInvoices}
+                  currentBranch={currentBranch}
+                  userName={userName}
+                  onProcessDisposal={handleProcessExpiryDisposal}
+                  onProcessReturn={handleProcessExpiryReturn}
+                  onSyncMedicinesSupabase={handleSyncMedicinesSupabase}
+                  onNavigateTab={handleNavigateTab}
                 />
               )}
 

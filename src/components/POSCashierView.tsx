@@ -880,6 +880,102 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
     onSelectPrescriptionFromQueue?.(rx);
   };
 
+  const allowZeroOrNegativeStock = Boolean(pharmacyProfile.allowPosZeroOrNegativeStock);
+
+  const getMedUnitMultiplier = (med: Medicine, targetUnit?: string): number => {
+    if (
+      targetUnit &&
+      med.satuanBesar &&
+      targetUnit.trim().toLowerCase() === med.satuanBesar.trim().toLowerCase()
+    ) {
+      return Math.max(1, Number(med.rasioKonversi) || 1);
+    }
+    return 1;
+  };
+
+  const getCartRequestedSmallQty = (medId: string, cartList: CartItem[]): number => {
+    const med = posMedPoolMap.get(medId) || medicines.find((m) => m.id === medId);
+    return cartList
+      .filter((c) => c.id === medId && !c.id.startsWith('JASA-') && !c.id.startsWith('LAB-FEE-'))
+      .reduce((sum, c) => {
+        const mult = med ? getMedUnitMultiplier(med, c.unit) : 1;
+        return sum + Math.max(0, Number(c.qty) || 0) * mult;
+      }, 0);
+  };
+
+  const validatePosStockForAdd = (
+    med: Medicine,
+    addQty: number,
+    targetUnit: string,
+    currentCart: CartItem[]
+  ): { ok: boolean; message?: string } => {
+    if (allowZeroOrNegativeStock) return { ok: true };
+    const available = Number(med.stock) || 0;
+    const baseUnitLabel = med.satuanKecil || med.unit || 'Pcs';
+    if (available <= 0) {
+      return {
+        ok: false,
+        message: `Transaksi "${med.name}" diblokir: stok saat ini ${available} ${baseUnitLabel}. Aktifkan izin stok 0/minus (ON) di Pengaturan Sistem & Profil Fasilitas jika ingin menjual stok kosong.`
+      };
+    }
+    const addSmallQty = Math.max(1, Number(addQty) || 1) * getMedUnitMultiplier(med, targetUnit);
+    const alreadyInCart = getCartRequestedSmallQty(med.id, currentCart);
+    if (alreadyInCart + addSmallQty > available) {
+      return {
+        ok: false,
+        message: `Stok "${med.name}" tidak mencukupi: permintaan ${alreadyInCart + addSmallQty} ${baseUnitLabel} melebihi stok tersedia (${available} ${baseUnitLabel}).`
+      };
+    }
+    return { ok: true };
+  };
+
+  const posMedPoolMap = useMemo(() => {
+    const map = new Map<string, Medicine>();
+    medicines.forEach((m) => map.set(m.id, m));
+    extraScannedPosMeds.forEach((m) => {
+      if (!map.has(m.id)) map.set(m.id, m);
+    });
+    return map;
+  }, [medicines, extraScannedPosMeds]);
+
+  const insufficientStockItems = useMemo(() => {
+    if (allowZeroOrNegativeStock) return [] as Array<{ id: string; name: string; stock: number; requested: number; unit: string }>;
+    const requestedByMed = new Map<string, { name: string; requested: number }>();
+    cart.forEach((item) => {
+      if (item.id.startsWith('JASA-') || item.id.startsWith('LAB-FEE-')) return;
+      const med = posMedPoolMap.get(item.id);
+      if (!med) return;
+      const addUnits = Math.max(0, Number(item.qty) || 0) * getMedUnitMultiplier(med, item.unit);
+      const prev = requestedByMed.get(med.id);
+      requestedByMed.set(med.id, {
+        name: med.name || item.name,
+        requested: (prev?.requested || 0) + addUnits
+      });
+    });
+
+    const flagged: Array<{ id: string; name: string; stock: number; requested: number; unit: string }> = [];
+    requestedByMed.forEach((entry, medId) => {
+      const med = posMedPoolMap.get(medId);
+      if (!med) return;
+      const avail = Number(med.stock) || 0;
+      if (avail <= 0 || entry.requested > avail) {
+        flagged.push({
+          id: medId,
+          name: entry.name,
+          stock: avail,
+          requested: entry.requested,
+          unit: med.satuanKecil || med.unit || 'Pcs'
+        });
+      }
+    });
+    return flagged;
+  }, [allowZeroOrNegativeStock, cart, posMedPoolMap]);
+
+  const insufficientStockIdSet = useMemo(
+    () => new Set(insufficientStockItems.map((it) => it.id)),
+    [insufficientStockItems]
+  );
+
   const missingRequiredStaffServices = useMemo(() => {
     return cart.filter((item) => {
       if (!isJasaCartItem(item)) return false;
@@ -900,10 +996,10 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
   }, [cart]);
 
   useEffect(() => {
-    if (missingRequiredStaffServices.length === 0 && checkoutValidationError) {
+    if (missingRequiredStaffServices.length === 0 && insufficientStockItems.length === 0) {
       setCheckoutValidationError(null);
     }
-  }, [missingRequiredStaffServices.length, checkoutValidationError]);
+  }, [missingRequiredStaffServices.length, insufficientStockItems.length, allowZeroOrNegativeStock]);
 
   const recomputeServiceCartSnapshot = (
     item: CartItem,
@@ -1084,6 +1180,23 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
 
   const handleUpdateCartItemQty = (cartIdx: number, nextQty: number) => {
     const cleanQty = Math.max(1, Math.floor(Number(nextQty) || 1));
+    const targetItem = cart[cartIdx];
+    if (
+      targetItem &&
+      !allowZeroOrNegativeStock &&
+      !isJasaCartItem(targetItem) &&
+      !targetItem.id.startsWith('LAB-FEE-')
+    ) {
+      const med = posMedPoolMap.get(targetItem.id);
+      if (med) {
+        const otherCart = cart.filter((_, idx) => idx !== cartIdx);
+        const check = validatePosStockForAdd(med, cleanQty, targetItem.unit, otherCart);
+        if (!check.ok) {
+          setCheckoutValidationError(check.message || 'Stok produk tidak mencukupi.');
+          return;
+        }
+      }
+    }
     setCart((prev) =>
       prev.map((item, i) => {
         if (i !== cartIdx) return item;
@@ -1320,9 +1433,17 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
   }, [activePrescription, medicines, staffList, currentFees]);
 
   const handleMedSelect = (med: Medicine) => {
+    const defUnit = med.satuanKecil || med.unit || 'Strip';
+    if (!allowZeroOrNegativeStock && (Number(med.stock) || 0) <= 0) {
+      const msg = `Produk "${med.name}" tidak dapat dipilih karena stok ${med.stock} ${defUnit} (Pengaturan Stok 0/Minus OFF).`;
+      setPosScanNotice({ type: 'warning', text: msg });
+      setCheckoutValidationError(msg);
+      setShowMedDropdown(false);
+      setTimeout(() => setPosScanNotice(null), 4000);
+      return;
+    }
     setSelectedMed(med);
     setPluInput(med.name);
-    const defUnit = med.satuanKecil || med.unit || 'Strip';
     setUnit(defUnit);
     setPrice(resolvePrice(med, choosePrice, defUnit));
     setShowMedDropdown(false);
@@ -1360,8 +1481,20 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
     }
 
     if (exactFound) {
-      playBarcodeBeep();
       const targetUnit = exactFound.satuanKecil || exactFound.unit || 'Strip';
+      const stockCheck = validatePosStockForAdd(exactFound, 1, targetUnit, cart);
+      if (!stockCheck.ok) {
+        const msg = stockCheck.message || `Stok "${exactFound.name}" habis / tidak mencukupi.`;
+        setPosScanNotice({ type: 'warning', text: msg });
+        setCheckoutValidationError(msg);
+        setPluInput('');
+        setSelectedMed(null);
+        setShowMedDropdown(false);
+        setTimeout(() => setPosScanNotice(null), 4200);
+        return;
+      }
+
+      playBarcodeBeep();
       const resolvedUnitPrice = resolvePrice(exactFound, choosePrice, targetUnit);
 
       setCart((prevCart) => {
@@ -1438,32 +1571,52 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
   }, [price, qty, tuslah, itemDiscount]);
 
   const handleAddItem = () => {
-    if (!selectedMed && !pluInput) {
-      alert('Pilih atau ketik obat terlebih dahulu!');
+    if (!selectedMed && !pluInput.trim()) {
+      setCheckoutValidationError('Pilih atau ketik nama/barcode produk terlebih dahulu.');
       return;
     }
 
     const med =
       selectedMed ||
-      medicines.find((m) => m.name.toLowerCase().includes(pluInput.toLowerCase())) ||
-      medicines[0];
+      posMedPool.find(
+        (m) =>
+          m.name.toLowerCase().includes(pluInput.trim().toLowerCase()) ||
+          (m.barcode || '').toLowerCase() === pluInput.trim().toLowerCase() ||
+          m.id.toLowerCase() === pluInput.trim().toLowerCase()
+      );
+
+    if (!med) {
+      setCheckoutValidationError(`Produk "${pluInput.trim()}" tidak ditemukan di Master Obat.`);
+      return;
+    }
 
     const fallbackUnit = unit || med.satuanKecil || med.unit || 'Strip';
+    const requestedQty = Math.max(1, Number(qty) || 1);
+    const stockCheck = validatePosStockForAdd(med, requestedQty, fallbackUnit, cart);
+    if (!stockCheck.ok) {
+      const msg = stockCheck.message || `Stok "${med.name}" tidak mencukupi untuk transaksi POS.`;
+      setCheckoutValidationError(msg);
+      setPosScanNotice({ type: 'warning', text: msg });
+      setTimeout(() => setPosScanNotice(null), 4200);
+      return;
+    }
+
     const finalPrice = price > 0 ? price : resolvePrice(med, choosePrice, fallbackUnit);
 
     const newItem: CartItem = {
       id: med.id,
       name: med.name,
-      qty: Number(qty) || 1,
+      qty: requestedQty,
       unit: fallbackUnit,
       tuslah: Number(tuslah) || 0,
       price: finalPrice,
       discount: Number(itemDiscount) || 0,
-      subtotal: Math.max(0, finalPrice * (Number(qty) || 1) + Number(tuslah) - Number(itemDiscount)),
+      subtotal: Math.max(0, finalPrice * requestedQty + Number(tuslah) - Number(itemDiscount)),
       hpp: med.hpp || 2000
     };
 
     setCart([...cart, newItem]);
+    setCheckoutValidationError(null);
 
     // Reset line inputs
     setPluInput('');
@@ -1520,6 +1673,17 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
       const names = missingRequiredStaffServices.map((s) => s.name).join(', ');
       setCheckoutValidationError(
         `Transaksi belum dapat disimpan! Harap pilih petugas pelaksana pada item jasa wajib: ${names}.`
+      );
+      setShowPaymentModal(false);
+      return;
+    }
+
+    if (!allowZeroOrNegativeStock && insufficientStockItems.length > 0) {
+      const detail = insufficientStockItems
+        .map((it) => `${it.name} (stok: ${it.stock}, diminta: ${it.requested} ${it.unit})`)
+        .join('; ');
+      setCheckoutValidationError(
+        `Transaksi POS diblokir! Produk dengan stok 0/minus atau tidak mencukupi: ${detail}. Aktifkan izin di Pengaturan Sistem & Profil Fasilitas jika diperlukan.`
       );
       setShowPaymentModal(false);
       return;
@@ -1650,7 +1814,7 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
         runningStock.has(medId)
           ? runningStock.get(medId)!
           : medicines.find((m) => m.id === medId)?.stock || 0;
-      const nextBal = Math.max(0, current - deductQty);
+      const nextBal = allowZeroOrNegativeStock ? current - deductQty : Math.max(0, current - deductQty);
       runningStock.set(medId, nextBal);
       return nextBal;
     };
@@ -2555,9 +2719,25 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
         {/* PLU / Medicine search & Barcode Scanner */}
         <div className="col-span-4 relative" ref={medDropdownRef}>
           <div className="flex items-center justify-between gap-2 mb-0.5">
-            <label className="block font-bold text-slate-600 text-[10px]">
-              Pencarian Obat (PLU / Barcode)
-            </label>
+            <div className="flex items-center gap-1.5 min-w-0">
+              <label className="block font-bold text-slate-600 text-[10px] shrink-0">
+                Pencarian Obat (PLU / Barcode)
+              </label>
+              <span
+                title={
+                  allowZeroOrNegativeStock
+                    ? 'Pengaturan Sistem: Transaksi POS produk stok 0/minus diizinkan (ON)'
+                    : 'Pengaturan Sistem: Transaksi POS produk stok 0/minus diblokir (OFF)'
+                }
+                className={`px-1.5 py-0.5 rounded text-[9px] font-black uppercase tracking-wide border shrink-0 ${
+                  allowZeroOrNegativeStock
+                    ? 'bg-amber-100 text-amber-800 border-amber-300'
+                    : 'bg-slate-200 text-slate-600 border-slate-300'
+                }`}
+              >
+                {allowZeroOrNegativeStock ? 'Stok ≤0: ON' : 'Stok ≤0: OFF'}
+              </span>
+            </div>
             {posScanNotice && (
               <span
                 className={`text-[10px] font-bold truncate ${
@@ -2615,31 +2795,52 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
             const visiblePool = matchedPool.slice(0, 40);
             return (
               <div className="absolute z-30 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-48 overflow-y-auto divide-y">
-                {visiblePool.map((m, idx) => (
-                  <div
-                    key={`${m.id}-${idx}`}
-                    onClick={() => handleMedSelect(m)}
-                    className="p-2 hover:bg-sky-50 cursor-pointer text-xs flex justify-between items-center"
-                  >
-                    <div>
-                      <strong className="text-slate-800 block">
-                        {m.name}{' '}
-                        {m.kekuatan && m.kekuatan !== '-' ? (
-                          <span className="font-mono font-semibold text-slate-500 text-[10px]">
-                            ({m.kekuatan})
+                {visiblePool.map((m, idx) => {
+                  const isZeroOrMinus = (Number(m.stock) || 0) <= 0;
+                  const isBlocked = isZeroOrMinus && !allowZeroOrNegativeStock;
+                  return (
+                    <div
+                      key={`${m.id}-${idx}`}
+                      onClick={() => handleMedSelect(m)}
+                      className={`p-2 text-xs flex justify-between items-center transition ${
+                        isBlocked
+                          ? 'bg-rose-50/40 text-slate-400 hover:bg-rose-50 cursor-not-allowed'
+                          : 'hover:bg-sky-50 cursor-pointer'
+                      }`}
+                    >
+                      <div className="min-w-0 pr-2">
+                        <strong className={`block truncate ${isBlocked ? 'text-slate-500' : 'text-slate-800'}`}>
+                          {m.name}{' '}
+                          {m.kekuatan && m.kekuatan !== '-' ? (
+                            <span className="font-mono font-semibold text-slate-500 text-[10px]">
+                              ({m.kekuatan})
+                            </span>
+                          ) : null}
+                        </strong>
+                        <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500 mt-0.5">
+                          <span className={isZeroOrMinus ? 'font-bold text-rose-600' : ''}>
+                            Stok: {m.stock} {m.unit}
                           </span>
-                        ) : null}
-                      </strong>
-                      <span className="text-[10px] text-slate-500">
-                        Stok: {m.stock} {m.unit} · {m.rack}
-                        {m.barcode ? ` · ${m.barcode}` : ''}
+                          <span>· {m.rack}</span>
+                          {m.barcode ? <span>· {m.barcode}</span> : null}
+                          {isBlocked && (
+                            <span className="px-1.5 py-0.2 rounded bg-rose-100 text-rose-700 border border-rose-200 font-bold text-[9px]">
+                              Diblokir (Stok ≤ 0)
+                            </span>
+                          )}
+                          {isZeroOrMinus && allowZeroOrNegativeStock && (
+                            <span className="px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 border border-amber-300 font-bold text-[9px]">
+                              Diizinkan (Stok ≤ 0)
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <span className={`font-mono font-bold shrink-0 ${isBlocked ? 'text-slate-400' : 'text-sky-700'}`}>
+                        Rp {resolvePrice(m, choosePrice, m.satuanKecil || m.unit).toLocaleString('id-ID')}
                       </span>
                     </div>
-                    <span className="font-mono font-bold text-sky-700">
-                      Rp {resolvePrice(m, choosePrice, m.satuanKecil || m.unit).toLocaleString('id-ID')}
-                    </span>
-                  </div>
-                ))}
+                  );
+                })}
                 {matchedPool.length > 40 && (
                   <div className="px-2.5 py-1.5 bg-slate-50 text-[10px] font-semibold text-slate-500 text-center">
                     Menampilkan 40 dari {matchedPool.length} obat. Ketik lebih spesifik atau scan barcode.
@@ -2785,12 +2986,29 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
                 const { totalServiceFee, facilityShare } = isJasa
                   ? calculateFacilityShareForCartItem(item)
                   : { totalServiceFee: 0, facilityShare: 0 };
+                const isStockBlocked = !isJasa && !item.id.startsWith('LAB-FEE-') && insufficientStockIdSet.has(item.id);
+                const matchedMedInCart = !isJasa && !item.id.startsWith('LAB-FEE-') ? posMedPoolMap.get(item.id) : undefined;
 
                 return (
-                  <tr key={`${item.id}-${idx}`} className={`hover:bg-slate-50 transition ${missingStaff ? 'bg-rose-50/40' : ''}`}>
+                  <tr
+                    key={`${item.id}-${idx}`}
+                    className={`hover:bg-slate-50 transition ${
+                      missingStaff || isStockBlocked ? 'bg-rose-50/40' : ''
+                    }`}
+                  >
                     <td className="p-2.5 border-r font-bold text-slate-900">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span>{item.name}</span>
+                        {isStockBlocked && matchedMedInCart && (
+                          <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-rose-100 text-rose-700 border border-rose-200 shrink-0">
+                            Stok {matchedMedInCart.stock} {matchedMedInCart.satuanKecil || matchedMedInCart.unit} · Diblokir
+                          </span>
+                        )}
+                        {!isStockBlocked && allowZeroOrNegativeStock && matchedMedInCart && (Number(matchedMedInCart.stock) || 0) <= 0 && (
+                          <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-100 text-amber-800 border border-amber-300 shrink-0">
+                            Stok {matchedMedInCart.stock} · Diizinkan
+                          </span>
+                        )}
                         {isJasa && (
                           <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 shrink-0">
                             Jasa Layanan
@@ -2946,15 +3164,19 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
       </div>
 
       {/* Inline Checkout Validation Warning */}
-      {(checkoutValidationError || missingRequiredStaffServices.length > 0) && (
+      {(checkoutValidationError || missingRequiredStaffServices.length > 0 || insufficientStockItems.length > 0) && (
         <div className="px-4 py-2.5 bg-rose-50 border-t border-rose-200 text-rose-800 text-xs font-bold flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
             <span>
               {checkoutValidationError ||
-                `Pilih petugas pelaksana untuk item jasa wajib (${missingRequiredStaffServices
-                  .map((s) => s.name)
-                  .join(', ')}) sebelum melakukan pembayaran.`}
+                (missingRequiredStaffServices.length > 0
+                  ? `Pilih petugas pelaksana untuk item jasa wajib (${missingRequiredStaffServices
+                      .map((s) => s.name)
+                      .join(', ')}) sebelum melakukan pembayaran.`
+                  : `Checkout diblokir: produk stok 0/minus atau tidak mencukupi (${insufficientStockItems
+                      .map((it) => `${it.name}: stok ${it.stock}`)
+                      .join(', ')}). Aktifkan izin di Pengaturan Sistem & Profil Fasilitas jika diperlukan.`)}
             </span>
           </div>
           {checkoutValidationError && (
@@ -3039,6 +3261,14 @@ export const POSCashierView: React.FC<POSCashierViewProps> = ({
                   `Checkout diblokir: wajib memilih petugas untuk item jasa (${missingRequiredStaffServices
                     .map((s) => s.name)
                     .join(', ')}).`
+                );
+                return;
+              }
+              if (!allowZeroOrNegativeStock && insufficientStockItems.length > 0) {
+                setCheckoutValidationError(
+                  `Checkout diblokir: produk stok 0/minus atau melebihi stok tersedia (${insufficientStockItems
+                    .map((it) => `${it.name} [stok: ${it.stock}, diminta: ${it.requested} ${it.unit}]`)
+                    .join('; ')}). Aktifkan izin di Pengaturan Sistem & Profil Fasilitas jika diperlukan.`
                 );
                 return;
               }
