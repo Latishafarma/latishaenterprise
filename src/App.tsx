@@ -127,7 +127,9 @@ import {
   allocateBatchesFEFO,
   deductBatchesFEFO,
   addBatchStock,
-  getMedicineHppBox
+  getMedicineHppBox,
+  hasMedicinePricingChanged,
+  reconcilePendingOrdersWithMedicines
 } from './utils/batchHelper';
 
 import { Header } from './components/Header';
@@ -1786,6 +1788,9 @@ export default function App() {
   const mitraOrdersRef = React.useRef<MitraOrder[]>(mitraOrders);
   mitraOrdersRef.current = mitraOrders;
   const transactionsAuthoritativeRef = React.useRef<boolean>(false);
+  const syncPendingMitraOrdersRef = React.useRef<
+    ((sourceMeds: Medicine[], targetMedIds?: Set<string>, sourceLabel?: string) => number) | null
+  >(null);
 
   const persistTransactionsNow = useCallback((nextList: Transaction[]) => {
     transactionsRef.current = nextList;
@@ -2195,11 +2200,18 @@ export default function App() {
       if (msg.type === 'ORDER_UPSERT' && msg.order) {
         setMitraOrders((prev) => {
           const exists = prev.some((o) => o.id === msg.order.id);
-          if (exists) return prev.map((o) => (o.id === msg.order.id ? msg.order : o));
-          return [msg.order, ...prev];
+          const next = exists
+            ? prev.map((o) => (o.id === msg.order.id ? msg.order : o))
+            : [msg.order, ...prev];
+          persistMitraOrdersNow(next);
+          return next;
         });
       } else if (msg.type === 'ORDER_DELETE' && msg.id) {
-        setMitraOrders((prev) => prev.filter((o) => o.id !== msg.id));
+        setMitraOrders((prev) => {
+          const next = prev.filter((o) => o.id !== msg.id);
+          persistMitraOrdersNow(next);
+          return next;
+        });
       }
     };
 
@@ -3751,25 +3763,41 @@ export default function App() {
       medicineChannel = subscribeMedicinesRealtime(
         (newMed) => {
           if (isDemoMode()) return;
+          const prevMed = medicinesRef.current.find((m) => m.id === newMed.id);
+          const priceChanged = Boolean(prevMed) && hasMedicinePricingChanged(prevMed, newMed);
           setMedicines((prev) => {
-            if (prev.some((m) => m.id === newMed.id)) {
-              return prev.map((m) => (m.id === newMed.id ? newMed : m));
-            }
-            return normalizeUniqueMedicines([newMed, ...prev]).items;
+            const next = prev.some((m) => m.id === newMed.id)
+              ? prev.map((m) => (m.id === newMed.id ? newMed : m))
+              : normalizeUniqueMedicines([newMed, ...prev]).items;
+            medicinesRef.current = next;
+            return next;
           });
+          if (priceChanged) {
+            syncPendingMitraOrdersRef.current?.([newMed], new Set([newMed.id]), 'Realtime Master Obat');
+          }
         },
         (updatedMed) => {
           if (isDemoMode()) return;
+          const prevMed = medicinesRef.current.find((m) => m.id === updatedMed.id);
+          const priceChanged = hasMedicinePricingChanged(prevMed, updatedMed);
           setMedicines((prev) => {
-            if (prev.some((m) => m.id === updatedMed.id)) {
-              return prev.map((m) => (m.id === updatedMed.id ? updatedMed : m));
-            }
-            return normalizeUniqueMedicines([updatedMed, ...prev]).items;
+            const next = prev.some((m) => m.id === updatedMed.id)
+              ? prev.map((m) => (m.id === updatedMed.id ? updatedMed : m))
+              : normalizeUniqueMedicines([updatedMed, ...prev]).items;
+            medicinesRef.current = next;
+            return next;
           });
+          if (priceChanged) {
+            syncPendingMitraOrdersRef.current?.([updatedMed], new Set([updatedMed.id]), 'Realtime Master Obat');
+          }
         },
         (delId) => {
           if (isDemoMode()) return;
-          setMedicines((prev) => prev.filter((m) => m.id !== delId));
+          setMedicines((prev) => {
+            const next = prev.filter((m) => m.id !== delId);
+            medicinesRef.current = next;
+            return next;
+          });
         }
       );
       medicineChannelRef.current = medicineChannel;
@@ -6763,6 +6791,46 @@ export default function App() {
     } catch {}
   };
 
+  syncPendingMitraOrdersRef.current = (
+    sourceMeds: Medicine[],
+    targetMedIds?: Set<string>,
+    sourceLabel: string = 'Master Data Obat'
+  ): number => {
+    if (!Array.isArray(sourceMeds) || sourceMeds.length === 0) return 0;
+    const { nextOrders, updatedOrders } = reconcilePendingOrdersWithMedicines(
+      mitraOrdersRef.current,
+      sourceMeds,
+      targetMedIds
+    );
+    if (updatedOrders.length === 0) return 0;
+
+    setMitraOrders(nextOrders);
+    persistMitraOrdersNow(nextOrders);
+
+    const updatedIds = updatedOrders.map((o) => o.id).filter(Boolean);
+    if (!isDemoActive && !isDemoMode() && updatedIds.length > 0) {
+      markIdsPendingSync('mitra_orders', updatedIds);
+      updatedOrders.forEach((ord) => {
+        syncMitraOrderToSupabase(ord)
+          .then((res) => {
+            if (res.success) confirmCloudSync('mitra_orders', [ord.id]);
+          })
+          .catch((err) => console.warn('Supabase pending PO price sync error:', err));
+      });
+    }
+
+    updatedOrders.forEach((ord) => {
+      broadcastMitraOrderEvent({ type: 'ORDER_UPSERT', order: ord });
+    });
+
+    const codesSummary = updatedOrders.map((o) => o.orderCode || o.id).join(', ');
+    addAuditLog(
+      'Sinkronisasi Harga PO',
+      `Harga jual pada ${updatedOrders.length} PO berstatus Pending (${codesSummary}) otomatis diperbarui mengikuti perubahan ${sourceLabel}.`
+    );
+    return updatedOrders.length;
+  };
+
   const handleSaveManualCustomerPO = async (
     order: MitraOrder,
     isEdit: boolean
@@ -7685,13 +7753,29 @@ export default function App() {
       };
     };
 
+    const prevMedsById = new Map(medicinesRef.current.map((m) => [m.id, m]));
     const updatedMedicinesToSync = medicines
       .map((m) => applyAddToMedicine(m))
       .filter((r) => r.changed)
       .map((r) => r.med);
 
     // Increment stocks & merge incoming batches/ED from Purchase Invoice & update weighted average HPP/HNA & selling prices
-    setMedicines((prev) => prev.map((m) => applyAddToMedicine(m).med));
+    setMedicines((prev) => {
+      const next = prev.map((m) => applyAddToMedicine(m).med);
+      medicinesRef.current = next;
+      return next;
+    });
+
+    const changedPriceMeds = updatedMedicinesToSync.filter((m) =>
+      hasMedicinePricingChanged(prevMedsById.get(m.id), m)
+    );
+    if (changedPriceMeds.length > 0) {
+      syncPendingMitraOrdersRef.current?.(
+        changedPriceMeds,
+        new Set(changedPriceMeds.map((m) => m.id)),
+        `Faktur Pembelian #${invoice.invoiceNo}`
+      );
+    }
 
     // Add mutations
     const newMutations: StockMutation[] = invoice.items.map((it) => {
@@ -7853,12 +7937,28 @@ export default function App() {
       return { med: baseMed, changed };
     };
 
+    const prevMedsByIdForUpdate = new Map(medicinesRef.current.map((m) => [m.id, m]));
     const updatedMedicinesToSync = medicines
       .map((m) => applyUpdateToMedicine(m))
       .filter((r) => r.changed)
       .map((r) => r.med);
 
-    setMedicines((prev) => prev.map((m) => applyUpdateToMedicine(m).med));
+    setMedicines((prev) => {
+      const next = prev.map((m) => applyUpdateToMedicine(m).med);
+      medicinesRef.current = next;
+      return next;
+    });
+
+    const changedPriceMedsOnUpdate = updatedMedicinesToSync.filter((m) =>
+      hasMedicinePricingChanged(prevMedsByIdForUpdate.get(m.id), m)
+    );
+    if (changedPriceMedsOnUpdate.length > 0) {
+      syncPendingMitraOrdersRef.current?.(
+        changedPriceMedsOnUpdate,
+        new Set(changedPriceMedsOnUpdate.map((m) => m.id)),
+        `Proses Faktur Pembelian #${updated.invoiceNo}`
+      );
+    }
 
     purchaseInvoicesMutationEpochRef.current += 1;
     const nextInvoices = purchaseInvoicesRef.current.map((i) => (i.id === updated.id ? updated : i));
@@ -9701,9 +9801,21 @@ export default function App() {
       return updatedMed;
     });
 
+    const prevOpnameMedsById = new Map(medicinesRef.current.map((m) => [m.id, m]));
     medicinesRef.current = nextMedicines;
     setMedicines(nextMedicines);
     demoSetItem('latisha_medicines', JSON.stringify(nextMedicines));
+
+    const changedPriceMedsOpname = updatedMedsToSync.filter((m) =>
+      hasMedicinePricingChanged(prevOpnameMedsById.get(m.id), m)
+    );
+    if (changedPriceMedsOpname.length > 0) {
+      syncPendingMitraOrdersRef.current?.(
+        changedPriceMedsOpname,
+        new Set(changedPriceMedsOpname.map((m) => m.id)),
+        'Stok Opname Live'
+      );
+    }
 
     // Sync reconciled medicines (stock + Batch/ED + multi-batch) to Supabase in background
     updatedMedsToSync.forEach((m) => {
@@ -10796,8 +10908,26 @@ export default function App() {
         }
       }
 
+      const prevMedsById = new Map(medicinesRef.current.map((m) => [m.id, m]));
       const normalized = normalizeUniqueMedicines(Array.from(mergedMap.values()));
+      const changedPriceIds = new Set<string>();
+      normalized.items.forEach((nextMed) => {
+        const prevMed = prevMedsById.get(nextMed.id);
+        if (prevMed && hasMedicinePricingChanged(prevMed, nextMed)) {
+          changedPriceIds.add(nextMed.id);
+        }
+      });
+
+      medicinesRef.current = normalized.items;
       setMedicines(normalized.items);
+
+      if (changedPriceIds.size > 0) {
+        syncPendingMitraOrdersRef.current?.(
+          normalized.items,
+          changedPriceIds,
+          'Sinkronisasi Master Obat Supabase'
+        );
+      }
 
       if (normalized.reassigned.length > 0) {
         normalized.reassigned.forEach((m) => {
@@ -10816,25 +10946,41 @@ export default function App() {
         medicineChannelRef.current = subscribeMedicinesRealtime(
           (newMed) => {
             if (isDemoMode()) return;
+            const prevMed = medicinesRef.current.find((m) => m.id === newMed.id);
+            const priceChanged = Boolean(prevMed) && hasMedicinePricingChanged(prevMed, newMed);
             setMedicines((prev) => {
-              if (prev.some((m) => m.id === newMed.id)) {
-                return prev.map((m) => (m.id === newMed.id ? newMed : m));
-              }
-              return normalizeUniqueMedicines([newMed, ...prev]).items;
+              const next = prev.some((m) => m.id === newMed.id)
+                ? prev.map((m) => (m.id === newMed.id ? newMed : m))
+                : normalizeUniqueMedicines([newMed, ...prev]).items;
+              medicinesRef.current = next;
+              return next;
             });
+            if (priceChanged) {
+              syncPendingMitraOrdersRef.current?.([newMed], new Set([newMed.id]), 'Realtime Master Obat');
+            }
           },
           (updatedMed) => {
             if (isDemoMode()) return;
+            const prevMed = medicinesRef.current.find((m) => m.id === updatedMed.id);
+            const priceChanged = hasMedicinePricingChanged(prevMed, updatedMed);
             setMedicines((prev) => {
-              if (prev.some((m) => m.id === updatedMed.id)) {
-                return prev.map((m) => (m.id === updatedMed.id ? updatedMed : m));
-              }
-              return normalizeUniqueMedicines([updatedMed, ...prev]).items;
+              const next = prev.some((m) => m.id === updatedMed.id)
+                ? prev.map((m) => (m.id === updatedMed.id ? updatedMed : m))
+              : normalizeUniqueMedicines([updatedMed, ...prev]).items;
+              medicinesRef.current = next;
+              return next;
             });
+            if (priceChanged) {
+              syncPendingMitraOrdersRef.current?.([updatedMed], new Set([updatedMed.id]), 'Realtime Master Obat');
+            }
           },
           (delId) => {
             if (isDemoMode()) return;
-            setMedicines((prev) => prev.filter((m) => m.id !== delId));
+            setMedicines((prev) => {
+              const next = prev.filter((m) => m.id !== delId);
+              medicinesRef.current = next;
+              return next;
+            });
           }
         );
       }
@@ -13892,9 +14038,18 @@ export default function App() {
                   needsTableSetup={medicinesNeedsTableSetup}
                   isDemoSandbox={isDemoActive}
                   onAddMedicine={async (m, options) => {
+                    const prevMed = medicinesRef.current.find((item) => item.id === m.id);
                     const normalizedPreview = normalizeUniqueMedicines([m, ...medicinesRef.current]);
-                    const finalMed = normalizedPreview.items[0] || m;
-                    setMedicines((prev) => normalizeUniqueMedicines([m, ...prev]).items);
+                    const finalMed = normalizedPreview.items.find((item) => item.id === m.id) || normalizedPreview.items[0] || m;
+                    medicinesRef.current = normalizedPreview.items;
+                    setMedicines(normalizedPreview.items);
+                    if (prevMed && hasMedicinePricingChanged(prevMed, finalMed)) {
+                      syncPendingMitraOrdersRef.current?.(
+                        [finalMed],
+                        new Set([finalMed.id]),
+                        'Master Data Obat'
+                      );
+                    }
                     const res = await syncMedicineWithTracking(finalMed).catch((err) => {
                       console.warn('Supabase medicine add error:', err);
                       return { success: false, error: err?.message || String(err) };
@@ -13944,12 +14099,24 @@ export default function App() {
                     const oldStock = Number(prevMed?.stock) || 0;
                     const newStock = Number(m.stock) || 0;
                     const stockDiff = newStock - oldStock;
+                    const priceChanged = hasMedicinePricingChanged(prevMed, m);
 
-                    setMedicines((prev) =>
-                      prev.some((item) => item.id === m.id)
-                        ? prev.map((item) => (item.id === m.id ? m : item))
-                        : [m, ...prev]
-                    );
+                    const nextMedsList = medicinesRef.current.some((item) => item.id === m.id)
+                      ? medicinesRef.current.map((item) => (item.id === m.id ? m : item))
+                      : [m, ...medicinesRef.current];
+                    medicinesRef.current = nextMedsList;
+                    setMedicines(nextMedsList);
+
+                    let syncedPendingOrdersCount = 0;
+                    if (priceChanged) {
+                      syncedPendingOrdersCount =
+                        syncPendingMitraOrdersRef.current?.(
+                          [m],
+                          new Set([m.id]),
+                          `Update Harga Master Obat (${m.name})`
+                        ) || 0;
+                    }
+
                     const res = await updateMedicineWithTracking(m).catch((err) => {
                       console.warn('Supabase medicine update error:', err);
                       return { success: false, error: err?.message || String(err) };
@@ -13992,7 +14159,7 @@ export default function App() {
                           .catch((err) => console.warn('Supabase stok awal update mutation sync error:', err));
                       }
                     }
-                    return res;
+                    return { ...res, syncedPendingOrdersCount };
                   }}
                   onDeleteMedicine={(id) => {
                     setMedicines((prev) => prev.filter((m) => m.id !== id));

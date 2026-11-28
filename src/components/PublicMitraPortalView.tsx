@@ -1543,7 +1543,7 @@ export const PublicMitraPortalView: React.FC<PublicMitraPortalViewProps> = ({
     const orderCode = activeRoom === 'REGULER' ? `REG-${ymd}-${entropy}` : `MTR-${ymd}-${entropy}`;
 
     const items: MitraOrderItem[] = cartItems.map((entry) => {
-      const med = entry.medicine;
+      const med = liveCatalogCheck.find((m) => m.id === entry.medicine.id) || entry.medicine;
       const ratio = Math.max(1, Number(med.rasioKonversi) || 1);
       const rxReq = getMedicinePrescriptionRequirement(med);
 

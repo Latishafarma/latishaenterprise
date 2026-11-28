@@ -1,4 +1,4 @@
-import { Medicine, MedicineBatch } from '../types';
+import { Medicine, MedicineBatch, MitraOrder, MitraOrderItem, PortalOrderRoom } from '../types';
 
 export function sortBatchesFEFO(batches: MedicineBatch[]): MedicineBatch[] {
   return [...batches].sort((a, b) => {
@@ -309,5 +309,166 @@ export function getAvailableBoxStock(med: Medicine): number {
   const medRatio = Math.max(1, Number(med.rasioKonversi) || 1);
   const totalKecil = Math.max(0, Number(med.stock) || 0);
   return Math.floor(totalKecil / medRatio);
+}
+
+export function resolveOrderRoomForPricing(
+  order: Pick<MitraOrder, 'orderRoom' | 'orderCode' | 'mitraCategory'>
+): PortalOrderRoom {
+  if (order.orderRoom === 'REGULER' || order.orderRoom === 'MITRA') {
+    return order.orderRoom;
+  }
+  const code = String(order.orderCode || '').toUpperCase();
+  const cat = String(order.mitraCategory || '').toLowerCase();
+  if (code.startsWith('REG-') || code.startsWith('PO-REG-') || cat.includes('reguler')) {
+    return 'REGULER';
+  }
+  return 'MITRA';
+}
+
+export function getOrderItemUnitPriceFromMaster(
+  med: Medicine,
+  unitMode: 'KECIL' | 'BESAR'
+): number {
+  const ratio = Math.max(1, Number(med.rasioKonversi) || 1);
+  if (unitMode === 'KECIL') {
+    const regUnit = Math.round(Number(med.sellPrice) || 0);
+    if (regUnit > 0) return regUnit;
+    return Math.round(getMitraBoxPrice(med) / ratio);
+  }
+  return getMitraBoxPrice(med);
+}
+
+export function getOrderItemHppFromMaster(
+  med: Medicine,
+  unitMode: 'KECIL' | 'BESAR'
+): number {
+  const ratio = Math.max(1, Number(med.rasioKonversi) || 1);
+  if (unitMode === 'KECIL') {
+    return Number(med.hpp) || Math.round(getMedicineHppBox(med) / ratio);
+  }
+  return getMedicineHppBox(med);
+}
+
+export function hasMedicinePricingChanged(
+  prevMed: Medicine | undefined,
+  nextMed: Medicine
+): boolean {
+  if (!prevMed) return true;
+  return (
+    (Number(prevMed.sellPrice) || 0) !== (Number(nextMed.sellPrice) || 0) ||
+    (Number(prevMed.sellPriceMitra) || 0) !== (Number(nextMed.sellPriceMitra) || 0) ||
+    (Number(prevMed.sellPriceKlinik) || 0) !== (Number(nextMed.sellPriceKlinik) || 0) ||
+    (Number(prevMed.hpp) || 0) !== (Number(nextMed.hpp) || 0) ||
+    (Number(prevMed.hnaBesar) || 0) !== (Number(nextMed.hnaBesar) || 0) ||
+    Math.max(1, Number(prevMed.rasioKonversi) || 1) !==
+      Math.max(1, Number(nextMed.rasioKonversi) || 1)
+  );
+}
+
+export function reconcilePendingOrdersWithMedicines(
+  orders: MitraOrder[],
+  medicines: Medicine[],
+  targetMedicineIds?: Set<string>
+): { nextOrders: MitraOrder[]; updatedOrders: MitraOrder[] } {
+  if (!Array.isArray(orders) || orders.length === 0 || !Array.isArray(medicines) || medicines.length === 0) {
+    return { nextOrders: orders || [], updatedOrders: [] };
+  }
+
+  const medById = new Map<string, Medicine>();
+  const medByName = new Map<string, Medicine>();
+  for (const med of medicines) {
+    if (med.id) medById.set(med.id, med);
+    const cleanName = String(med.name || '').trim().toLowerCase();
+    if (cleanName && !medByName.has(cleanName)) medByName.set(cleanName, med);
+  }
+
+  const updatedOrders: MitraOrder[] = [];
+  const nowIso = new Date().toISOString();
+
+  const nextOrders = orders.map((order) => {
+    if (String(order.status || '').trim().toLowerCase() !== 'pending') {
+      return order;
+    }
+    if (!Array.isArray(order.items) || order.items.length === 0) {
+      return order;
+    }
+
+    const resolvedRoom = resolveOrderRoomForPricing(order);
+    let itemsChanged = false;
+
+    const nextItems: MitraOrderItem[] = order.items.map((item) => {
+      const med =
+        (item.medicineId ? medById.get(item.medicineId) : undefined) ||
+        medByName.get(String(item.name || '').trim().toLowerCase());
+      if (!med) return item;
+      if (targetMedicineIds && !targetMedicineIds.has(med.id)) {
+        return item;
+      }
+
+      const unitMode: 'KECIL' | 'BESAR' =
+        item.unitMode || (resolvedRoom === 'REGULER' ? 'KECIL' : 'BESAR');
+      const nextPrice = getOrderItemUnitPriceFromMaster(med, unitMode);
+      const nextHpp = getOrderItemHppFromMaster(med, unitMode);
+      const medRatio = Math.max(1, Number(med.rasioKonversi) || 1);
+      const nextRatio = unitMode === 'KECIL' ? 1 : medRatio;
+      const qty = Number(item.qtyBox) || 0;
+      const nextQtyTotalKecil = qty * nextRatio;
+      const nextSubtotal = qty * nextPrice;
+
+      if (
+        nextPrice !== (Number(item.unitPriceBox) || 0) ||
+        nextHpp !== (Number(item.hppBox) || 0) ||
+        nextSubtotal !== (Number(item.subtotal) || 0) ||
+        nextRatio !== (Number(item.rasioKonversi) || 1) ||
+        nextQtyTotalKecil !== (Number(item.qtyTotalKecil) || 0)
+      ) {
+        itemsChanged = true;
+        return {
+          ...item,
+          unitMode,
+          satuanKecil: med.satuanKecil || med.unit || item.satuanKecil,
+          satuanBesar:
+            unitMode === 'KECIL'
+              ? med.satuanKecil || med.unit || item.satuanKecil
+              : med.satuanBesar || item.satuanBesar || 'Box',
+          rasioKonversi: nextRatio,
+          qtyTotalKecil: nextQtyTotalKecil,
+          unitPriceBox: nextPrice,
+          hppBox: nextHpp,
+          subtotal: nextSubtotal
+        };
+      }
+      return item;
+    });
+
+    if (!itemsChanged) {
+      return order;
+    }
+
+    const nextSubtotalOrder = nextItems.reduce((sum, it) => sum + (Number(it.subtotal) || 0), 0);
+    const pctMatch = String(order.appliedDiscountLabel || '').match(/(\d+(?:[.,]\d+)?)\s*%/);
+    let nextDiscountAmount = 0;
+    if (pctMatch) {
+      const pct = Math.min(100, Math.max(0, parseFloat(pctMatch[1].replace(',', '.')) || 0));
+      nextDiscountAmount = Math.min(nextSubtotalOrder, Math.round((nextSubtotalOrder * pct) / 100));
+    } else if ((Number(order.discountAmount) || 0) > 0) {
+      nextDiscountAmount = Math.min(nextSubtotalOrder, Math.round(Number(order.discountAmount) || 0));
+    }
+    const nextTotalAmount = Math.max(0, nextSubtotalOrder - nextDiscountAmount);
+
+    const updatedOrder: MitraOrder = {
+      ...order,
+      items: nextItems,
+      totalItems: nextItems.length,
+      totalQtyBox: nextItems.reduce((sum, it) => sum + (Number(it.qtyBox) || 0), 0),
+      discountAmount: nextDiscountAmount > 0 ? nextDiscountAmount : undefined,
+      totalAmount: nextTotalAmount,
+      updatedAt: nowIso
+    };
+    updatedOrders.push(updatedOrder);
+    return updatedOrder;
+  });
+
+  return { nextOrders, updatedOrders };
 }
 

@@ -1336,13 +1336,17 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             prev.map((item) => (item.id === payload.id ? payload : item))
           );
         }
+        const pendingSyncNotice =
+          res && typeof res === 'object' && Number((res as any).syncedPendingOrdersCount) > 0
+            ? ` Harga jual pada ${Number((res as any).syncedPendingOrdersCount)} PO berstatus Pending otomatis diperbarui.`
+            : '';
         if (!isDemoSandbox && isMedicineFormColumnMissingInSupabase(medicineTableInput)) {
           showBanner(
             'warning',
-            `Obat "${payload.name}" tersimpan, namun kolom "form" (Bentuk Sediaan) belum ada di tabel Supabase "${medicineTableInput}". Jalankan skrip Skema SQL agar kolom bentuk sediaan ikut tersimpan ke Supabase.`
+            `Obat "${payload.name}" tersimpan, namun kolom "form" (Bentuk Sediaan) belum ada di tabel Supabase "${medicineTableInput}". Jalankan skrip Skema SQL agar kolom bentuk sediaan ikut tersimpan ke Supabase.${pendingSyncNotice}`
           );
         } else {
-          showBanner('success', `Data master obat "${payload.name}" berhasil diperbarui.`);
+          showBanner('success', `Data master obat "${payload.name}" berhasil diperbarui.${pendingSyncNotice}`);
         }
       } else {
         const res = await Promise.resolve(

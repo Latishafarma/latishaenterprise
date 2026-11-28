@@ -27,7 +27,8 @@ import {
 import {
   getAvailableBoxStock,
   getMedicineHppBox,
-  getMitraBoxPrice
+  getMitraBoxPrice,
+  getOrderItemUnitPriceFromMaster
 } from '../utils/batchHelper';
 
 interface ManualCustomerPOModalProps {
@@ -56,13 +57,7 @@ const getDefaultOrderCode = (room: PortalOrderRoom, dateStr?: string) => {
 };
 
 const getRoomDefaultUnitPrice = (med: Medicine, unitMode: 'KECIL' | 'BESAR'): number => {
-  const ratio = Math.max(1, Number(med.rasioKonversi) || 1);
-  if (unitMode === 'KECIL') {
-    const regUnit = Math.round(Number(med.sellPrice) || 0);
-    if (regUnit > 0) return regUnit;
-    return Math.round(getMitraBoxPrice(med) / ratio);
-  }
-  return getMitraBoxPrice(med);
+  return getOrderItemUnitPriceFromMaster(med, unitMode);
 };
 
 export const ManualCustomerPOModal: React.FC<ManualCustomerPOModalProps> = ({
