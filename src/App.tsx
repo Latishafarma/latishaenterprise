@@ -441,6 +441,19 @@ const stripTitles = (name: string): string => {
 
 const normalizeStr = (str: string) => str.toLowerCase().replace(/[^a-z0-9]/g, '');
 
+const parseIsoTimeMs = (iso?: string | null): number => {
+  if (!iso) return 0;
+  const ms = Date.parse(String(iso));
+  return Number.isFinite(ms) ? ms : 0;
+};
+
+const isNewerIsoTimestamp = (candidate?: string | null, baseline?: string | null): boolean => {
+  const a = parseIsoTimeMs(candidate);
+  const b = parseIsoTimeMs(baseline);
+  if (a <= 0 || b <= 0) return false;
+  return a > b;
+};
+
 const verifyStaffCredentials = (inputName: string, inputId: string, list: Staff[]): Staff | null => {
   const cleanId = inputId.trim().toLowerCase();
   const cleanName = inputName.trim();
@@ -1205,7 +1218,8 @@ export default function App() {
     const saved = demoGetItem('latisha_purchase_orders');
     if (!saved) return [];
     try {
-      const list: PurchaseOrder[] = JSON.parse(saved);
+      const parsed = JSON.parse(saved);
+      const list: PurchaseOrder[] = Array.isArray(parsed) ? parsed : [];
       const deletedSet = getDeletedIdsSet('purchase_orders');
       if (isDemoMode()) return list.filter((po) => po?.id && !deletedSet.has(po.id));
       return list.filter((po) => {
@@ -2184,8 +2198,10 @@ export default function App() {
       }
     };
     window.addEventListener('beforeunload', flushPendingStorage);
+    window.addEventListener('pagehide', flushPendingStorage);
     return () => {
       window.removeEventListener('beforeunload', flushPendingStorage);
+      window.removeEventListener('pagehide', flushPendingStorage);
       flushPendingStorage();
     };
   }, []);
@@ -5131,31 +5147,58 @@ export default function App() {
           const remoteVersion = remoteMap.get(po.id);
           if (pendingSyncSet.has(po.id)) return true;
           if (!remoteVersion && (res.isEmpty || !syncedOnceBefore || epochChanged)) return true;
-          if (remoteVersion && po.updatedAt && remoteVersion.updatedAt && po.updatedAt > remoteVersion.updatedAt) {
+          if (remoteVersion && isNewerIsoTimestamp(po.updatedAt, remoteVersion.updatedAt)) {
             return true;
           }
           return false;
         });
 
+        let seedSucceeded = localToUpload.length === 0;
         if (localToUpload.length > 0) {
-          seedPurchaseOrdersToSupabase(localToUpload)
-            .then((seedRes) => {
-              if (seedRes.success) {
-                confirmCloudSync('purchase_orders', localToUpload.map((po) => po.id));
-              }
-            })
-            .catch(() => {});
+          const seedRes = await seedPurchaseOrdersToSupabase(localToUpload).catch((err) => ({
+            success: false,
+            count: 0,
+            needsTableSetup: false,
+            error: err?.message || String(err)
+          }));
+          if (cancelledPurchaseOrderEffect || isDemoMode()) return;
+          if (seedRes.needsTableSetup) {
+            setPurchaseOrdersNeedsTableSetup(true);
+          }
+          if (seedRes.success) {
+            seedSucceeded = true;
+            confirmCloudSync('purchase_orders', localToUpload.map((po) => po.id));
+          }
         }
 
+        // Re-read latest local state & registry flags after async seed in case user created/edited POs meanwhile
+        const latestDeletedSet = getDeletedIdsSet('purchase_orders');
+        const latestPendingSyncSet = getPendingSyncIdsSet('purchase_orders');
+        const latestEpochChanged = purchaseOrdersMutationEpochRef.current !== startPoEpoch;
+        const latestLocalOrders = purchaseOrdersRef.current.filter(
+          (po) => po.id && !isDemoPurchaseOrderId(po.id) && !latestDeletedSet.has(po.id)
+        );
+        const uploadedIdsSet = new Set(localToUpload.map((po) => po.id));
+
         const map = new Map<string, PurchaseOrder>();
-        remoteClean.forEach((po) => map.set(po.id, po));
-        localToUpload.forEach((po) => {
+        remoteClean.forEach((po) => {
+          if (!latestDeletedSet.has(po.id)) {
+            map.set(po.id, po);
+          }
+        });
+        latestLocalOrders.forEach((po) => {
           const remoteVersion = map.get(po.id);
           if (
-            !remoteVersion ||
-            pendingSyncSet.has(po.id) ||
-            epochChanged ||
-            (po.updatedAt && remoteVersion.updatedAt && po.updatedAt > remoteVersion.updatedAt)
+            (!remoteVersion &&
+              (latestPendingSyncSet.has(po.id) ||
+                uploadedIdsSet.has(po.id) ||
+                latestEpochChanged ||
+                res.isEmpty ||
+                !syncedOnceBefore)) ||
+            (remoteVersion &&
+              (latestPendingSyncSet.has(po.id) ||
+                latestEpochChanged ||
+                isNewerIsoTimestamp(po.updatedAt, remoteVersion.updatedAt)))
           ) {
             map.set(po.id, po);
           }
@@ -5165,7 +5208,9 @@ export default function App() {
         );
         setPurchaseOrders(authoritative);
         persistPurchaseOrdersNow(authoritative);
-        markInitialCloudSyncCompleted('purchase_orders');
+        if (seedSucceeded) {
+          markInitialCloudSyncCompleted('purchase_orders');
+        }
       }
 
       if (!res.needsTableSetup && !cancelledPurchaseOrderEffect) {
@@ -5175,11 +5220,10 @@ export default function App() {
             if (getDeletedIdsSet('purchase_orders').has(newPo.id)) return;
             setPurchaseOrders((prev) => {
               const existing = prev.find((p) => p.id === newPo.id);
+              const pendingSync = getPendingSyncIdsSet('purchase_orders').has(newPo.id);
               const mergedPo: PurchaseOrder =
                 existing &&
-                existing.updatedAt &&
-                newPo.updatedAt &&
-                existing.updatedAt > newPo.updatedAt
+                (pendingSync || isNewerIsoTimestamp(existing.updatedAt, newPo.updatedAt))
                   ? existing
                   : newPo;
               const next = existing
@@ -5194,11 +5238,10 @@ export default function App() {
             if (getDeletedIdsSet('purchase_orders').has(updatedPo.id)) return;
             setPurchaseOrders((prev) => {
               const existing = prev.find((p) => p.id === updatedPo.id);
+              const pendingSync = getPendingSyncIdsSet('purchase_orders').has(updatedPo.id);
               const mergedPo: PurchaseOrder =
                 existing &&
-                existing.updatedAt &&
-                updatedPo.updatedAt &&
-                existing.updatedAt > updatedPo.updatedAt
+                (pendingSync || isNewerIsoTimestamp(existing.updatedAt, updatedPo.updatedAt))
                   ? existing
                   : updatedPo;
               const next = existing
@@ -11517,10 +11560,12 @@ export default function App() {
     isDemo?: boolean;
     error?: string;
   }> => {
+    const currentExisting = purchaseOrdersRef.current.find((item) => item.id === po.id);
     const enrichedPo: PurchaseOrder = {
       ...po,
-      branchId: po.branchId || currentBranch?.id || 'BR-01',
-      petugas: po.petugas || userName,
+      branchId: po.branchId || currentExisting?.branchId || currentBranch?.id || 'BR-01',
+      petugas: po.petugas || currentExisting?.petugas || userName,
+      createdAt: po.createdAt || currentExisting?.createdAt || new Date().toISOString(),
       updatedAt: po.updatedAt || new Date().toISOString()
     };
 
@@ -11529,7 +11574,7 @@ export default function App() {
       markIdsPendingSync('purchase_orders', [enrichedPo.id]);
     }
 
-    const isUpdate = purchaseOrdersRef.current.some((item) => item.id === enrichedPo.id);
+    const isUpdate = Boolean(currentExisting);
     const nextList = isUpdate
       ? purchaseOrdersRef.current.map((item) => (item.id === enrichedPo.id ? enrichedPo : item))
       : [enrichedPo, ...purchaseOrdersRef.current];
@@ -11551,7 +11596,11 @@ export default function App() {
     const res = await syncPurchaseOrderToSupabase(enrichedPo);
     setPurchaseOrdersNeedsTableSetup(Boolean(res.needsTableSetup));
     if (res.success) {
-      confirmCloudSync('purchase_orders', [enrichedPo.id]);
+      // Only confirm cloud sync if a newer local edit wasn't made while this save request was in flight
+      const latestInState = purchaseOrdersRef.current.find((item) => item.id === enrichedPo.id);
+      if (!latestInState || !isNewerIsoTimestamp(latestInState.updatedAt, enrichedPo.updatedAt)) {
+        confirmCloudSync('purchase_orders', [enrichedPo.id]);
+      }
     }
     return res;
   };
@@ -11662,7 +11711,7 @@ export default function App() {
     const toUpload = validLocal.filter((po) => {
       const remoteVersion = remoteMap.get(po.id);
       if (pendingSyncSet.has(po.id) || !remoteVersion) return true;
-      if (po.updatedAt && remoteVersion.updatedAt && po.updatedAt > remoteVersion.updatedAt) {
+      if (isNewerIsoTimestamp(po.updatedAt, remoteVersion.updatedAt)) {
         return true;
       }
       return false;
@@ -11671,6 +11720,9 @@ export default function App() {
     let seedError: string | undefined;
     if (toUpload.length > 0) {
       const seedRes = await seedPurchaseOrdersToSupabase(toUpload);
+      if (seedRes.needsTableSetup) {
+        setPurchaseOrdersNeedsTableSetup(true);
+      }
       if (seedRes.success) {
         confirmCloudSync('purchase_orders', toUpload.map((po) => po.id));
       } else if (seedRes.error) {
@@ -11678,15 +11730,27 @@ export default function App() {
       }
     }
 
+    const latestDeletedSet = getDeletedIdsSet('purchase_orders');
+    const latestPendingSyncSet = getPendingSyncIdsSet('purchase_orders');
+    const latestEpochChanged = purchaseOrdersMutationEpochRef.current !== startSyncEpoch;
+    const latestValidLocal = purchaseOrdersRef.current.filter(
+      (po) => po.id && !isDemoPurchaseOrderId(po.id) && !latestDeletedSet.has(po.id)
+    );
+
     const mergedMap = new Map<string, PurchaseOrder>();
-    remoteList.forEach((po) => mergedMap.set(po.id, po));
-    validLocal.forEach((po) => {
+    remoteList.forEach((po) => {
+      if (!latestDeletedSet.has(po.id)) {
+        mergedMap.set(po.id, po);
+      }
+    });
+    latestValidLocal.forEach((po) => {
       const remoteVersion = mergedMap.get(po.id);
       if (
         !remoteVersion ||
-        pendingSyncSet.has(po.id) ||
+        latestPendingSyncSet.has(po.id) ||
         epochChanged ||
-        (po.updatedAt && remoteVersion.updatedAt && po.updatedAt > remoteVersion.updatedAt)
+        latestEpochChanged ||
+        isNewerIsoTimestamp(po.updatedAt, remoteVersion.updatedAt)
       ) {
         mergedMap.set(po.id, po);
       }
@@ -11696,7 +11760,9 @@ export default function App() {
     );
     setPurchaseOrders(merged);
     persistPurchaseOrdersNow(merged);
-    markInitialCloudSyncCompleted('purchase_orders');
+    if (!seedError) {
+      markInitialCloudSyncCompleted('purchase_orders');
+    }
 
     if (!purchaseOrderChannelRef.current) {
       purchaseOrderChannelRef.current = subscribePurchaseOrdersRealtime(
@@ -11705,11 +11771,10 @@ export default function App() {
           if (getDeletedIdsSet('purchase_orders').has(newPo.id)) return;
           setPurchaseOrders((prev) => {
             const existing = prev.find((p) => p.id === newPo.id);
+            const pendingSync = getPendingSyncIdsSet('purchase_orders').has(newPo.id);
             const mergedPo: PurchaseOrder =
               existing &&
-              existing.updatedAt &&
-              newPo.updatedAt &&
-              existing.updatedAt > newPo.updatedAt
+              (pendingSync || isNewerIsoTimestamp(existing.updatedAt, newPo.updatedAt))
                 ? existing
                 : newPo;
             const next = existing
@@ -11724,11 +11789,10 @@ export default function App() {
           if (getDeletedIdsSet('purchase_orders').has(updatedPo.id)) return;
           setPurchaseOrders((prev) => {
             const existing = prev.find((p) => p.id === updatedPo.id);
+            const pendingSync = getPendingSyncIdsSet('purchase_orders').has(updatedPo.id);
             const mergedPo: PurchaseOrder =
               existing &&
-              existing.updatedAt &&
-              updatedPo.updatedAt &&
-              existing.updatedAt > updatedPo.updatedAt
+              (pendingSync || isNewerIsoTimestamp(existing.updatedAt, updatedPo.updatedAt))
                 ? existing
                 : updatedPo;
             const next = existing
@@ -11755,6 +11819,158 @@ export default function App() {
     }
     return { success: true, count: merged.length };
   };
+
+  const handleSyncPurchaseInvoicesSupabase = async (): Promise<{
+    success: boolean;
+    count?: number;
+    needsTableSetup?: boolean;
+    isDemo?: boolean;
+    error?: string;
+  }> => {
+    if (isDemoActive || isDemoMode()) {
+      return { success: false, isDemo: true };
+    }
+    const pendingDeleteInvIds = getPendingDeleteIds('purchase_invoices');
+    if (pendingDeleteInvIds.length > 0) {
+      for (const delId of pendingDeleteInvIds) {
+        const delRes = await deletePurchaseInvoiceFromSupabase(delId).catch(() => ({ success: false }));
+        if (delRes.success) confirmCloudDeletes('purchase_invoices', [delId]);
+      }
+    }
+    const startInvEpoch = purchaseInvoicesMutationEpochRef.current;
+    const res = await fetchPurchaseInvoicesFromSupabase({ forceRefresh: true });
+    if (res.needsTableSetup) return { success: false, needsTableSetup: true, error: res.error };
+    if (res.error && (!res.data || res.data.length === 0)) {
+      return { success: false, error: res.error };
+    }
+    const deletedSet = getDeletedIdsSet('purchase_invoices');
+    const pendingSyncSet = getPendingSyncIdsSet('purchase_invoices');
+    const epochChanged = purchaseInvoicesMutationEpochRef.current !== startInvEpoch;
+    const remoteClean = (res.data || []).filter(
+      (inv) => inv.id && !isDemoPurchaseInvoiceId(inv.id) && !deletedSet.has(inv.id)
+    );
+    const remoteIds = new Set(remoteClean.map((inv) => inv.id));
+    const localValid = purchaseInvoicesRef.current.filter(
+      (inv) => inv.id && !isDemoPurchaseInvoiceId(inv.id) && !deletedSet.has(inv.id)
+    );
+    const localToUpload = localValid.filter(
+      (inv) => pendingSyncSet.has(inv.id) || (epochChanged && !remoteIds.has(inv.id))
+    );
+    if (localToUpload.length > 0) {
+      const seedRes = await seedPurchaseInvoicesToSupabase(localToUpload);
+      if (seedRes.success) {
+        confirmCloudSync('purchase_invoices', localToUpload.map((inv) => inv.id));
+      }
+    }
+    const map = new Map<string, PurchaseInvoice>();
+    remoteClean.forEach((inv) => map.set(inv.id, inv));
+    localToUpload.forEach((inv) => {
+      if (!map.has(inv.id) || pendingSyncSet.has(inv.id) || epochChanged) map.set(inv.id, inv);
+    });
+    const authoritative = Array.from(map.values()).sort((a, b) =>
+      (b.date || '').localeCompare(a.date || '')
+    );
+    setPurchaseInvoices(authoritative);
+    persistPurchaseInvoicesNow(authoritative);
+    return { success: true, count: authoritative.length };
+  };
+
+  const handleSyncDefectaAllSupabase = async (options?: {
+    includeMaster?: boolean;
+  }): Promise<{
+    success: boolean;
+    count?: number;
+    needsTableSetup?: boolean;
+    isDemo?: boolean;
+    error?: string;
+    syncedSummary?: string;
+  }> => {
+    if (isDemoActive || isDemoMode()) {
+      return {
+        success: false,
+        isDemo: true,
+        error: 'Mode Demo / Sandbox aktif. Sinkronisasi Supabase produksi dinonaktifkan untuk isolasi data demo.'
+      };
+    }
+
+    const includeMaster = options?.includeMaster !== false;
+    const [poRes, trxRes, mutRes, medRes, supRes, invRes] = await Promise.all([
+      handleSyncPurchaseOrdersSupabase(),
+      handleSyncTransactionsSupabase().catch((err) => ({
+        success: false,
+        count: undefined as number | undefined,
+        error: err?.message || String(err)
+      })),
+      handleSyncStockMutationsSupabase().catch((err) => ({
+        success: false,
+        count: undefined as number | undefined,
+        error: err?.message || String(err)
+      })),
+      includeMaster
+        ? handleSyncMedicinesSupabase().catch((err) => ({
+            success: false,
+            count: undefined as number | undefined,
+            error: err?.message || String(err)
+          }))
+        : Promise.resolve({ success: true, count: medicinesRef.current.length, error: undefined as string | undefined }),
+      includeMaster
+        ? handleSyncSuppliersSupabase().catch((err) => ({
+            success: false,
+            count: undefined as number | undefined,
+            error: err?.message || String(err)
+          }))
+        : Promise.resolve({ success: true, count: suppliersRef.current.length, error: undefined as string | undefined }),
+      includeMaster
+        ? handleSyncPurchaseInvoicesSupabase().catch((err) => ({
+            success: false,
+            count: undefined as number | undefined,
+            error: err?.message || String(err)
+          }))
+        : Promise.resolve({ success: true, count: purchaseInvoicesRef.current.length, error: undefined as string | undefined })
+    ]);
+
+    if (poRes.needsTableSetup) {
+      return poRes;
+    }
+
+    const errors = [poRes.error, trxRes.error, mutRes.error, medRes.error, supRes.error, invRes.error].filter(
+      (e): e is string => typeof e === 'string' && e.length > 0
+    );
+    if (!poRes.success) {
+      return {
+        success: false,
+        count: poRes.count,
+        error: errors[0] || 'Gagal menyinkronkan data Defecta & Surat Pesanan dengan Supabase.'
+      };
+    }
+
+    const medTotal = medRes.count ?? medicinesRef.current.length;
+    const mutTotal = mutRes.count ?? stockMutationsRef.current.length;
+    const trxTotal = trxRes.count ?? transactionsRef.current.length;
+    const poTotal = poRes.count ?? purchaseOrdersRef.current.length;
+    return {
+      success: true,
+      count: poTotal,
+      syncedSummary: `Sinkronisasi 2-arah berhasil! Formula Order (${medTotal} obat, ${trxTotal} penjualan, ${mutTotal} kartu stok) & ${poTotal} pesanan pembelian tersinkron dengan Supabase.`
+    };
+  };
+
+  const syncPurchaseOrdersFnRef = React.useRef(handleSyncPurchaseOrdersSupabase);
+  syncPurchaseOrdersFnRef.current = handleSyncPurchaseOrdersSupabase;
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || isDemoActive) return;
+    const retryIfPending = () => {
+      if (isDemoMode()) return;
+      const hasPendingSync = getPendingSyncIdsSet('purchase_orders').size > 0;
+      const hasPendingDelete = getPendingDeleteIds('purchase_orders').length > 0;
+      if (hasPendingSync || hasPendingDelete) {
+        void syncPurchaseOrdersFnRef.current();
+      }
+    };
+    window.addEventListener('online', retryIfPending);
+    return () => window.removeEventListener('online', retryIfPending);
+  }, [isDemoActive]);
 
   // ================================================================
   // STRATEGI MARKETING — TWO-WAY SUPABASE SYNC HANDLERS
@@ -14366,12 +14582,15 @@ export default function App() {
                   medicines={medicines}
                   suppliers={suppliers}
                   purchaseOrders={purchaseOrders}
+                  transactions={transactions}
+                  stockMutations={stockMutations}
+                  purchaseInvoices={purchaseInvoices}
                   currentBranch={currentBranch}
                   userName={userName}
                   activeRole={activeRole}
                   onSavePurchaseOrder={handleSavePurchaseOrder}
                   onDeletePurchaseOrder={handleDeletePurchaseOrder}
-                  onSyncSupabase={handleSyncPurchaseOrdersSupabase}
+                  onSyncSupabase={handleSyncDefectaAllSupabase}
                   needsTableSetup={purchaseOrdersNeedsTableSetup}
                   isDemoSandbox={isDemoActive}
                 />

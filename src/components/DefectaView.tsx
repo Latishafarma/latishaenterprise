@@ -41,6 +41,9 @@ import {
   PurchaseOrderItem,
   SPGroupType,
   SPPrintLogEntry,
+  Transaction,
+  StockMutation,
+  PurchaseInvoice,
   isOwnerAdminRole
 } from '../types';
 import { openPrintWindow } from '../utils/printHelper';
@@ -56,7 +59,6 @@ import { playBarcodeBeep } from '../utils/barcodeBeep';
 const CameraBarcodeScannerModal = lazy(() =>
   import('./CameraBarcodeScannerModal').then((m) => ({ default: m.CameraBarcodeScannerModal }))
 );
-import { INITIAL_SUPPLIERS } from '../data/initialData';
 import { demoGetItem, demoSetItem } from '../utils/demoSandbox';
 import {
   SUPABASE_PURCHASE_ORDER_SQL_SCHEMA,
@@ -69,6 +71,9 @@ interface DefectaViewProps {
   medicines: Medicine[];
   suppliers?: Supplier[];
   purchaseOrders?: PurchaseOrder[];
+  transactions?: Transaction[];
+  stockMutations?: StockMutation[];
+  purchaseInvoices?: PurchaseInvoice[];
   currentBranch?: Branch;
   userName?: string;
   activeRole?: string;
@@ -87,12 +92,13 @@ interface DefectaViewProps {
     isDemo?: boolean;
     error?: string;
   }>;
-  onSyncSupabase?: () => Promise<{
+  onSyncSupabase?: (options?: { includeMaster?: boolean }) => Promise<{
     success: boolean;
     count?: number;
     needsTableSetup?: boolean;
     isDemo?: boolean;
     error?: string;
+    syncedSummary?: string;
   }>;
   needsTableSetup?: boolean;
   isDemoSandbox?: boolean;
@@ -232,10 +238,60 @@ const formatTimestampShort = (iso?: string): string => {
   }
 };
 
+const UNASSIGNED_SUPPLIER_FILTER = '__BELUM_DITENTUKAN__';
+
+const normalizeEntityKey = (val?: string | null): string =>
+  String(val || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+
+const isMeaningfulSupplierName = (name?: string | null): boolean => {
+  const clean = String(name || '').trim();
+  if (!clean) return false;
+  const upper = clean.toUpperCase();
+  return upper !== 'DEFAULT' && upper !== '-' && upper !== 'BELUM DITENTUKAN';
+};
+
+const parseRecordDateMs = (raw?: string | null): number => {
+  if (!raw) return NaN;
+  const s = String(raw).trim();
+  if (!s) return NaN;
+  const ymdMatch = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (ymdMatch) {
+    const dt = new Date(
+      Number(ymdMatch[1]),
+      Number(ymdMatch[2]) - 1,
+      Number(ymdMatch[3]),
+      12,
+      0,
+      0
+    );
+    return dt.getTime();
+  }
+  const dmyMatch = s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
+  if (dmyMatch) {
+    const dt = new Date(
+      Number(dmyMatch[3]),
+      Number(dmyMatch[2]) - 1,
+      Number(dmyMatch[1]),
+      12,
+      0,
+      0
+    );
+    return dt.getTime();
+  }
+  const parsed = Date.parse(s);
+  return Number.isFinite(parsed) ? parsed : NaN;
+};
+
 export const DefectaView: React.FC<DefectaViewProps> = ({
   medicines,
-  suppliers = INITIAL_SUPPLIERS,
+  suppliers = [],
   purchaseOrders: propPurchaseOrders,
+  transactions = [],
+  stockMutations = [],
+  purchaseInvoices = [],
   currentBranch,
   userName = 'Petugas Apotek',
   activeRole = 'APJ / Owner',
@@ -249,6 +305,9 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
 
   const [activeTab, setActiveTab] = useState<'defecta' | 'orders' | 'sp-history'>('defecta');
   const [selectedPeriod, setSelectedPeriod] = useState<'1bulan' | '3bulan' | '6bulan' | '1tahun'>('1bulan');
+  const [defectaFilterMode, setDefectaFilterMode] = useState<
+    'factual-usage' | 'active-low-stock' | 'all-low-stock'
+  >('factual-usage');
   const [selectedSupplierFilter, setSelectedSupplierFilter] = useState<string>('SEMUA');
   const [searchTerm, setSearchTerm] = useState('');
   const [checkedMedicineIds, setCheckedMedicineIds] = useState<Set<string>>(new Set());
@@ -275,6 +334,14 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
   }, [propPurchaseOrders, localPurchaseOrders]);
 
   const purchaseOrders = propPurchaseOrders !== undefined ? propPurchaseOrders : localPurchaseOrders;
+
+  const hasAutoSyncedMountRef = useRef(false);
+  useEffect(() => {
+    if (hasAutoSyncedMountRef.current) return;
+    if (isDemoSandbox || !onSyncSupabase) return;
+    hasAutoSyncedMountRef.current = true;
+    void onSyncSupabase({ includeMaster: false }).catch(() => {});
+  }, [isDemoSandbox, onSyncSupabase]);
 
   // Supabase Sync, Schema Modal & Toast States
   const [isSyncing, setIsSyncing] = useState(false);
@@ -367,7 +434,7 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
     setIsSyncing(true);
     setSyncToast(null);
     try {
-      const res = await onSyncSupabase();
+      const res = await onSyncSupabase({ includeMaster: true });
       if (res.isDemo) {
         setSyncToast({
           type: 'warning',
@@ -382,12 +449,14 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
       } else if (!res.success) {
         setSyncToast({
           type: 'error',
-          message: res.error || 'Gagal menyinkronkan data Surat Pesanan dengan Supabase.'
+          message: res.error || 'Gagal menyinkronkan data Formula Order & Surat Pesanan dengan Supabase.'
         });
       } else {
         setSyncToast({
           type: 'success',
-          message: `Sinkronisasi 2-arah berhasil! ${res.count ?? purchaseOrders.length} pesanan pembelian & riwayat SP tersinkron dengan Supabase.`
+          message:
+            res.syncedSummary ||
+            `Sinkronisasi 2-arah berhasil! Data Formula Order & ${res.count ?? purchaseOrders.length} pesanan pembelian tersinkron dengan Supabase.`
         });
       }
     } finally {
@@ -492,32 +561,161 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
     );
   }, [suppliers, supplierSearch]);
 
-  // Defecta items calculation
-  const defectaList = useMemo(() => {
-    const periodMonths =
-      selectedPeriod === '1bulan' ? 1 : selectedPeriod === '3bulan' ? 3 : selectedPeriod === '6bulan' ? 6 : 12;
+  // Factual usage aggregation from Supabase-synced transactions & stock mutations (deduplicated by refNo + medicineId)
+  const factualUsageMap = useMemo(() => {
+    const periodDays =
+      selectedPeriod === '1bulan' ? 30 : selectedPeriod === '3bulan' ? 90 : selectedPeriod === '6bulan' ? 180 : 365;
+    const now = new Date();
+    const cutoffMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() - periodDays * 86400000;
 
+    const byId = new Map<string, number>();
+    const byName = new Map<string, number>();
+    const countedRefMedPairs = new Set<string>();
+    const countedRefNamePairs = new Set<string>();
+
+    const addUsage = (medId?: string, medName?: string, qty?: number, refNo?: string) => {
+      const cleanQty = Math.max(0, Number(qty) || 0);
+      if (cleanQty <= 0) return;
+      const cleanId = String(medId || '').trim();
+      const normName = normalizeEntityKey(medName);
+      const cleanRef = String(refNo || '').trim();
+      if (cleanId) {
+        byId.set(cleanId, (byId.get(cleanId) || 0) + cleanQty);
+        if (cleanRef) countedRefMedPairs.add(`${cleanRef}::${cleanId}`);
+      }
+      if (normName) {
+        byName.set(normName, (byName.get(normName) || 0) + cleanQty);
+        if (cleanRef) countedRefNamePairs.add(`${cleanRef}::${normName}`);
+      }
+    };
+
+    // 1. Outgoing factual sales from transaksi_penjualan
+    (transactions || []).forEach((trx) => {
+      if (!trx || trx.status === 'Dibatalkan' || trx.status === 'Diretur') return;
+      const dtMs = parseRecordDateMs(trx.date);
+      if (!Number.isFinite(dtMs) || dtMs < cutoffMs) return;
+
+      const items = Array.isArray(trx.items) ? trx.items : [];
+      items.forEach((it) => {
+        if (!it) return;
+        const itemId = String(it.id || '').trim();
+        if (itemId.startsWith('JASA-')) return;
+        if (itemId.startsWith('LAB-FEE-')) {
+          const consumed = Array.isArray(it.labConsumedProducts) ? it.labConsumedProducts : [];
+          consumed.forEach((lp) => {
+            const totalLabQty = (Number(lp.qty) || 0) * Math.max(1, Number(it.qty) || 1);
+            addUsage(lp.medicineId, lp.medicineName, totalLabQty, trx.id);
+          });
+          return;
+        }
+        addUsage(itemId, it.name, it.qty, trx.id);
+      });
+    });
+
+    // 2. Outgoing factual consumption from kartu_stok (PENJUALAN & RESEP_DOKTER), skipping pairs already counted above
+    (stockMutations || []).forEach((mut) => {
+      if (!mut) return;
+      if (mut.type !== 'PENJUALAN' && mut.type !== 'RESEP_DOKTER') return;
+      const outQty = Math.max(0, Number(mut.outQty) || 0);
+      if (outQty <= 0) return;
+      const dtMs = parseRecordDateMs(mut.date);
+      if (!Number.isFinite(dtMs) || dtMs < cutoffMs) return;
+
+      const cleanRef = String(mut.refNo || '').trim();
+      const cleanId = String(mut.medicineId || '').trim();
+      const normName = normalizeEntityKey(mut.medicineName);
+      if (cleanRef && cleanId && countedRefMedPairs.has(`${cleanRef}::${cleanId}`)) return;
+      if (cleanRef && !cleanId && normName && countedRefNamePairs.has(`${cleanRef}::${normName}`)) return;
+
+      addUsage(cleanId, mut.medicineName, outQty, cleanRef);
+    });
+
+    return { byId, byName };
+  }, [transactions, stockMutations, selectedPeriod]);
+
+  // Factual supplier lookup from recent Purchase Invoices (faktur_pembelian) & Purchase Orders (surat_pesanan)
+  const factualSupplierLookup = useMemo(() => {
+    const byId = new Map<string, string>();
+    const byName = new Map<string, string>();
+
+    const sortedInvoices = [...(purchaseInvoices || [])].sort((a, b) =>
+      String(b.date || '').localeCompare(String(a.date || ''))
+    );
+    sortedInvoices.forEach((inv) => {
+      if (!isMeaningfulSupplierName(inv?.pbfName)) return;
+      const cleanPbf = String(inv.pbfName).trim();
+      (Array.isArray(inv.items) ? inv.items : []).forEach((it) => {
+        const cleanId = String(it?.medicineId || '').trim();
+        const normName = normalizeEntityKey(it?.name);
+        if (cleanId && !byId.has(cleanId)) byId.set(cleanId, cleanPbf);
+        if (normName && !byName.has(normName)) byName.set(normName, cleanPbf);
+      });
+    });
+
+    const sortedPOs = [...(purchaseOrders || [])].sort((a, b) =>
+      String(b.date || '').localeCompare(String(a.date || ''))
+    );
+    sortedPOs.forEach((po) => {
+      if (!isMeaningfulSupplierName(po?.supplierName)) return;
+      const cleanSup = String(po.supplierName).trim();
+      (Array.isArray(po.items) ? po.items : []).forEach((it) => {
+        const cleanId = String(it?.medicineId || '').trim();
+        const normName = normalizeEntityKey(it?.name);
+        if (cleanId && !byId.has(cleanId)) byId.set(cleanId, cleanSup);
+        if (normName && !byName.has(normName)) byName.set(normName, cleanSup);
+      });
+    });
+
+    return { byId, byName };
+  }, [purchaseInvoices, purchaseOrders]);
+
+  // Factual Formula Order / Defecta calculation (zero hardcoded/synthetic defaults)
+  const defectaList = useMemo(() => {
     return medicines.map((m) => {
-      const isDefecta = m.stock <= m.minStock;
+      const stock = Math.max(0, Number(m.stock) || 0);
+      const minStock = Math.max(0, Number(m.minStock) || 0);
       const spType = detectSPGroup(m);
 
-      const monthlyUsage = Math.max(10, Math.round(m.minStock * 1.5));
-      const pemakaianPeriode = monthlyUsage * periodMonths;
-      const buffer10 = Math.round(pemakaianPeriode * 0.1);
+      const normName = normalizeEntityKey(m.name);
+      const pemakaianPeriode =
+        factualUsageMap.byId.get(m.id) ??
+        (normName ? factualUsageMap.byName.get(normName) : undefined) ??
+        0;
+      const buffer10 = pemakaianPeriode > 0 ? Math.round(pemakaianPeriode * 0.1) : 0;
 
-      const netKecil = pemakaianPeriode + buffer10 - m.stock;
-      const rekomendasiKecil = Math.max(0, netKecil);
-      const ratio = Math.max(1, m.rasioKonversi || 1);
-      const rekomendasiBesar = Math.max(1, Math.ceil(rekomendasiKecil / ratio));
+      const netKecil = Math.max(0, pemakaianPeriode + buffer10 - stock);
+      const rekomendasiKecil = netKecil;
+      const ratio = Math.max(1, Number(m.rasioKonversi) || 1);
+      const rekomendasiBesar = rekomendasiKecil > 0 ? Math.ceil(rekomendasiKecil / ratio) : 0;
 
-      const hna = m.hnaBesar || (m.hpp ? Math.round(m.hpp * ratio * 0.9) : 40000);
+      const hna =
+        Number(m.hnaBesar) > 0
+          ? Number(m.hnaBesar)
+          : Number(m.hpp) > 0
+          ? Math.round((Number(m.hpp) * ratio) / 1.11)
+          : 0;
       const totalEstimasi = rekomendasiBesar * hna;
+
+      const resolvedSupplier = isMeaningfulSupplierName(m.supplier)
+        ? String(m.supplier).trim()
+        : factualSupplierLookup.byId.get(m.id) ||
+          (normName ? factualSupplierLookup.byName.get(normName) : undefined) ||
+          '';
+
+      const isFormulaOrderNeeded = pemakaianPeriode > 0 && rekomendasiKecil > 0;
+      const isActiveLowStock = stock > 0 && minStock > 0 && stock <= minStock;
+      const isAnyLowStock = minStock > 0 && stock <= minStock;
 
       return {
         ...m,
-        isDefecta,
+        stock,
+        minStock,
+        rasioKonversi: ratio,
+        isFormulaOrderNeeded,
+        isActiveLowStock,
+        isAnyLowStock,
+        resolvedSupplier,
         spType,
-        monthlyUsage,
         pemakaianPeriode,
         buffer10,
         rekomendasiKecil,
@@ -526,21 +724,42 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
         totalEstimasi
       };
     });
-  }, [medicines, selectedPeriod]);
+  }, [medicines, factualUsageMap, factualSupplierLookup]);
 
-  // Distinct suppliers in defecta list
+  // Mode-matched factual defecta items (sorted by actual usage & reorder need first)
+  const modeMatchedDefecta = useMemo(() => {
+    const matched = defectaList.filter((item) => {
+      if (defectaFilterMode === 'factual-usage') return item.isFormulaOrderNeeded;
+      if (defectaFilterMode === 'active-low-stock') {
+        return item.isFormulaOrderNeeded || item.isActiveLowStock;
+      }
+      return item.isFormulaOrderNeeded || item.isAnyLowStock;
+    });
+    return matched.sort((a, b) => {
+      if (b.pemakaianPeriode !== a.pemakaianPeriode) return b.pemakaianPeriode - a.pemakaianPeriode;
+      if (b.rekomendasiKecil !== a.rekomendasiKecil) return b.rekomendasiKecil - a.rekomendasiKecil;
+      if (a.stock !== b.stock) return a.stock - b.stock;
+      return a.name.localeCompare(b.name);
+    });
+  }, [defectaList, defectaFilterMode]);
+
+  // Distinct factual suppliers present in current Formula Order view
   const defectaSuppliers = useMemo(() => {
-    const setSup = new Set(
-      defectaList.filter((m) => m.isDefecta).map((m) => m.supplier || 'PT Kimia Farma Trading')
-    );
-    return Array.from(setSup);
-  }, [defectaList]);
+    const setSup = new Set<string>();
+    let hasUnassigned = false;
+    modeMatchedDefecta.forEach((m) => {
+      if (m.resolvedSupplier) setSup.add(m.resolvedSupplier);
+      else hasUnassigned = true;
+    });
+    return {
+      names: Array.from(setSup).sort((a, b) => a.localeCompare(b)),
+      hasUnassigned
+    };
+  }, [modeMatchedDefecta]);
 
   // Filtered Defecta view
   const filteredDefecta = useMemo(() => {
-    return defectaList.filter((item) => {
-      if (!item.isDefecta) return false;
-
+    return modeMatchedDefecta.filter((item) => {
       const q = searchTerm.toLowerCase();
       const matchSearch =
         !q ||
@@ -548,21 +767,38 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
         (item.barcode && item.barcode.toLowerCase().includes(q)) ||
         item.id.toLowerCase().includes(q) ||
         item.category.toLowerCase().includes(q) ||
-        (item.nappza && item.nappza.toLowerCase().includes(q));
+        (item.nappza && item.nappza.toLowerCase().includes(q)) ||
+        (item.resolvedSupplier && item.resolvedSupplier.toLowerCase().includes(q));
 
       const matchSup =
-        selectedSupplierFilter === 'SEMUA' || (item.supplier || 'PT Kimia Farma Trading') === selectedSupplierFilter;
+        selectedSupplierFilter === 'SEMUA'
+          ? true
+          : selectedSupplierFilter === UNASSIGNED_SUPPLIER_FILTER
+          ? !item.resolvedSupplier
+          : item.resolvedSupplier === selectedSupplierFilter;
 
       return matchSearch && matchSup;
     });
-  }, [defectaList, searchTerm, selectedSupplierFilter]);
+  }, [modeMatchedDefecta, searchTerm, selectedSupplierFilter]);
 
   const [defectaPage, setDefectaPage] = useState(1);
   const [defectaPageSize, setDefectaPageSize] = useState<number>(25);
 
   useEffect(() => {
     setDefectaPage(1);
-  }, [searchTerm, selectedSupplierFilter, selectedPeriod]);
+  }, [searchTerm, selectedSupplierFilter, selectedPeriod, defectaFilterMode]);
+
+  useEffect(() => {
+    setCheckedMedicineIds((prev) => {
+      if (prev.size === 0) return prev;
+      const validIds = new Set(filteredDefecta.map((it) => it.id));
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (validIds.has(id)) next.add(id);
+      });
+      return next.size === prev.size ? prev : next;
+    });
+  }, [filteredDefecta]);
 
   const defectaTotalPages = Math.max(1, Math.ceil(filteredDefecta.length / defectaPageSize));
   const safeDefectaPage = Math.min(defectaPage, defectaTotalPages);
@@ -612,7 +848,10 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
     const groupOrder: SPGroupType[] = ['NAR', 'PSI', 'PRE', 'OOT', 'ALK', 'REG'];
 
     sortedPurchaseOrders.forEach((po) => {
-      const items = Array.isArray(po.items) ? po.items : [];
+      const items = (Array.isArray(po.items) ? po.items : []).map((it) => ({
+        ...it,
+        spType: (it.spType || detectSPGroup({ category: it.category, nappza: it.nappza }) || 'REG') as SPGroupType
+      }));
       const distinctTypes = Array.from(new Set(items.map((it) => it.spType))).sort(
         (a, b) => groupOrder.indexOf(a) - groupOrder.indexOf(b)
       );
@@ -751,34 +990,48 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
 
     if (singleItem) {
       itemsToOrder = [singleItem];
-      detectedSupplierName = singleItem.supplier || '';
+      detectedSupplierName = singleItem.resolvedSupplier || (isMeaningfulSupplierName(singleItem.supplier) ? singleItem.supplier : '');
       matchedSup = suppliers.find((s) => s.name.toLowerCase() === detectedSupplierName.toLowerCase());
     } else if (checkedMedicineIds.size > 0) {
       itemsToOrder = defectaList.filter((m) => checkedMedicineIds.has(m.id));
-      detectedSupplierName = itemsToOrder[0]?.supplier || '';
+      detectedSupplierName =
+        itemsToOrder[0]?.resolvedSupplier ||
+        (isMeaningfulSupplierName(itemsToOrder[0]?.supplier) ? itemsToOrder[0]?.supplier : '');
       matchedSup = suppliers.find((s) => s.name.toLowerCase() === detectedSupplierName.toLowerCase());
     }
 
-    const orderItems: PurchaseOrderItem[] = itemsToOrder.map((m, idx) => ({
-      id: `ITEM-${Date.now()}-${idx}`,
-      medicineId: m.id,
-      name: m.name,
-      category: m.category,
-      nappza: m.nappza || 'Non-NAPPZA',
-      spType: detectSPGroup(m),
-      form: resolveMedicineForm(m.id, m.name, m.form),
-      kekuatan: m.kekuatan || '',
-      satuanBesar: m.satuanBesar || 'Box',
-      satuanKecil: m.satuanKecil || m.unit || 'Strip',
-      rasioKonversi: m.rasioKonversi || 10,
-      currentStock: m.stock,
-      minStock: m.minStock,
-      qtyBesar: m.rekomendasiBesar || 1,
-      qtyKecil: (m.rekomendasiBesar || 1) * (m.rasioKonversi || 10),
-      estimatedHna: m.hnaBesar || m.hnaBesarEstimate || 50000,
-      subtotal: (m.rekomendasiBesar || 1) * (m.hnaBesar || m.hnaBesarEstimate || 50000),
-      ket: ''
-    }));
+    const orderItems: PurchaseOrderItem[] = itemsToOrder.map((m, idx) => {
+      const ratio = Math.max(1, Number(m.rasioKonversi) || 1);
+      const qtyBesar = Math.max(1, Number(m.rekomendasiBesar) || 1);
+      const estHna =
+        Number(m.hnaBesar) > 0
+          ? Number(m.hnaBesar)
+          : Number(m.hnaBesarEstimate) > 0
+          ? Number(m.hnaBesarEstimate)
+          : Number(m.hpp) > 0
+          ? Math.round((Number(m.hpp) * ratio) / 1.11)
+          : 0;
+      return {
+        id: `ITEM-${Date.now()}-${idx}`,
+        medicineId: m.id,
+        name: m.name,
+        category: m.category,
+        nappza: m.nappza || 'Non-NAPPZA',
+        spType: detectSPGroup(m),
+        form: resolveMedicineForm(m.id, m.name, m.form),
+        kekuatan: m.kekuatan || '',
+        satuanBesar: m.satuanBesar || 'Box',
+        satuanKecil: m.satuanKecil || m.unit || 'Strip',
+        rasioKonversi: ratio,
+        currentStock: m.stock,
+        minStock: m.minStock,
+        qtyBesar,
+        qtyKecil: qtyBesar * ratio,
+        estimatedHna: estHna,
+        subtotal: qtyBesar * estHna,
+        ket: ''
+      };
+    });
 
     setOrderForm({
       date: new Date().toISOString().split('T')[0],
@@ -834,11 +1087,13 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
       if (isPartialSp && spType && spType !== 'ALL') {
         const remainingItems = po.items.filter((it) => it.spType !== spType);
         if (remainingItems.length === 0) {
-          await removePurchaseOrder(po.id);
-          setSyncToast({
-            type: 'success',
-            message: `Pesanan Pembelian #${po.poNumber} beserta Surat Pesanan berhasil dihapus.`
-          });
+          const ok = await removePurchaseOrder(po.id);
+          if (ok) {
+            setSyncToast({
+              type: 'success',
+              message: `Pesanan Pembelian #${po.poNumber} beserta Surat Pesanan berhasil dihapus.`
+            });
+          }
         } else {
           const nextLogs = { ...(po.spPrintLogs || {}) };
           delete nextLogs[spType];
@@ -849,18 +1104,22 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
             spPrintLogs: nextLogs,
             updatedAt: new Date().toISOString()
           };
-          await persistPurchaseOrder(updatedPo);
-          setSyncToast({
-            type: 'success',
-            message: `Surat Pesanan kelompok ${spType} dari PO #${po.poNumber} berhasil dihapus dan disinkronkan.`
-          });
+          const ok = await persistPurchaseOrder(updatedPo);
+          if (ok) {
+            setSyncToast({
+              type: 'success',
+              message: `Surat Pesanan kelompok ${spType} dari PO #${po.poNumber} berhasil dihapus dan disinkronkan.`
+            });
+          }
         }
       } else {
-        await removePurchaseOrder(po.id);
-        setSyncToast({
-          type: 'success',
-          message: `Pesanan Pembelian #${po.poNumber} dan seluruh SP terkait berhasil dihapus.`
-        });
+        const ok = await removePurchaseOrder(po.id);
+        if (ok) {
+          setSyncToast({
+            type: 'success',
+            message: `Pesanan Pembelian #${po.poNumber} dan seluruh SP terkait berhasil dihapus.`
+          });
+        }
       }
       setConfirmDeleteTarget(null);
     } finally {
@@ -876,11 +1135,13 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
       status: nextStatus,
       updatedAt: new Date().toISOString()
     };
-    await persistPurchaseOrder(updatedPo);
-    setSyncToast({
-      type: 'success',
-      message: `Status PO #${po.poNumber} diperbarui ke "${nextStatus}".`
-    });
+    const ok = await persistPurchaseOrder(updatedPo);
+    if (ok) {
+      setSyncToast({
+        type: 'success',
+        message: `Status PO #${po.poNumber} diperbarui ke "${nextStatus}".`
+      });
+    }
   };
 
   // Buka Modal Pratinjau PDF Pesanan Pembelian sebelum mengirim ke PBF via WhatsApp
@@ -1019,13 +1280,21 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
       const yyyyMm = `${validOrderDate.getFullYear()}${String(validOrderDate.getMonth() + 1).padStart(2, '0')}`;
 
       const maxSeq = purchaseOrders.reduce((max, existingPo) => {
-        const m = existingPo.poNumber?.match(/(\d{3,})$/);
-        const num = m ? parseInt(m[1], 10) : 0;
+        const poNumMatch = existingPo.poNumber?.match(/(\d{3,})(?:-[A-Za-z0-9-]+)?$/);
+        const poIdMatch = existingPo.id?.match(/-(\d{3,})(?:-[A-Za-z0-9-]+)*$/);
+        const num = Math.max(
+          poNumMatch ? parseInt(poNumMatch[1], 10) : 0,
+          poIdMatch ? parseInt(poIdMatch[1], 10) : 0
+        );
         return Math.max(max, isNaN(num) ? 0 : num);
       }, 0);
 
+      const existingEditingPo = editingOrderId
+        ? purchaseOrders.find((p) => p.id === editingOrderId)
+        : undefined;
+      const existingSeqMatch = existingEditingPo?.poNumber?.match(/(\d{3,})(?:-[A-Za-z0-9-]+)?$/);
       const orderIndex = editingOrderId
-        ? parseInt(editingOrderId.replace(/\D/g, '').slice(-3), 10) || maxSeq + 1
+        ? (existingSeqMatch ? parseInt(existingSeqMatch[1], 10) : NaN) || maxSeq + 1
         : maxSeq + 1;
 
       const spNumbers: Record<SPGroupType, string> = {
@@ -1038,10 +1307,11 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
       };
 
       const totalCost = orderForm.items.reduce((sum, it) => sum + it.subtotal, 0);
+      const nowIso = new Date().toISOString();
 
       let savedPo: PurchaseOrder;
       if (editingOrderId) {
-        const existing = purchaseOrders.find((p) => p.id === editingOrderId);
+        const existing = existingEditingPo;
         savedPo = {
           ...(existing || ({} as PurchaseOrder)),
           id: editingOrderId,
@@ -1059,17 +1329,22 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
           totalEstimatedCost: totalCost,
           branchId: existing?.branchId || currentBranch?.id || 'BR-01',
           petugas: existing?.petugas || userName,
-          updatedAt: new Date().toISOString()
+          spPrintLogs: existing?.spPrintLogs,
+          createdAt: existing?.createdAt || nowIso,
+          updatedAt: nowIso
         };
       } else {
-        const uniqueSuffix = isDemoSandbox ? `-DEMO-${String(Date.now()).slice(-4)}` : `-${String(Date.now()).slice(-4)}`;
-        const generatedPoId = `PO-${yyyyMm}-${String(orderIndex).padStart(3, '0')}`;
-        const existingSameId = purchaseOrders.some((p) => p.id === generatedPoId);
-        const finalId = existingSameId ? `${generatedPoId}${uniqueSuffix}` : generatedPoId;
+        // Always assign a globally unique immutable ID so deleted PO tombstones never collide with new POs
+        const generatedPoNumber = `PO-${yyyyMm}-${String(orderIndex).padStart(3, '0')}`;
+        const timeSlug = Date.now().toString(36).toUpperCase();
+        const randSlug = Math.random().toString(36).slice(2, 6).toUpperCase();
+        const finalId = isDemoSandbox
+          ? `PO-DEMO-${yyyyMm}-${String(orderIndex).padStart(3, '0')}-${timeSlug}-${randSlug}`
+          : `${generatedPoNumber}-${timeSlug}-${randSlug}`;
 
         savedPo = {
           id: finalId,
-          poNumber: generatedPoId,
+          poNumber: generatedPoNumber,
           date: orderForm.date,
           supplierId: orderForm.supplierId,
           supplierName: orderForm.supplierName,
@@ -1083,8 +1358,8 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
           totalEstimatedCost: totalCost,
           branchId: currentBranch?.id || 'BR-01',
           petugas: userName,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
+          createdAt: nowIso,
+          updatedAt: nowIso
         };
       }
 
@@ -1153,8 +1428,13 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
       return;
     }
 
-    const ratio = med.rasioKonversi || 10;
-    const hna = med.hnaBesar || (med.hpp ? Math.round(med.hpp * ratio * 0.9) : 50000);
+    const ratio = Math.max(1, Number(med.rasioKonversi) || 1);
+    const hna =
+      Number(med.hnaBesar) > 0
+        ? Number(med.hnaBesar)
+        : Number(med.hpp) > 0
+        ? Math.round((Number(med.hpp) * ratio) / 1.11)
+        : 0;
 
     const newItem: PurchaseOrderItem = {
       id: `ITEM-${Date.now()}-${orderForm.items.length}`,
@@ -1199,8 +1479,13 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
 
   // Print SP Handler for a specific PO and category + update print log 2-way to Supabase
   const handlePrintSpecificSP = async (po: PurchaseOrder, spType: SPGroupType | 'ALL') => {
+    const latestPo = purchaseOrders.find((p) => p.id === po.id) || po;
     const isAll = spType === 'ALL';
-    const filteredItems = isAll ? po.items : po.items.filter((it) => it.spType === spType);
+    const normalizedItems = (Array.isArray(latestPo.items) ? latestPo.items : []).map((it) => ({
+      ...it,
+      spType: (it.spType || detectSPGroup({ category: it.category, nappza: it.nappza }) || 'REG') as SPGroupType
+    }));
+    const filteredItems = isAll ? normalizedItems : normalizedItems.filter((it) => it.spType === spType);
     if (filteredItems.length === 0) {
       setSyncToast({
         type: 'warning',
@@ -1209,22 +1494,22 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
       return;
     }
 
-    const romanMonth = ROMAN_MONTHS[new Date(po.date).getMonth()] || 'I';
-    const year = new Date(po.date).getFullYear() || new Date().getFullYear();
+    const romanMonth = ROMAN_MONTHS[new Date(latestPo.date).getMonth()] || 'I';
+    const year = new Date(latestPo.date).getFullYear() || new Date().getFullYear();
     const spNumber = isAll
-      ? po.spNumbers?.REG
-        ? po.spNumbers.REG.replace('/REG/', '/ALL/')
+      ? latestPo.spNumbers?.REG
+        ? latestPo.spNumbers.REG.replace('/REG/', '/ALL/')
         : `ALF/ALL/${romanMonth}/${year}/001`
-      : po.spNumbers[spType as SPGroupType] || generateSPNumber(spType as SPGroupType, 1, po.date);
+      : latestPo.spNumbers?.[spType as SPGroupType] || generateSPNumber(spType as SPGroupType, 1, latestPo.date);
 
     const spData = {
       spNumber,
       spType,
-      supplierName: po.supplierName,
-      supplierAddress: po.supplierAddress || '',
-      supplierPhone: po.supplierPhone || '',
-      orderDate: po.date,
-      notes: po.notes || '',
+      supplierName: latestPo.supplierName,
+      supplierAddress: latestPo.supplierAddress || '',
+      supplierPhone: latestPo.supplierPhone || '',
+      orderDate: latestPo.date,
+      notes: latestPo.notes || '',
       items: filteredItems.map((it) => ({
         id: it.id,
         medicineId: it.medicineId,
@@ -1251,10 +1536,18 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
       console.warn('Storage error:', e);
     }
 
+    const serializedData = encodeURIComponent(JSON.stringify(spData));
+    openPrintWindow('surat-pesanan', {
+      poId: latestPo.id,
+      spType,
+      supplier: latestPo.supplierName,
+      data: serializedData
+    });
+
     // Record SP print log and sync 2-way to Supabase so Riwayat Surat Pesanan tracks print count & timestamp
-    const existingLog = po.spPrintLogs?.[spType];
+    const existingLog = latestPo.spPrintLogs?.[spType];
     const nextPrintLogs: Partial<Record<SPGroupType | 'ALL', SPPrintLogEntry>> = {
-      ...(po.spPrintLogs || {}),
+      ...(latestPo.spPrintLogs || {}),
       [spType]: {
         printCount: (existingLog?.printCount || 0) + 1,
         lastPrintedAt: new Date().toISOString(),
@@ -1262,20 +1555,12 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
       }
     };
     const updatedPo: PurchaseOrder = {
-      ...po,
+      ...latestPo,
       spPrintLogs: nextPrintLogs,
       updatedAt: new Date().toISOString()
     };
-    setPrintModalPo((prev) => (prev && prev.id === po.id ? updatedPo : prev));
-    void persistPurchaseOrder(updatedPo, { skipAudit: true });
-
-    const serializedData = encodeURIComponent(JSON.stringify(spData));
-    openPrintWindow('surat-pesanan', {
-      poId: po.id,
-      spType,
-      supplier: po.supplierName,
-      data: serializedData
-    });
+    setPrintModalPo((prev) => (prev && prev.id === latestPo.id ? updatedPo : prev));
+    await persistPurchaseOrder(updatedPo, { skipAudit: true });
   };
 
   // Summary KPI Cards
@@ -1462,7 +1747,13 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
               Total Obat Defecta
             </span>
             <div className="text-xl font-black text-rose-600 mt-0.5">{totalDefectaCount} Item</div>
-            <span className="text-[10px] text-slate-500 font-medium">Stok fisik ≤ batas minimum</span>
+            <span className="text-[10px] text-slate-500 font-medium">
+              {defectaFilterMode === 'factual-usage'
+                ? 'Pemakaian aktual > stok tersedia'
+                : defectaFilterMode === 'active-low-stock'
+                ? 'Pemakaian aktual & stok aktif ≤ min'
+                : 'Semua master obat stok ≤ batas min'}
+            </span>
           </div>
           <div className="w-10 h-10 rounded-xl bg-rose-50 border border-rose-200 flex items-center justify-center text-rose-600">
             <AlertTriangle className="w-5 h-5" />
@@ -1563,16 +1854,30 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
               </div>
 
               <select
+                value={defectaFilterMode}
+                onChange={(e) => setDefectaFilterMode(e.target.value as any)}
+                className="p-2 border rounded-xl text-xs font-bold bg-white text-slate-800 outline-none"
+                title="Filter sumber data fakta untuk tabel Formula Order"
+              >
+                <option value="factual-usage">Fakta Pemakaian (Perlu Order)</option>
+                <option value="active-low-stock">Fakta Pemakaian + Stok Aktif ≤ Min</option>
+                <option value="all-low-stock">Semua Master Stok ≤ Batas Min</option>
+              </select>
+
+              <select
                 value={selectedSupplierFilter}
                 onChange={(e) => setSelectedSupplierFilter(e.target.value)}
                 className="p-2 border rounded-xl text-xs font-bold bg-white text-slate-800 outline-none"
               >
                 <option value="SEMUA">Semua Supplier PBF</option>
-                {defectaSuppliers.map((s) => (
+                {defectaSuppliers.names.map((s) => (
                   <option key={s} value={s}>
                     {s}
                   </option>
                 ))}
+                {defectaSuppliers.hasUnassigned && (
+                  <option value={UNASSIGNED_SUPPLIER_FILTER}>Belum Ditentukan</option>
+                )}
               </select>
             </div>
 
@@ -1590,12 +1895,12 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
           </div>
 
           <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
-            <div className="p-3 bg-slate-50 border-b border-slate-200 flex justify-between items-center text-xs">
+            <div className="p-3 bg-slate-50 border-b border-slate-200 flex flex-wrap justify-between items-center gap-2 text-xs">
               <span className="font-bold text-slate-700">
-                Formula Order = Pemakaian Rata-Rata ({selectedPeriod.replace('bulan', ' Bulan').replace('tahun', ' Tahun')}) + Buffer Stok 10% - Sisa Stok
+                Formula Order = Pemakaian Aktual ({selectedPeriod.replace('bulan', ' Bulan').replace('tahun', ' Tahun')}) + Buffer Stok 10% - Sisa Stok
               </span>
               <span className="text-[10px] text-slate-500 font-mono">
-                Menampilkan {filteredDefecta.length} obat defecta
+                Menampilkan {filteredDefecta.length} item fakta {isDemoSandbox ? '(Mode Demo)' : '(Sinkron Supabase)'}
               </span>
             </div>
 
@@ -1617,7 +1922,7 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
                     <th className="p-3">Kemasan &amp; Satuan</th>
                     <th className="p-3 text-center">Stok Fisik</th>
                     <th className="p-3 text-center">Batas Min</th>
-                    <th className="p-3 text-center">Rata-rata Pemakaian</th>
+                    <th className="p-3 text-center">Pemakaian Aktual</th>
                     <th className="p-3 text-center">Buffer 10%</th>
                     <th className="p-3 text-center bg-amber-50/70 text-amber-900">
                       Rekomendasi Order
@@ -1631,7 +1936,9 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
                   {paginatedDefecta.length === 0 ? (
                     <tr>
                       <td colSpan={12} className="p-10 text-center text-slate-400 italic">
-                        Tidak ada produk defecta yang memerlukan re-order saat ini.
+                        {defectaFilterMode === 'factual-usage'
+                          ? 'Belum ada obat yang memerlukan re-order berdasarkan data pemakaian aktual (penjualan & kartu stok) pada periode ini.'
+                          : 'Tidak ada produk defecta yang sesuai filter saat ini.'}
                       </td>
                     </tr>
                   ) : (
@@ -1695,16 +2002,22 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
                           </td>
 
                           <td className="p-3 text-center font-mono text-slate-500 whitespace-nowrap">
-                            +{item.buffer10} {item.unit}
+                            {item.buffer10 > 0 ? `+${item.buffer10}` : '0'} {item.unit}
                           </td>
 
                           <td className="p-3 text-center font-mono bg-amber-50/50 whitespace-nowrap">
-                            <strong className="text-sky-900 text-xs block">
-                              +{item.rekomendasiBesar} {item.satuanBesar}
-                            </strong>
-                            <span className="text-[10px] text-slate-500">
-                              ({item.rekomendasiKecil} {item.satuanKecil || item.unit})
-                            </span>
+                            {item.rekomendasiBesar > 0 ? (
+                              <>
+                                <strong className="text-sky-900 text-xs block">
+                                  +{item.rekomendasiBesar} {item.satuanBesar}
+                                </strong>
+                                <span className="text-[10px] text-slate-500">
+                                  ({item.rekomendasiKecil} {item.satuanKecil || item.unit})
+                                </span>
+                              </>
+                            ) : (
+                              <span className="text-slate-400 text-[11px]">0</span>
+                            )}
                           </td>
 
                           <td className="p-3 text-right font-mono font-bold text-slate-800 whitespace-nowrap">
@@ -1712,7 +2025,11 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
                           </td>
 
                           <td className="p-3 text-slate-600 text-[11px] whitespace-nowrap">
-                            {item.supplier || 'PT Kimia Farma Trading'}
+                            {item.resolvedSupplier ? (
+                              item.resolvedSupplier
+                            ) : (
+                              <span className="text-slate-400 italic">Belum Ditentukan</span>
+                            )}
                           </td>
 
                           <td className="p-3 text-center whitespace-nowrap">
@@ -2652,11 +2969,21 @@ export const DefectaView: React.FC<DefectaViewProps> = ({
                   {(['REG', 'ALK', 'PRE', 'OOT', 'PSI', 'NAR'] as SPGroupType[]).map((type) => {
                     const items = formSPGroups[type] || [];
                     const meta = getSPGroupMeta(type);
-                    const d = new Date(orderForm.date);
-                    const validD = isNaN(d.getTime()) ? new Date() : d;
-                    const currentMonthRoman = ROMAN_MONTHS[validD.getMonth()] || 'I';
-                    const currentYear = validD.getFullYear();
-                    const previewSpNumber = `ALF/${type}/${currentMonthRoman}/${currentYear}/${String(purchaseOrders.length + 1).padStart(3, '0')}`;
+                    const editingPo = editingOrderId
+                      ? purchaseOrders.find((p) => p.id === editingOrderId)
+                      : undefined;
+                    const maxPreviewSeq = purchaseOrders.reduce((max, existingPo) => {
+                      const poNumMatch = existingPo.poNumber?.match(/(\d{3,})(?:-[A-Za-z0-9-]+)?$/);
+                      const poIdMatch = existingPo.id?.match(/-(\d{3,})(?:-[A-Za-z0-9-]+)*$/);
+                      const num = Math.max(
+                        poNumMatch ? parseInt(poNumMatch[1], 10) : 0,
+                        poIdMatch ? parseInt(poIdMatch[1], 10) : 0
+                      );
+                      return Math.max(max, isNaN(num) ? 0 : num);
+                    }, 0);
+                    const previewSpNumber =
+                      editingPo?.spNumbers?.[type] ||
+                      generateSPNumber(type, maxPreviewSeq + 1, orderForm.date);
 
                     if (items.length === 0) return null;
 

@@ -6534,15 +6534,26 @@ export interface FacilityProfileBundle {
   updatedAt?: string;
 }
 
+const isMissingColumnSchemaError = (message?: string, code?: string): boolean => {
+  const rawMsg = String(message || '');
+  const msg = rawMsg.toLowerCase();
+  const c = String(code || '').toUpperCase();
+  if (c === '42703' || c === 'PGRST204') return true;
+  if (/column\s+[^\n]*\s+does\s+not\s+exist/i.test(rawMsg)) return true;
+  if (/could\s+not\s+find\s+the\s+['"]?[a-z0-9_]+['"]?\s+column/i.test(rawMsg)) return true;
+  return false;
+};
+
 const isMissingTableOrRlsError = (message?: string, code?: string): boolean => {
+  if (isMissingColumnSchemaError(message, code)) return false;
   const msg = String(message || '').toLowerCase();
   const c = String(code || '').toUpperCase();
   return (
     c === 'PGRST205' ||
     c === '42P01' ||
     msg.includes('could not find the table') ||
-    msg.includes('does not exist') ||
-    msg.includes('relation') && msg.includes('does not exist')
+    (msg.includes('relation') && msg.includes('does not exist')) ||
+    (!msg.includes('column') && msg.includes('does not exist'))
   );
 };
 
@@ -14959,23 +14970,31 @@ export function isDemoPurchaseOrderId(id?: string): boolean {
 }
 
 export function purchaseOrderToSupabaseRow(po: PurchaseOrder): Record<string, any> {
+  const safePrintLogs =
+    po.spPrintLogs && typeof po.spPrintLogs === 'object' && !Array.isArray(po.spPrintLogs)
+      ? po.spPrintLogs
+      : {};
+  const safeSpNumbers =
+    po.spNumbers && typeof po.spNumbers === 'object' && !Array.isArray(po.spNumbers)
+      ? po.spNumbers
+      : {};
   return {
-    id: po.id,
-    po_number: po.poNumber || po.id,
-    date: po.date || new Date().toISOString().split('T')[0],
-    supplier_id: po.supplierId || null,
-    supplier_name: po.supplierName || '',
+    id: String(po.id || '').slice(0, 100),
+    po_number: String(po.poNumber || po.id || '').slice(0, 100),
+    date: String(po.date || new Date().toISOString().split('T')[0]).slice(0, 50),
+    supplier_id: po.supplierId ? String(po.supplierId).slice(0, 100) : null,
+    supplier_name: String(po.supplierName || '').slice(0, 255),
     supplier_address: po.supplierAddress || '',
-    supplier_phone: po.supplierPhone || '',
-    supplier_license_no: po.supplierLicenseNo || '',
-    sp_numbers: po.spNumbers || {},
-    status: po.status || 'Diproses',
+    supplier_phone: String(po.supplierPhone || '').slice(0, 100),
+    supplier_license_no: String(po.supplierLicenseNo || '').slice(0, 150),
+    sp_numbers: safeSpNumbers,
+    status: String(po.status || 'Diproses').slice(0, 50),
     items: Array.isArray(po.items) ? po.items : [],
     notes: po.notes || '',
     total_estimated_cost: Number(po.totalEstimatedCost) || 0,
-    branch_id: po.branchId || 'BR-01',
-    petugas: po.petugas || '',
-    sp_print_logs: po.spPrintLogs || {},
+    branch_id: String(po.branchId || 'BR-01').slice(0, 50),
+    petugas: String(po.petugas || '').slice(0, 255),
+    sp_print_logs: safePrintLogs,
     created_at: po.createdAt || new Date().toISOString(),
     updated_at: po.updatedAt || new Date().toISOString()
   };
@@ -15087,6 +15106,7 @@ export async function fetchPurchaseOrdersFromSupabase(options?: {
   const allRows: Record<string, any>[] = [];
   let from = 0;
   let hasMore = true;
+  let useCreatedOrder = true;
 
   try {
     while (hasMore) {
@@ -15101,11 +15121,11 @@ export async function fetchPurchaseOrdersFromSupabase(options?: {
         }, timeoutMs);
       });
 
-      const queryPromise = client
-        .from(tableName)
-        .select('*')
-        .order('created_at', { ascending: false })
-        .range(from, to);
+      const baseQuery = client.from(tableName).select('*');
+      const orderedQuery = useCreatedOrder
+        ? baseQuery.order('created_at', { ascending: false })
+        : baseQuery;
+      const queryPromise = orderedQuery.range(from, to);
 
       const result = await Promise.race([queryPromise, timeoutPromise]);
       if (timeoutHandle) clearTimeout(timeoutHandle);
@@ -15116,6 +15136,14 @@ export async function fetchPurchaseOrdersFromSupabase(options?: {
       };
 
       if (error) {
+        if (
+          useCreatedOrder &&
+          (isMissingColumnSchemaError(error.message, error.code) ||
+            String(error.message || '').toLowerCase().includes('created_at'))
+        ) {
+          useCreatedOrder = false;
+          continue;
+        }
         const needsTableSetup = isMissingTableOrRlsError(error.message, error.code);
         if (needsTableSetup) missingTablesInSession.add(tableName);
         console.warn(`[Supabase Surat Pesanan] Fetch error (${tableName} range ${from}-${to}):`, error.message);
@@ -15134,6 +15162,7 @@ export async function fetchPurchaseOrdersFromSupabase(options?: {
       }
     }
 
+    missingTablesInSession.delete(tableName);
     const uniqueMap = new Map<string, PurchaseOrder>();
     for (const rawRow of allRows) {
       const mapped = supabaseRowToPurchaseOrder(rawRow);
@@ -15141,7 +15170,9 @@ export async function fetchPurchaseOrdersFromSupabase(options?: {
         uniqueMap.set(mapped.id, mapped);
       }
     }
-    const mapped = Array.from(uniqueMap.values());
+    const mapped = Array.from(uniqueMap.values()).sort((a, b) =>
+      `${b.date || ''} ${b.createdAt || ''}`.localeCompare(`${a.date || ''} ${a.createdAt || ''}`)
+    );
     if (mapped.length === 0) return { data: [], isEmpty: true };
     return { data: mapped };
   } catch (err: any) {
@@ -15218,7 +15249,7 @@ export async function syncPurchaseOrderToSupabase(
 
   const { purchaseOrderTable } = getSupabaseConfig();
   const tableName = purchaseOrderTable || DEFAULT_PURCHASE_ORDER_TABLE;
-  const available = await isSupabaseTableAvailable(tableName);
+  const available = await isSupabaseTableAvailable(tableName, missingTablesInSession.has(tableName));
   if (available === false) {
     return {
       success: false,
@@ -15249,6 +15280,7 @@ export async function syncPurchaseOrderToSupabase(
 
       const { error } = result as { error: { message: string; code?: string } | null };
       if (!error) {
+        missingTablesInSession.delete(tableName);
         return { success: true };
       }
 
@@ -15291,7 +15323,7 @@ export async function seedPurchaseOrdersToSupabase(
 
   const { purchaseOrderTable } = getSupabaseConfig();
   const tableName = purchaseOrderTable || DEFAULT_PURCHASE_ORDER_TABLE;
-  const available = await isSupabaseTableAvailable(tableName);
+  const available = await isSupabaseTableAvailable(tableName, missingTablesInSession.has(tableName));
   if (available === false) {
     return {
       success: false,
@@ -15354,6 +15386,7 @@ export async function seedPurchaseOrdersToSupabase(
       totalSynced += rows.length;
     }
 
+    missingTablesInSession.delete(tableName);
     return { success: true, count: totalSynced };
   } catch (err: any) {
     return { success: false, count: totalSynced, error: err?.message || String(err) };
@@ -15377,7 +15410,7 @@ export async function deletePurchaseOrdersFromSupabase(
 
   const { purchaseOrderTable } = getSupabaseConfig();
   const tableName = purchaseOrderTable || DEFAULT_PURCHASE_ORDER_TABLE;
-  const available = await isSupabaseTableAvailable(tableName);
+  const available = await isSupabaseTableAvailable(tableName, missingTablesInSession.has(tableName));
   if (available === false) {
     return {
       success: false,
@@ -15397,6 +15430,7 @@ export async function deletePurchaseOrdersFromSupabase(
         return { success: false, needsTableSetup, error: error.message };
       }
     }
+    missingTablesInSession.delete(tableName);
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err?.message || String(err) };

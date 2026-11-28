@@ -497,7 +497,9 @@ export const MarketingStrategyView: React.FC<MarketingStrategyViewProps> = ({
     const now = new Date();
     const ym = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
     const nextSeq = String(purchaseOrders.length + 1).padStart(3, '0');
-    const poId = `${isDemoSandbox ? 'PO-DEMO-' : 'PO-'}${ym}-${nextSeq}-${Date.now().toString().slice(-3)}`;
+    const timeSlug = Date.now().toString(36).toUpperCase();
+    const randSlug = Math.random().toString(36).slice(2, 6).toUpperCase();
+    const poId = `${isDemoSandbox ? 'PO-DEMO-' : 'PO-'}${ym}-${nextSeq}-${timeSlug}-${randSlug}`;
     const poNumber = `PO-MKT-${ym}-${nextSeq}`;
 
     const spNumbers: Record<SPGroupType, string> = {
