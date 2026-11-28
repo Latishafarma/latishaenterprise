@@ -133,6 +133,11 @@ import {
   hasMedicinePricingChanged,
   reconcilePendingOrdersWithMedicines
 } from './utils/batchHelper';
+import {
+  computeDisposalItemSubtotal,
+  markDisposalBaDeleted,
+  unmarkDisposalBaDeleted
+} from './utils/disposalLossHelper';
 
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
@@ -8924,6 +8929,7 @@ export default function App() {
 
     const newMutations: StockMutation[] = [];
     const touchedMedIds = new Set<string>();
+    const recordedItems: typeof payload.items = [];
 
     payload.items.forEach((it) => {
       const qtyOut = Math.max(0, Math.round(Number(it.qty) || 0));
@@ -8954,6 +8960,21 @@ export default function App() {
         touchedMedIds.add(med.id);
       }
 
+      const effectiveQty = actualDeducted > 0 ? actualDeducted : qtyOut;
+      const unitHpp = Math.max(0, Number(it.hpp) || Number(med?.hpp) || 0);
+      const lineLossHpp = computeDisposalItemSubtotal({
+        qty: effectiveQty,
+        hpp: unitHpp,
+        subtotal: effectiveQty === qtyOut ? it.subtotal : effectiveQty * unitHpp
+      });
+
+      recordedItems.push({
+        ...it,
+        qty: effectiveQty,
+        hpp: unitHpp,
+        subtotal: lineLossHpp
+      });
+
       newMutations.push({
         id: `MUT-MUSNAH-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         date: today,
@@ -8963,12 +8984,12 @@ export default function App() {
         refNo: payload.baNumber,
         type: 'PEMUSNAHAN',
         inQty: 0,
-        outQty: actualDeducted > 0 ? actualDeducted : qtyOut,
+        outQty: effectiveQty,
         balance: nextBalance,
         ket: `Pemusnahan (${payload.method}) · Saksi: ${payload.witness}${payload.reason ? ` · ${payload.reason}` : ''}`,
         petugas: userName,
         branchId: currentBranch.id,
-        hpp: it.hpp * (actualDeducted > 0 ? actualDeducted : qtyOut),
+        hpp: lineLossHpp,
         batchNo: it.batchNo || '-',
         expDate: it.expDate || '',
         batchDetails: mutationBatchDetails
@@ -9058,14 +9079,15 @@ export default function App() {
       pharmacyName: pharmProfile.name,
       pharmacyAddress: fullPharmAddr,
       pharmacyCity: pharmProfile.city || currentBranch.name,
-      totalItems: payload.items.length,
-      totalQty: payload.items.reduce((s, it) => s + Math.round(Number(it.qty) || 0), 0),
-      totalValue: payload.items.reduce((s, it) => s + (Number(it.subtotal) || 0), 0),
-      items: payload.items,
+      totalItems: recordedItems.length,
+      totalQty: recordedItems.reduce((s, it) => s + Math.round(Number(it.qty) || 0), 0),
+      totalValue: recordedItems.reduce((s, it) => s + computeDisposalItemSubtotal(it), 0),
+      items: recordedItems,
       createdAt: nowIso,
       updatedAt: nowIso
     };
 
+    unmarkDisposalBaDeleted(payload.baNumber);
     disposalRecordsMutationEpochRef.current += 1;
     setDisposalRecords((prev) => {
       const next = [historyEntry, ...prev];
@@ -9097,7 +9119,7 @@ export default function App() {
 
     addAuditLog(
       'Kelola Produk (Pemusnahan)',
-      `Proses pemusnahan ${payload.baNumber} (${payload.items.length} item, metode: ${payload.method})`
+      `Proses pemusnahan ${payload.baNumber} (${historyEntry.totalItems} item / ${historyEntry.totalQty} unit, beban kerugian HPP: Rp ${historyEntry.totalValue.toLocaleString('id-ID')}, metode: ${payload.method})`
     );
 
     return {
@@ -9144,6 +9166,10 @@ export default function App() {
   const handleDeleteDisposalRecord = async (
     id: string
   ): Promise<{ success: boolean; needsTableSetup?: boolean; error?: string }> => {
+    const targetRecord = disposalRecordsRef.current.find((r) => r.id === id);
+    if (targetRecord?.baNumber) {
+      markDisposalBaDeleted(targetRecord.baNumber);
+    }
     disposalRecordsMutationEpochRef.current += 1;
     markIdsDeleted('disposal_records', [id]);
     setDisposalRecords((prev) => {
@@ -9151,7 +9177,10 @@ export default function App() {
       persistDisposalRecordsNow(next);
       return next;
     });
-    addAuditLog('Kelola Produk (Pemusnahan)', `Hapus arsip riwayat pemusnahan #${id}`);
+    addAuditLog(
+      'Kelola Produk (Pemusnahan)',
+      `Hapus arsip riwayat pemusnahan ${targetRecord?.baNumber || `#${id}`}`
+    );
     if (isDemoActive || isDemoMode()) {
       return { success: true };
     }
@@ -15021,7 +15050,7 @@ export default function App() {
         <div
           role="status"
           aria-live="polite"
-          className="fixed bottom-4 left-4 z-50 max-w-md w-[calc(100vw-2rem)] animate-in fade-in slide-in-from-bottom-2"
+          className="no-print fixed bottom-4 left-4 z-50 max-w-md w-[calc(100vw-2rem)] animate-in fade-in slide-in-from-bottom-2"
         >
           <div className="rounded-2xl border border-emerald-400 bg-slate-900 text-white shadow-xl p-3.5 flex items-start gap-3 text-xs">
             <div className="p-2 rounded-xl bg-emerald-500/20 text-emerald-300 shrink-0">
@@ -15050,7 +15079,7 @@ export default function App() {
         <div
           role="status"
           aria-live="polite"
-          className="fixed bottom-4 right-4 z-50 max-w-md w-[calc(100vw-2rem)] animate-in fade-in slide-in-from-bottom-2"
+          className="no-print fixed bottom-4 right-4 z-50 max-w-md w-[calc(100vw-2rem)] animate-in fade-in slide-in-from-bottom-2"
         >
           <div
             className={`rounded-2xl border shadow-xl p-3.5 flex items-start gap-3 text-xs ${
@@ -15131,10 +15160,10 @@ export default function App() {
         )}
 
         {/* Viewport Content */}
-        <main className="flex-1 min-w-0 w-full overflow-y-auto overflow-x-hidden p-3 sm:p-4 lg:p-6 pb-24 sm:pb-20 lg:pb-20 custom-scrollbar bg-slate-100">
+        <main className="flex-1 min-w-0 w-full overflow-y-auto overflow-x-hidden p-3 sm:p-4 lg:p-6 pb-24 sm:pb-20 lg:pb-20 custom-scrollbar bg-slate-100 print:p-0 print:bg-white">
           {/* Global User Alarm Banner when user has not done Stock Opname in the last 4 months (shown outside StockOpnameView since StockOpnameView renders its own detailed alarm) */}
           {!isMobileMode && activeTab !== 'inv-stok-opname' && currentUserOpnameAlarmInfo.shouldWarn && (
-            <div className="mb-4 p-3.5 rounded-2xl bg-gradient-to-r from-rose-600 via-red-600 to-rose-700 text-white border-2 border-rose-300 shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+            <div className="no-print print:hidden mb-4 p-3.5 rounded-2xl bg-gradient-to-r from-rose-600 via-red-600 to-rose-700 text-white border-2 border-rose-300 shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
               <div className="flex items-start sm:items-center gap-2.5">
                 <span className="p-2 bg-white/20 rounded-xl shrink-0 animate-bounce">
                   <AlertCircle className="w-5 h-5 text-amber-200" />
@@ -15166,7 +15195,7 @@ export default function App() {
 
           {/* Global Overdue Check-In Alert (> 5 mins past shift start) for logged-in user */}
           {overdueCurrentUserSchedules.length > 0 && !dismissedCheckInBanner && activeTab !== 'rme-jadwal' && (
-            <div className="mb-4 p-3.5 rounded-2xl bg-amber-50 border border-amber-300 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+            <div className="no-print print:hidden mb-4 p-3.5 rounded-2xl bg-amber-50 border border-amber-300 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
               <div className="flex items-start sm:items-center gap-2.5">
                 <span className="p-2 bg-rose-600 text-white rounded-xl shrink-0">
                   <AlertCircle className="w-4 h-4" />
@@ -15953,6 +15982,7 @@ export default function App() {
                   suppliers={suppliers}
                   purchaseInvoices={purchaseInvoices}
                   disposalHistory={disposalRecords}
+                  stockMutations={stockMutations}
                   currentBranch={currentBranch}
                   userName={userName}
                   onProcessDisposal={handleProcessExpiryDisposal}
@@ -16074,6 +16104,7 @@ export default function App() {
                   doctors={effectiveDoctors}
                   staffList={effectiveStaffList}
                   opnameRecords={opnameRecords}
+                  disposalRecords={disposalRecords}
                   stockMutations={stockMutations}
                   feeConfig={feeConfig}
                   schedules={schedules}

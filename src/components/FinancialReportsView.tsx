@@ -32,6 +32,7 @@ import {
   StaffFeeItem,
   StockOpnameRecord,
   StockOpnameItemRecord,
+  ProductDisposalRecord,
   StockMutation,
   FeeConfig,
   DutySchedule,
@@ -39,6 +40,11 @@ import {
   StaffFeeLedgerEntry,
   isOwnerAdminRole
 } from '../types';
+import {
+  buildUnifiedDisposalLossRecords,
+  computeDisposalRecordTotalLoss,
+  summarizeDisposalLosses
+} from '../utils/disposalLossHelper';
 import { openPrintWindow } from '../utils/printHelper';
 import { isOpeningDebtInvoice } from '../utils/supabaseClient';
 import { PaginationControls } from './PaginationControls';
@@ -74,11 +80,12 @@ interface FinancialReportsViewProps {
   doctors: Doctor[];
   staffList?: Staff[];
   opnameRecords?: StockOpnameRecord[];
+  disposalRecords?: ProductDisposalRecord[];
   stockMutations?: StockMutation[];
   feeConfig?: FeeConfig;
   schedules?: DutySchedule[];
   feeLedger?: StaffFeeLedgerEntry[];
-  initialTab?: 'laba-rugi' | 'valuasi-aset' | 'fee-medis' | 'hutang-pbf' | 'hasil-stokopname';
+  initialTab?: 'laba-rugi' | 'valuasi-aset' | 'fee-medis' | 'hutang-pbf' | 'hasil-stokopname' | 'kerugian-pemusnahan';
 }
 
 interface ClinicalServiceEvent {
@@ -103,6 +110,7 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
   doctors,
   staffList = [],
   opnameRecords = [],
+  disposalRecords = [],
   stockMutations = [],
   feeConfig,
   schedules = [],
@@ -138,7 +146,7 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
     return trimmed.split(' ')[0].split('T')[0];
   };
 
-  const [activeTab, setActiveTab] = useState<'laba-rugi' | 'valuasi-aset' | 'fee-medis' | 'hutang-pbf' | 'hasil-stokopname'>(
+  const [activeTab, setActiveTab] = useState<'laba-rugi' | 'valuasi-aset' | 'fee-medis' | 'hutang-pbf' | 'hasil-stokopname' | 'kerugian-pemusnahan'>(
     initialTab || 'laba-rugi'
   );
 
@@ -840,7 +848,27 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
 
   const netOpnameNominal = totalOpnameSurplus - totalOpnameDeficit;
 
-  const estimatedNetProfit = grossProfit - totalMedicalExpenses + netOpnameNominal;
+  // 6b. Beban Kerugian Pemusnahan Obat ED / Rusak (HPP) — Terintegrasi Submenu Kelola Produk & Supabase
+  const allDisposalRecords = useMemo<ProductDisposalRecord[]>(() => {
+    return buildUnifiedDisposalLossRecords({
+      disposalRecords,
+      stockMutations,
+      medicines
+    });
+  }, [disposalRecords, stockMutations, medicines]);
+
+  const disposalLossSummary = useMemo(
+    () => summarizeDisposalLosses(allDisposalRecords, startDate, endDate),
+    [allDisposalRecords, startDate, endDate]
+  );
+
+  const filteredDisposalRecords = disposalLossSummary.filteredRecords;
+  const totalDisposalLoss = disposalLossSummary.totalLoss;
+  const totalDisposalQty = disposalLossSummary.totalQty;
+  const totalDisposalItems = disposalLossSummary.totalItems;
+
+  const estimatedNetProfit =
+    grossProfit - totalMedicalExpenses + netOpnameNominal - totalDisposalLoss;
 
   // Central Inventory Valuation
   const totalAssetValue = medicines.reduce((acc, m) => acc + m.stock * m.hpp, 0);
@@ -865,7 +893,7 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
             Laporan Keuangan Otomatis Terintegrasi Inventaris Pusat
           </h3>
           <p className="text-xs text-slate-500 mt-0.5">
-            Laba rugi real-time, laporan hasil stokopname, valuasi aset, rekap gaji, fee & lembur Minggu, serta hutang PBF.
+            Laba rugi real-time, laporan hasil stokopname, beban kerugian pemusnahan obat, valuasi aset, rekap gaji, fee & lembur Minggu, serta hutang PBF.
           </p>
         </div>
 
@@ -890,6 +918,17 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
           >
             <ClipboardCheck className="w-3.5 h-3.5" />
             <span>Laporan Hasil Stokopname</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('kerugian-pemusnahan')}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+              activeTab === 'kerugian-pemusnahan'
+                ? 'bg-rose-600 text-white shadow-xs'
+                : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+            }`}
+          >
+            <Flame className="w-3.5 h-3.5" />
+            <span>Beban Pemusnahan</span>
           </button>
           <button
             onClick={() => setActiveTab('valuasi-aset')}
@@ -941,7 +980,7 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
       </div>
 
       {/* KPI Cards Strip */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs no-print">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 text-xs no-print">
         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
           <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">
             Total Penjualan Kasir (Omzet)
@@ -986,15 +1025,35 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
           </span>
         </div>
 
+        <div className="bg-white p-4 rounded-2xl border border-rose-200/80 shadow-xs">
+          <span className="text-[10px] text-rose-500 font-bold uppercase tracking-wider block">
+            Beban Kerugian Pemusnahan
+          </span>
+          <div
+            className={`font-mono font-black text-lg mt-1 ${
+              totalDisposalLoss > 0 ? 'text-rose-600' : 'text-slate-900'
+            }`}
+          >
+            {totalDisposalLoss > 0 ? '-' : ''}Rp {totalDisposalLoss.toLocaleString('id-ID')}
+          </div>
+          <span className="text-[10px] text-slate-500 font-semibold mt-1 block">
+            {filteredDisposalRecords.length} Berita Acara · {totalDisposalQty.toLocaleString('id-ID')} Unit (HPP)
+          </span>
+        </div>
+
         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
           <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">
             Estimasi Laba Bersih
           </span>
-          <div className="font-mono font-black text-lg text-emerald-600 mt-1">
-            Rp {estimatedNetProfit.toLocaleString('id-ID')}
+          <div
+            className={`font-mono font-black text-lg mt-1 ${
+              estimatedNetProfit < 0 ? 'text-rose-600' : 'text-emerald-600'
+            }`}
+          >
+            {estimatedNetProfit < 0 ? '-' : ''}Rp {Math.abs(estimatedNetProfit).toLocaleString('id-ID')}
           </div>
           <span className="text-[10px] text-slate-500 font-semibold mt-1 block">
-            Jasa Medis: Rp {totalMedicalExpenses.toLocaleString('id-ID')}
+            Jasa Medis: Rp {totalMedicalExpenses.toLocaleString('id-ID')} · Musnah: Rp {totalDisposalLoss.toLocaleString('id-ID')}
           </span>
         </div>
 
@@ -1048,8 +1107,9 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
           </div>
               <div className="text-center">
                 <div className="mt-2 inline-block px-4 py-1 bg-emerald-50 text-emerald-900 rounded-full font-black text-xs uppercase border border-emerald-300">
-                  {activeTab === 'laba-rugi' && 'LAPORAN LABA RUGI OPERASIONAL & HASIL STOKOPNAME'}
+                  {activeTab === 'laba-rugi' && 'LAPORAN LABA RUGI OPERASIONAL, HASIL STOKOPNAME & BEBAN PEMUSNAHAN'}
                   {activeTab === 'hasil-stokopname' && 'LAPORAN HASIL STOKOPNAME & NOMINAL SELISIH INVENTARIS'}
+                  {activeTab === 'kerugian-pemusnahan' && 'LAPORAN BEBAN KERUGIAN PEMUSNAHAN OBAT ED / RUSAK (HPP)'}
                   {activeTab === 'valuasi-aset' && 'LAPORAN VALUASI ASET INVENTARIS SENTRAL'}
                   {activeTab === 'fee-medis' && 'REKAPITULASI GAJI, FEE LAYANAN MEDIS, DAN LEMBUR HARI MINGGU'}
                   {activeTab === 'hutang-pbf' && 'DAFTAR HUTANG FAKTUR PEMBELIAN SUPPLIER (PBF)'}
@@ -1256,9 +1316,103 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
               )}
             </div>
 
-            <div className="p-5 bg-emerald-50 rounded-2xl border-2 border-emerald-300 flex justify-between font-black text-base text-emerald-950">
-              <span>ESTIMASI LABA BERSIH (NET PROFIT):</span>
-              <span>Rp {estimatedNetProfit.toLocaleString('id-ID')}</span>
+            {/* 5. Beban Kerugian Pemusnahan Obat ED / Rusak (HPP) — Terintegrasi Kelola Produk */}
+            <div className="p-4 bg-rose-50/70 rounded-2xl border border-rose-200 space-y-2.5">
+              <div className="flex justify-between items-center font-bold text-rose-950 text-sm border-b border-rose-200 pb-2">
+                <span className="flex items-center gap-2">
+                  <span>5. BEBAN KERUGIAN PEMUSNAHAN OBAT ED / RUSAK (HPP)</span>
+                </span>
+                <span className={totalDisposalLoss > 0 ? 'text-rose-700' : 'text-slate-700'}>
+                  {totalDisposalLoss > 0 ? `(Rp ${totalDisposalLoss.toLocaleString('id-ID')})` : 'Rp 0'}
+                </span>
+              </div>
+              <div className="flex justify-between text-slate-700 pl-4">
+                <span>
+                  - Beban Kerugian Pemusnahan Produk ED / Rusak ({filteredDisposalRecords.length} Berita Acara · {totalDisposalItems} Item / {totalDisposalQty.toLocaleString('id-ID')} Unit)
+                </span>
+                <span className="text-rose-700 font-bold">
+                  (Rp {totalDisposalLoss.toLocaleString('id-ID')})
+                </span>
+              </div>
+              <div className="flex justify-between font-black text-rose-950 pt-2 border-t border-rose-200 pl-4">
+                <span>TOTAL BEBAN KERUGIAN PEMUSNAHAN OBAT (HPP)</span>
+                <span>
+                  {totalDisposalLoss > 0 ? `-Rp ${totalDisposalLoss.toLocaleString('id-ID')}` : 'Rp 0'}
+                </span>
+              </div>
+
+              {filteredDisposalRecords.length > 0 ? (
+                <div className="pt-2 border-t border-rose-200/80 font-sans">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[10px] font-bold uppercase text-rose-900">
+                      Rincian Berita Acara Pemusnahan Obat ({startDate} s.d. {endDate}):
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('kerugian-pemusnahan')}
+                      className="text-[10px] font-bold text-rose-700 hover:underline no-print cursor-pointer"
+                    >
+                      Lihat Tabel Lengkap Beban Pemusnahan →
+                    </button>
+                  </div>
+                  <div className="overflow-x-auto bg-white rounded-xl border border-rose-100">
+                    <table className="w-full text-left text-[11px] border-collapse">
+                      <thead className="bg-rose-100/60 text-rose-950 font-bold text-[10px] uppercase">
+                        <tr>
+                          <th className="p-2 border">No. Berita Acara</th>
+                          <th className="p-2 border">Tanggal &amp; Waktu</th>
+                          <th className="p-2 border">Metode &amp; Petugas</th>
+                          <th className="p-2 border text-center">Item / Unit</th>
+                          <th className="p-2 border text-right">Beban Kerugian (HPP)</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 font-mono">
+                        {filteredDisposalRecords.map((rec) => {
+                          const recLoss = computeDisposalRecordTotalLoss(rec);
+                          return (
+                            <tr key={rec.id} className="hover:bg-slate-50">
+                              <td className="p-2 border font-bold text-rose-700">{rec.baNumber}</td>
+                              <td className="p-2 border">{rec.date}{rec.time ? ` ${rec.time}` : ''}</td>
+                              <td className="p-2 border font-sans">
+                                <span className="font-semibold text-slate-800">{rec.method}</span>
+                                <span className="block text-[10px] text-slate-500">Petugas: {rec.petugas}</span>
+                              </td>
+                              <td className="p-2 border text-center">
+                                {rec.totalItems} / {rec.totalQty.toLocaleString('id-ID')}
+                              </td>
+                              <td className="p-2 border text-right font-bold text-rose-700">
+                                -Rp {recLoss.toLocaleString('id-ID')}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-[10px] font-sans text-rose-800/80 pl-4">
+                  Setiap proses pemusnahan obat pada menu Inventaris &rarr; Kelola Produk otomatis tercatat di sini sebagai beban kerugian (HPP) yang mengurangi Laba Bersih Apotek.
+                </p>
+              )}
+            </div>
+
+            <div
+              className={`p-5 rounded-2xl border-2 flex flex-wrap justify-between items-center gap-2 font-black text-base ${
+                estimatedNetProfit < 0
+                  ? 'bg-rose-50 border-rose-300 text-rose-950'
+                  : 'bg-emerald-50 border-emerald-300 text-emerald-950'
+              }`}
+            >
+              <div>
+                <span className="block">ESTIMASI LABA BERSIH (NET PROFIT):</span>
+                <span className="block text-[10px] font-sans font-semibold opacity-75 mt-0.5">
+                  Laba Kotor − Biaya Jasa Medis ± Selisih Stokopname − Beban Kerugian Pemusnahan (HPP)
+                </span>
+              </div>
+              <span>
+                {estimatedNetProfit < 0 ? '-' : ''}Rp {Math.abs(estimatedNetProfit).toLocaleString('id-ID')}
+              </span>
             </div>
           </div>
         )}
@@ -1361,6 +1515,119 @@ export const FinancialReportsView: React.FC<FinancialReportsViewProps> = ({
                     </table>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Tab Beban Kerugian Pemusnahan Obat ED / Rusak (HPP) */}
+        {activeTab === 'kerugian-pemusnahan' && (
+          <div className="space-y-5">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 font-mono">
+              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl">
+                <span className="text-[10px] font-sans font-bold uppercase text-slate-400 block">
+                  Total Berita Acara
+                </span>
+                <span className="text-lg font-black text-slate-900 mt-0.5 block">
+                  {filteredDisposalRecords.length} Dokumen BA
+                </span>
+              </div>
+              <div className="p-3.5 bg-amber-50/60 border border-amber-200 rounded-2xl">
+                <span className="text-[10px] font-sans font-bold uppercase text-amber-800 block">
+                  Total Item / Unit Dimusnahkan
+                </span>
+                <span className="text-lg font-black text-amber-900 mt-0.5 block">
+                  {totalDisposalItems} Item · {totalDisposalQty.toLocaleString('id-ID')} Unit
+                </span>
+              </div>
+              <div className="p-3.5 bg-rose-50/70 border border-rose-200 rounded-2xl">
+                <span className="text-[10px] font-sans font-bold uppercase text-rose-700 block">
+                  Total Beban Kerugian (HPP)
+                </span>
+                <span className="text-lg font-black text-rose-800 mt-0.5 block">
+                  -Rp {totalDisposalLoss.toLocaleString('id-ID')}
+                </span>
+              </div>
+              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl">
+                <span className="text-[10px] font-sans font-bold uppercase text-slate-500 block">
+                  Rata-rata Beban per BA
+                </span>
+                <span className="text-lg font-black text-slate-800 mt-0.5 block">
+                  Rp{' '}
+                  {filteredDisposalRecords.length > 0
+                    ? Math.round(totalDisposalLoss / filteredDisposalRecords.length).toLocaleString('id-ID')
+                    : '0'}
+                </span>
+              </div>
+            </div>
+
+            {filteredDisposalRecords.length === 0 ? (
+              <div className="p-8 text-center bg-slate-50 border border-dashed border-slate-300 rounded-2xl text-slate-500">
+                <p className="font-bold text-slate-700">
+                  Belum ada beban kerugian pemusnahan obat pada periode {startDate} s.d. {endDate}.
+                </p>
+                <p className="text-[11px] mt-1">
+                  Setiap proses pemusnahan obat ED/rusak pada menu Inventaris &rarr; Kelola Produk otomatis tercatat sebagai beban kerugian HPP di laporan ini dan memotong Laba Bersih Apotek.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {filteredDisposalRecords.map((rec) => {
+                  const recLoss = computeDisposalRecordTotalLoss(rec);
+                  return (
+                    <div key={rec.id} className="border border-rose-200/80 rounded-2xl overflow-hidden">
+                      <div className="p-3.5 bg-rose-50/70 border-b border-rose-200/80 flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <span className="font-mono font-black text-rose-700 mr-2">{rec.baNumber}</span>
+                          <span className="font-bold text-slate-800">
+                            {rec.date}{rec.time ? ` · ${rec.time}` : ''}
+                          </span>
+                          <span className="ml-2 text-[11px] text-slate-600">
+                            Petugas: <strong>{rec.petugas}</strong> · Metode: <strong>{rec.method}</strong>
+                          </span>
+                          {rec.witness && rec.witness !== '-' && (
+                            <span className="ml-2 text-[11px] text-slate-500">
+                              Saksi: {rec.witness}
+                            </span>
+                          )}
+                        </div>
+                        <div className="font-mono font-black text-xs text-rose-700">
+                          Total Beban Kerugian HPP: -Rp {recLoss.toLocaleString('id-ID')}
+                        </div>
+                      </div>
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead className="bg-slate-50 font-bold uppercase text-[10px] text-slate-600">
+                          <tr>
+                            <th className="p-2.5 border">Nama Obat / Produk</th>
+                            <th className="p-2.5 border text-center">No. Batch</th>
+                            <th className="p-2.5 border text-center">Tgl ED</th>
+                            <th className="p-2.5 border text-center">Jumlah Dimusnahkan</th>
+                            <th className="p-2.5 border text-right">HPP Satuan</th>
+                            <th className="p-2.5 border text-right">Beban Kerugian (HPP)</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y font-medium text-slate-700">
+                          {rec.items.map((it, idx) => (
+                            <tr key={`${rec.id}-${idx}`} className="hover:bg-slate-50">
+                              <td className="p-2.5 border font-bold text-slate-900">{it.name}</td>
+                              <td className="p-2.5 border text-center font-mono">{it.batchNo || '-'}</td>
+                              <td className="p-2.5 border text-center font-mono">{it.expDate || '-'}</td>
+                              <td className="p-2.5 border text-center font-mono font-bold">
+                                {it.qty.toLocaleString('id-ID')} {it.unit}
+                              </td>
+                              <td className="p-2.5 border text-right font-mono">
+                                Rp {it.hpp.toLocaleString('id-ID')}
+                              </td>
+                              <td className="p-2.5 border text-right font-mono font-black text-rose-700">
+                                -Rp {it.subtotal.toLocaleString('id-ID')}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>

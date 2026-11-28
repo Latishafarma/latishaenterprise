@@ -1,7 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { Printer, X, CheckCircle, FileText } from 'lucide-react';
 import { INITIAL_MEDICINES, INITIAL_STOCK_MUTATIONS, INITIAL_TRANSACTIONS, INITIAL_RME_RECORDS, INITIAL_PATIENTS, INITIAL_STAFF } from '../data/initialData';
-import { Medicine, PurchaseInvoice, StockMutation, StockOpnameRecord, Transaction, RMERecord, Patient, Staff, DutySchedule, StaffFeeItem } from '../types';
+import { Medicine, PurchaseInvoice, StockMutation, StockOpnameRecord, ProductDisposalRecord, Transaction, RMERecord, Patient, Staff, DutySchedule, StaffFeeItem } from '../types';
+import {
+  buildUnifiedDisposalLossRecords,
+  computeDisposalRecordTotalLoss,
+  summarizeDisposalLosses
+} from '../utils/disposalLossHelper';
 import {
   getSavedPharmacyProfile,
   getSavedAPJProfile,
@@ -2417,6 +2422,10 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
     let rmeRecords: RMERecord[] = INITIAL_RME_RECORDS;
     let staffList: Staff[] = INITIAL_STAFF;
     let schedules: DutySchedule[] = [];
+    let medicinesList: Medicine[] = INITIAL_MEDICINES;
+    let stockMutationsList: StockMutation[] = INITIAL_STOCK_MUTATIONS;
+    let opnameRecordsList: StockOpnameRecord[] = [];
+    let disposalRecordsList: ProductDisposalRecord[] = [];
     try {
       const savedTrx = demoGetItem('latisha_transactions');
       if (savedTrx) transactions = JSON.parse(savedTrx);
@@ -2426,6 +2435,14 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
       if (savedStaff) staffList = JSON.parse(savedStaff);
       const savedSchedules = demoGetItem('latisha_schedules');
       if (savedSchedules) schedules = JSON.parse(savedSchedules);
+      const savedMeds = demoGetItem('latisha_medicines');
+      if (savedMeds) medicinesList = JSON.parse(savedMeds);
+      const savedMuts = demoGetItem('latisha_stock_mutations');
+      if (savedMuts) stockMutationsList = JSON.parse(savedMuts);
+      const savedOpnames = demoGetItem('latisha_stock_opnames');
+      if (savedOpnames) opnameRecordsList = JSON.parse(savedOpnames);
+      const savedDisposals = demoGetItem('latisha_product_disposal_history');
+      if (savedDisposals) disposalRecordsList = JSON.parse(savedDisposals);
     } catch (e) {}
 
     const filteredTrx = transactions.filter((t) => {
@@ -2437,6 +2454,25 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
     const totalOmzet = filteredTrx.reduce((acc, t) => acc + t.total, 0);
     const totalHpp = filteredTrx.reduce((acc, t) => acc + t.hppTotal, 0);
     const grossProfit = totalOmzet - totalHpp;
+
+    const filteredOpnamesPrint = opnameRecordsList.filter((rec) => {
+      const d = normalizeTransactionDateToYMD(rec.date);
+      return (!startDate || d >= startDate) && (!endDate || d <= endDate);
+    });
+    const netOpnameNominalPrint = filteredOpnamesPrint.reduce(
+      (acc, r) => acc + (Number(r.netNominalDiff) || 0),
+      0
+    );
+
+    const unifiedDisposalPrint = buildUnifiedDisposalLossRecords({
+      disposalRecords: disposalRecordsList,
+      stockMutations: stockMutationsList,
+      medicines: medicinesList
+    });
+    const disposalLossPrint = summarizeDisposalLosses(unifiedDisposalPrint, startDate, endDate);
+    const totalDisposalLossPrint = disposalLossPrint.totalLoss;
+    const filteredDisposalsPrint = disposalLossPrint.filteredRecords;
+    const estimatedNetProfitPrint = grossProfit + netOpnameNominalPrint - totalDisposalLossPrint;
 
     // Build payroll + fee + Sunday overtime summary when tabParam === 'fee-medis'
     let payrollPrintSummary: ReturnType<typeof buildStaffPayrollSummary> | null = null;
@@ -2574,6 +2610,8 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
         {renderFloatingTopBar(
           tabParam === 'fee-medis'
             ? 'Rekap Gaji, Fee, dan Lembur Hari Minggu'
+            : tabParam === 'kerugian-pemusnahan'
+            ? 'Laporan Beban Kerugian Pemusnahan Obat (HPP)'
             : 'Laporan Keuangan & Rekapitulasi'
         )}
 
@@ -2608,6 +2646,8 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
               <div className="mt-2 inline-block px-4 py-1 bg-emerald-50 text-emerald-900 rounded-full font-black text-xs uppercase border border-emerald-300">
                 {tabParam === 'fee-medis'
                   ? 'REKAPITULASI GAJI, FEE LAYANAN MEDIS, DAN LEMBUR HARI MINGGU'
+                  : tabParam === 'kerugian-pemusnahan'
+                  ? 'LAPORAN BEBAN KERUGIAN PEMUSNAHAN OBAT ED / RUSAK (HPP)'
                   : 'LAPORAN KEUANGAN RESMI & REKAPITULASI PELAYANAN'}
               </div>
               <p className="text-[10px] text-slate-500 font-bold mt-1">
@@ -2715,28 +2755,148 @@ export const PrintView: React.FC<PrintViewProps> = ({ mode, searchParams }) => {
                 </table>
               </div>
             </>
-          ) : (
+          ) : tabParam === 'kerugian-pemusnahan' ? (
             <>
               <div className="grid grid-cols-3 gap-3 text-center">
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                  <span className="text-[10px] text-slate-500 uppercase block font-bold">Total Omzet Penjualan</span>
+                  <span className="text-[10px] text-slate-500 uppercase block font-bold">Total Berita Acara</span>
                   <span className="text-base font-black font-mono text-slate-900 mt-1 block">
+                    {filteredDisposalsPrint.length} Dokumen BA
+                  </span>
+                </div>
+                <div className="p-3 bg-amber-50 rounded-xl border border-amber-200">
+                  <span className="text-[10px] text-amber-800 uppercase block font-bold">Total Item / Unit</span>
+                  <span className="text-base font-black font-mono text-amber-900 mt-1 block">
+                    {disposalLossPrint.totalItems} Item / {disposalLossPrint.totalQty.toLocaleString('id-ID')} Unit
+                  </span>
+                </div>
+                <div className="p-3 bg-rose-50 rounded-xl border border-rose-200">
+                  <span className="text-[10px] text-rose-800 uppercase block font-bold">Total Beban Kerugian (HPP)</span>
+                  <span className="text-base font-black font-mono text-rose-800 mt-1 block">
+                    -Rp {totalDisposalLossPrint.toLocaleString('id-ID')}
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <h3 className="font-bold text-xs uppercase tracking-wider text-slate-800">
+                  Rincian Beban Kerugian Pemusnahan Obat ED / Rusak:
+                </h3>
+                {filteredDisposalsPrint.length === 0 ? (
+                  <p className="text-center text-slate-500 py-6 border border-dashed rounded-xl">
+                    Tidak ada catatan pemusnahan obat pada periode {startDate} s.d. {endDate}.
+                  </p>
+                ) : (
+                  <table className="w-full text-left text-xs border border-collapse">
+                    <thead className="bg-slate-100 font-bold text-[10px] uppercase text-slate-700">
+                      <tr>
+                        <th className="p-2 border">No. Berita Acara</th>
+                        <th className="p-2 border">Tanggal</th>
+                        <th className="p-2 border">Metode &amp; Petugas</th>
+                        <th className="p-2 border text-center">Item / Unit</th>
+                        <th className="p-2 border text-right">Beban Kerugian (HPP)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y text-slate-700 font-medium">
+                      {filteredDisposalsPrint.map((rec) => {
+                        const recLoss = computeDisposalRecordTotalLoss(rec);
+                        return (
+                          <tr key={rec.id} className="border-b">
+                            <td className="p-2 border font-mono font-bold text-rose-800">{rec.baNumber}</td>
+                            <td className="p-2 border font-mono">{rec.date}</td>
+                            <td className="p-2 border">
+                              <span className="font-bold text-slate-900 block">{rec.method}</span>
+                              <span className="text-[10px] text-slate-500">Petugas: {rec.petugas} · Saksi: {rec.witness}</span>
+                            </td>
+                            <td className="p-2 border text-center font-mono">
+                              {rec.totalItems} / {rec.totalQty.toLocaleString('id-ID')}
+                            </td>
+                            <td className="p-2 border text-right font-mono font-bold text-rose-700">
+                              -Rp {recLoss.toLocaleString('id-ID')}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot>
+                      <tr className="bg-rose-50 font-black border-t-2 border-rose-200">
+                        <td colSpan={4} className="p-2 border text-right uppercase text-[10px] text-rose-900">
+                          TOTAL BEBAN KERUGIAN PEMUSNAHAN (HPP):
+                        </td>
+                        <td className="p-2 border text-right font-mono text-rose-800">
+                          -Rp {totalDisposalLossPrint.toLocaleString('id-ID')}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                )}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                  <span className="text-[10px] text-slate-500 uppercase block font-bold">Total Omzet Penjualan</span>
+                  <span className="text-sm font-black font-mono text-slate-900 mt-1 block">
                     Rp {totalOmzet.toLocaleString('id-ID')}
                   </span>
                 </div>
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
                   <span className="text-[10px] text-slate-500 uppercase block font-bold">HPP Obat Terjual (COGS)</span>
-                  <span className="text-base font-black font-mono text-amber-800 mt-1 block">
+                  <span className="text-sm font-black font-mono text-amber-800 mt-1 block">
                     Rp {totalHpp.toLocaleString('id-ID')}
                   </span>
                 </div>
+                <div className="p-3 bg-rose-50 rounded-xl border border-rose-200">
+                  <span className="text-[10px] text-rose-800 uppercase block font-bold">Beban Pemusnahan (HPP)</span>
+                  <span className="text-sm font-black font-mono text-rose-700 mt-1 block">
+                    {totalDisposalLossPrint > 0 ? '-' : ''}Rp {totalDisposalLossPrint.toLocaleString('id-ID')}
+                  </span>
+                </div>
                 <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
-                  <span className="text-[10px] text-emerald-800 uppercase block font-bold">Laba Kotor (Gross Profit)</span>
-                  <span className="text-base font-black font-mono text-emerald-800 mt-1 block">
-                    Rp {grossProfit.toLocaleString('id-ID')}
+                  <span className="text-[10px] text-emerald-800 uppercase block font-bold">Laba Setelah Pemusnahan</span>
+                  <span className={`text-sm font-black font-mono mt-1 block ${estimatedNetProfitPrint < 0 ? 'text-rose-700' : 'text-emerald-800'}`}>
+                    {estimatedNetProfitPrint < 0 ? '-' : ''}Rp {Math.abs(estimatedNetProfitPrint).toLocaleString('id-ID')}
                   </span>
                 </div>
               </div>
+
+              {filteredDisposalsPrint.length > 0 && (
+                <div className="space-y-2">
+                  <h3 className="font-bold text-xs uppercase tracking-wider text-rose-800">
+                    Beban Kerugian Pemusnahan Obat ED / Rusak (HPP):
+                  </h3>
+                  <table className="w-full text-left text-xs border border-collapse">
+                    <thead className="bg-rose-50 font-bold text-[10px] uppercase text-rose-900">
+                      <tr>
+                        <th className="p-2 border">No. Berita Acara</th>
+                        <th className="p-2 border">Tanggal</th>
+                        <th className="p-2 border">Metode &amp; Petugas</th>
+                        <th className="p-2 border text-center">Item / Unit</th>
+                        <th className="p-2 border text-right">Beban Kerugian (HPP)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y text-slate-700 font-medium">
+                      {filteredDisposalsPrint.map((rec) => {
+                        const recLoss = computeDisposalRecordTotalLoss(rec);
+                        return (
+                          <tr key={rec.id} className="border-b">
+                            <td className="p-2 border font-mono font-bold text-rose-700">{rec.baNumber}</td>
+                            <td className="p-2 border font-mono">{rec.date}</td>
+                            <td className="p-2 border">{rec.method} · {rec.petugas}</td>
+                            <td className="p-2 border text-center font-mono">
+                              {rec.totalItems} / {rec.totalQty.toLocaleString('id-ID')}
+                            </td>
+                            <td className="p-2 border text-right font-mono font-bold text-rose-700">
+                              -Rp {recLoss.toLocaleString('id-ID')}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
 
               <div className="space-y-2">
                 <h3 className="font-bold text-xs uppercase tracking-wider text-slate-800">

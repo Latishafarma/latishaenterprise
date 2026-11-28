@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Search,
   Plus,
@@ -22,8 +23,10 @@ import {
   PurchaseInvoice,
   Branch,
   EdAlertThreshold,
-  ProductDisposalRecord
+  ProductDisposalRecord,
+  StockMutation
 } from '../types';
+import { getDeletedDisposalBaSet } from '../utils/disposalLossHelper';
 import {
   useFacilityProfiles,
   getSavedPharmacyProfile,
@@ -114,6 +117,7 @@ interface ProductManagementViewProps {
   suppliers?: Supplier[];
   purchaseInvoices?: PurchaseInvoice[];
   disposalHistory?: ProductDisposalRecord[];
+  stockMutations?: StockMutation[];
   currentBranch: Branch;
   userName: string;
   onProcessDisposal: (payload: DisposalActionPayload) =>
@@ -320,6 +324,7 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
   suppliers = [],
   purchaseInvoices = [],
   disposalHistory: disposalHistoryProp,
+  stockMutations = [],
   currentBranch,
   userName,
   onProcessDisposal,
@@ -434,6 +439,19 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
     | null
   >(null);
   const [isEditingBaMeta, setIsEditingBaMeta] = useState<boolean>(false);
+
+  // Isolate document.body print styling whenever the BA / List print preview modal is open
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    if (printPreviewDoc) {
+      document.body.classList.add('printing-isolated-modal');
+    } else {
+      document.body.classList.remove('printing-isolated-modal');
+    }
+    return () => {
+      document.body.classList.remove('printing-isolated-modal');
+    };
+  }, [printPreviewDoc]);
 
   // Fallback local history if rendered standalone without App.tsx Supabase-synced prop
   const [localDisposalHistory, setLocalDisposalHistory] = useState<DisposalHistoryRecord[]>(() => {
@@ -565,6 +583,107 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
     });
   };
 
+  // Build normalized lookup of products/batches that have already undergone Pemusnahan
+  // so disposed products/batches never reappear in the Data Kelola Produk table.
+  const disposedMatcher = useMemo(() => {
+    const normalizeBatchKey = (raw?: string): string => {
+      const clean = String(raw || '').trim().toLowerCase();
+      return clean === '-' || clean === 'n/a' ? '' : clean;
+    };
+    const normalizeExpKey = (raw?: string): string => {
+      const parsed = parseExpiryDate(raw);
+      if (parsed) return parsed.iso;
+      return String(raw || '').trim();
+    };
+
+    const byBatchId = new Set<string>();
+    const byMedBatchExp = new Set<string>();
+    const byMedExpNoBatch = new Set<string>();
+    const byMedExpAnyBatch = new Set<string>();
+    const byMedNoExp = new Set<string>();
+
+    const registerDisposedItem = (item: {
+      medicineId?: string;
+      batchId?: string;
+      batchNo?: string;
+      expDate?: string;
+    }) => {
+      const medId = String(item.medicineId || '').trim();
+      if (!medId) return;
+      const bId = String(item.batchId || '').trim();
+      const bNo = normalizeBatchKey(item.batchNo);
+      const expIso = normalizeExpKey(item.expDate);
+
+      if (bId) {
+        byBatchId.add(`${medId}::${bId}`);
+      }
+      if (expIso) {
+        byMedBatchExp.add(`${medId}::${bNo}::${expIso}`);
+        byMedExpAnyBatch.add(`${medId}::${expIso}`);
+        if (!bNo) {
+          byMedExpNoBatch.add(`${medId}::${expIso}`);
+        }
+      } else {
+        byMedNoExp.add(medId);
+      }
+    };
+
+    disposalHistory.forEach((rec) => {
+      (rec.items || []).forEach((it) => {
+        registerDisposedItem({
+          medicineId: it.medicineId,
+          batchId: it.batchId,
+          batchNo: it.batchNo,
+          expDate: it.expDate
+        });
+      });
+    });
+
+    const deletedBaSet = getDeletedDisposalBaSet();
+    stockMutations.forEach((mut) => {
+      if (mut.type !== 'PEMUSNAHAN') return;
+      const refKey = String(mut.refNo || '').trim().toUpperCase();
+      if (refKey && deletedBaSet.has(refKey)) return;
+      if (Array.isArray(mut.batchDetails) && mut.batchDetails.length > 0) {
+        mut.batchDetails.forEach((bd) => {
+          registerDisposedItem({
+            medicineId: mut.medicineId,
+            batchNo: bd.batchNo || mut.batchNo,
+            expDate: bd.expDate || mut.expDate
+          });
+        });
+      } else {
+        registerDisposedItem({
+          medicineId: mut.medicineId,
+          batchNo: mut.batchNo,
+          expDate: mut.expDate
+        });
+      }
+    });
+
+    return (candidate: {
+      medicineId: string;
+      batchId?: string;
+      batchNo?: string;
+      expDateIso: string;
+      stock: number;
+    }): boolean => {
+      const medId = String(candidate.medicineId || '').trim();
+      if (!medId) return false;
+      const bId = String(candidate.batchId || '').trim();
+      const bNo = normalizeBatchKey(candidate.batchNo);
+      const expIso = String(candidate.expDateIso || '').trim();
+
+      if (bId && byBatchId.has(`${medId}::${bId}`)) return true;
+      if (expIso && byMedBatchExp.has(`${medId}::${bNo}::${expIso}`)) return true;
+      if (expIso && (!bNo ? byMedExpAnyBatch.has(`${medId}::${expIso}`) : byMedExpNoBatch.has(`${medId}::${expIso}`))) {
+        return true;
+      }
+      if (candidate.stock <= 0 && byMedNoExp.has(medId)) return true;
+      return false;
+    };
+  }, [disposalHistory, stockMutations]);
+
   // Compute all Master Obat rows that have a valid ED and fall into ED (<0) or Near-ED (<= activeWindowDays)
   const { allMonitoredRows, totalMedicinesWithEd } = useMemo(() => {
     const now = new Date();
@@ -593,6 +712,18 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
           } else if (sumValidBatchStock === 0 && medStockNum > 0 && idx === 0) {
             batchStock = medStockNum;
           }
+          const resolvedBatchNo = (b.batchNo || med.batchNo || '-').trim() || '-';
+          if (
+            disposedMatcher({
+              medicineId: med.id,
+              batchId: b.id,
+              batchNo: resolvedBatchNo,
+              expDateIso: parsed.iso,
+              stock: batchStock
+            })
+          ) {
+            return;
+          }
           const hpp = Number(med.hpp) || 0;
           rows.push({
             rowKey: `${med.id}::${b.id || idx}::${parsed.iso}`,
@@ -605,7 +736,7 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
             rack: (med.rack || '').trim() || '-',
             supplier: resolvedSupplier,
             batchId: b.id,
-            batchNo: (b.batchNo || med.batchNo || '-').trim() || '-',
+            batchNo: resolvedBatchNo,
             expDate: b.expDate,
             expDateIso: parsed.iso,
             daysLeft,
@@ -624,6 +755,17 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
       const daysLeft = Math.round((parsedTop.date.getTime() - todayStart) / 86400000);
       if (daysLeft > activeWindowDays) return;
       const medStock = Number(med.stock) || 0;
+      const resolvedTopBatchNo = (med.batchNo || '-').trim() || '-';
+      if (
+        disposedMatcher({
+          medicineId: med.id,
+          batchNo: resolvedTopBatchNo,
+          expDateIso: parsedTop.iso,
+          stock: medStock
+        })
+      ) {
+        return;
+      }
       const hpp = Number(med.hpp) || 0;
       rows.push({
         rowKey: `${med.id}::main::${parsedTop.iso}`,
@@ -635,7 +777,7 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
         unit: med.satuanKecil || med.unit || 'Pcs',
         rack: (med.rack || '').trim() || '-',
         supplier: resolvedSupplier,
-        batchNo: (med.batchNo || '-').trim() || '-',
+        batchNo: resolvedTopBatchNo,
         expDate: med.expDate,
         expDateIso: parsedTop.iso,
         daysLeft,
@@ -648,7 +790,7 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
 
     rows.sort((a, b) => a.daysLeft - b.daysLeft || a.name.localeCompare(b.name));
     return { allMonitoredRows: rows, totalMedicinesWithEd: withEdCount };
-  }, [medicines, activeWindowDays, supplierByMedId]);
+  }, [medicines, activeWindowDays, supplierByMedId, disposedMatcher]);
 
   const supplierOptions = useMemo(() => {
     const set = new Set<string>();
@@ -943,26 +1085,27 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
           persistLocalDisposalHistory([fallbackEntry, ...localDisposalHistory]);
         }
 
-        const totalDeductedDisposal = payloadItems.reduce((s, it) => s + it.qty, 0);
+        const totalDeductedDisposal = res?.record?.totalQty ?? payloadItems.reduce((s, it) => s + it.qty, 0);
+        const totalLossDisposal = res?.record?.totalValue ?? payloadItems.reduce((s, it) => s + it.subtotal, 0);
         setSelectedRowKeys(new Set());
         setActionModalMode(null);
 
         if (res?.needsDisposalTableSetup) {
           setNotice({
             type: 'success',
-            text: `Pemusnahan ${payload.baNumber} berhasil (${payloadItems.length} item, ${totalDeductedDisposal.toLocaleString('id-ID')} unit). Stok Master Obat & Kartu Stok tersinkron ke Supabase; jalankan Skema SQL untuk mengaktifkan arsip cloud tabel ${disposalTableInput}.`
+            text: `Pemusnahan ${payload.baNumber} berhasil (${payloadItems.length} item, ${totalDeductedDisposal.toLocaleString('id-ID')} unit). Beban kerugian HPP Rp ${totalLossDisposal.toLocaleString('id-ID')} tercatat di Laporan Keuangan & stok tersinkron ke Supabase; jalankan Skema SQL untuk mengaktifkan arsip cloud tabel ${disposalTableInput}.`
           });
         } else if (res && res.disposalSyncOk === false && res.error) {
           setNotice({
             type: 'error',
-            text: `Pemusnahan ${payload.baNumber} tersimpan lokal & stok dikurangi, namun sinkronisasi Supabase tertunda: ${res.error}`
+            text: `Pemusnahan ${payload.baNumber} tersimpan lokal, stok dikurangi & beban kerugian HPP Rp ${totalLossDisposal.toLocaleString('id-ID')} tercatat di Laporan Keuangan, namun sinkronisasi Supabase tertunda: ${res.error}`
           });
         } else {
           setNotice({
             type: 'success',
             text: isDemoSandbox
-              ? `Pemusnahan ${payload.baNumber} berhasil diproses di Mode Demo (${payloadItems.length} item, ${totalDeductedDisposal.toLocaleString('id-ID')} unit dikurangi).`
-              : `Pemusnahan ${payload.baNumber} berhasil (${payloadItems.length} item, ${totalDeductedDisposal.toLocaleString('id-ID')} unit dikurangi). Stok Master Obat, Kartu Stok & Riwayat Pemusnahan tersinkronisasi ke Supabase.`
+              ? `Pemusnahan ${payload.baNumber} berhasil diproses di Mode Demo (${payloadItems.length} item, ${totalDeductedDisposal.toLocaleString('id-ID')} unit dikurangi, beban kerugian HPP Rp ${totalLossDisposal.toLocaleString('id-ID')} tercatat di Laporan Keuangan).`
+              : `Pemusnahan ${payload.baNumber} berhasil (${payloadItems.length} item, ${totalDeductedDisposal.toLocaleString('id-ID')} unit dikurangi). Beban kerugian HPP Rp ${totalLossDisposal.toLocaleString('id-ID')} otomatis tercatat di Laporan Keuangan & tersinkronisasi ke Supabase.`
           });
         }
       } finally {
@@ -1867,8 +2010,13 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
                       <td className="py-3 px-3 text-right font-mono tabular-nums whitespace-nowrap text-slate-800">
                         {rec.totalItems} item / {rec.totalQty.toLocaleString('id-ID')} unit
                       </td>
-                      <td className="py-3 px-3 text-right font-mono tabular-nums whitespace-nowrap font-semibold text-rose-700">
-                        Rp {rec.totalValue.toLocaleString('id-ID')}
+                      <td className="py-3 px-3 text-right whitespace-nowrap">
+                        <div className="font-mono tabular-nums font-semibold text-rose-700">
+                          Rp {rec.totalValue.toLocaleString('id-ID')}
+                        </div>
+                        <div className="text-[10px] font-medium text-emerald-700 mt-0.5">
+                          Tercatat di Laporan Keuangan
+                        </div>
                       </td>
                       <td className="py-3 px-4 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1.5">
@@ -2029,7 +2177,7 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
                 </h3>
                 <p className="text-[11px] text-slate-500 mt-0.5">
                   {actionModalMode === 'disposal'
-                    ? 'Stok pada Master Obat akan dikurangi dan dicatat pada Kartu Stok sebagai mutasi PEMUSNAHAN.'
+                    ? 'Stok pada Master Obat akan dikurangi, dicatat pada Kartu Stok (PEMUSNAHAN), dan total estimasi HPP otomatis tercatat sebagai Beban Kerugian di Laporan Keuangan (Laba Rugi).'
                     : 'Stok pada Master Obat akan dikurangi, dicatat pada Kartu Stok (RETUR PEMBELIAN), dan tersimpan di Riwayat Retur Pembelian.'}
                 </p>
               </div>
@@ -2364,10 +2512,12 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
       )}
 
       {/* Modal: Pratinjau Dokumen Cetak (Daftar ED / Berita Acara Pemusnahan Permenkes 73/2016) */}
-      {printPreviewDoc && (
-        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4 print:static print:inset-auto print:bg-white print:p-0 print:block">
+      {printPreviewDoc &&
+        typeof document !== 'undefined' &&
+        createPortal(
+        <div className="isolated-print-modal-root fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4 print:static print:inset-auto print:bg-white print:p-0 print:block">
           <div className="bg-white border border-slate-200 rounded-xl w-full max-w-4xl max-h-[92vh] flex flex-col shadow-xl overflow-hidden print:border-0 print:rounded-none print:shadow-none print:max-w-none print:max-h-none print:overflow-visible">
-            <div className="px-5 py-3.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 bg-slate-50 shrink-0 print:hidden">
+            <div className="no-print px-5 py-3.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 bg-slate-50 shrink-0 print:hidden">
               <div>
                 <h3 className="text-sm font-bold text-slate-900">
                   {printPreviewDoc.kind === 'list'
@@ -2428,7 +2578,7 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
 
             {/* Inline Quick Editor for BA Metadata (Saksi 1, Saksi 2, Lokasi, Metode) */}
             {printPreviewDoc.kind === 'disposal' && isEditingBaMeta && (
-              <div className="px-5 py-3.5 border-b border-slate-200 bg-sky-50/60 text-xs space-y-2.5 shrink-0 print:hidden">
+              <div className="no-print px-5 py-3.5 border-b border-slate-200 bg-sky-50/60 text-xs space-y-2.5 shrink-0 print:hidden">
                 <div className="font-semibold text-slate-800">
                   Lengkapi Identitas Saksi &amp; Tempat Pemusnahan (Otomatis Tersimpan)
                 </div>
@@ -3049,7 +3199,8 @@ export const ProductManagementView: React.FC<ProductManagementViewProps> = ({
               )}
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Modal: Skema SQL & Pengaturan Tabel Supabase Kelola Produk */}
